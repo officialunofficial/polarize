@@ -1,0 +1,27 @@
+[package]
+name = "polarize"
+description = "polarize MCP server: a stdio Model Context Protocol server that automates real native macOS AppKit applications (screenshot, accessibility-tree inspection, synthetic input). Thin binary that wires MCP tool calls to polarize-core/polarize-macos."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "polarize"
+path = "src/main.rs"
+
+[dependencies]
+polarize-core = { path = "../../crates/polarize-core" }
+polarize-macos = { path = "../../crates/polarize-macos" }
+# `rmcp`'s "macros" feature re-exports `rmcp-macros`'s `#[tool]`/
+# `#[tool_router]`/`#[tool_handler]` attributes as `rmcp::{tool, ...}` —
+# see `rmcp::lib`'s `pub use rmcp_macros::*`. A direct `rmcp-macros`
+# dependency is therefore unnecessary; depending on it separately here
+# resolved a second, version-mismatched copy of the proc-macro crate
+# alongside the one `rmcp` pulls in itself (see the server-phase report
+# for the concrete versions).
+rmcp = { version = "3.1.1", features = ["server", "macros", "transport-io"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

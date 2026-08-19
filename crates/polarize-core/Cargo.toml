@@ -1,0 +1,17 @@
+[package]
+name = "polarize-core"
+description = "Platform-agnostic logic for polarize: coordinate math, the accessibility-tree data model, and MCP tool schemas. No macOS-only dependencies."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+base64 = "0.22"
+schemars = "1.0"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"

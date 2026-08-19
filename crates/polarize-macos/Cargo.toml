@@ -1,0 +1,18 @@
+[package]
+name = "polarize-macos"
+description = "macOS AppKit bindings implementing polarize-core's traits: screen capture, accessibility-tree inspection, and synthetic input, via the objc2 umbrella crates. macOS-only; its real native-API behavior is not covered by automated tests (see docs/INVARIANTS.md)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+polarize-core = { path = "../polarize-core" }
+screencapturekit = { version = "8.0.1", features = ["macos_14_0"] }
+objc2-accessibility = "0.3"
+objc2-core-graphics = "0.3"
+objc2-app-kit = "0.3"
+objc2-core-foundation = "0.3"
+objc2-foundation = "0.3"
+objc2 = "0.6"

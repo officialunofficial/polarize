@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/polarize-core", "crates/polarize-macos", "apps/polarize"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/officialunofficial/polarize"
+rust-version = "1.97"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# For profiling with samply (`cargo build --profile profiling -p polarize`,
+# then `samply record ./target/profiling/polarize`): same optimizations as
+# release, but with full debug info for symbolication. Kept separate from
+# `release` so the shipped binary isn't bloated with debug sections.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
