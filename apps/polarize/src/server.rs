@@ -15,22 +15,17 @@
 //!
 //! ## Permission errors surface, but are not pre-flighted here
 //!
-//! `polarize-macos`'s `describe`/`tap`/`keyboard` implementations already
-//! check the real TCC permission before making their native call
-//! (`AXIsProcessTrusted` / `CGPreflightPostEventAccess`) and return
-//! `PolarizeError::Permission` when it is not granted — that error flows
-//! through `to_error_data` below like any other. `screenshot`'s
-//! `ScreenCaptureKit` path does not perform an equivalent
-//! `CGPreflightScreenCaptureAccess`-style check yet (see the
-//! server-phase report), so a missing Screen Recording grant currently
-//! surfaces as whatever raw error `SCScreenshotManager` itself returns,
-//! not a clean `PolarizeError::Permission`. This server does not paper
-//! over that gap with its own permission pre-check: `polarize-core`'s
-//! `permission` module only ever *decides* whether a status list
-//! satisfies a tool's requirement (PINV-2) — nothing in this codebase
-//! yet queries a real Screen Recording status to build that list, and
-//! inventing one here would live in the wrong crate (native TCC queries
-//! belong in `polarize-macos`, not this thin server).
+//! All four `polarize-macos` implementations check their real TCC
+//! permission before making a native call (`AXIsProcessTrusted` for
+//! `describe`/`tap`/`keyboard`, `CGPreflightScreenCaptureAccess` for
+//! `screenshot`). Each returns `PolarizeError::Permission` when its
+//! permission is not granted. That error flows through `to_error_data`
+//! below like any other.
+//!
+//! This server does not add its own permission pre-check on top.
+//! `polarize-core`'s `permission` module only ever *decides* whether a
+//! status list satisfies a tool's requirement (PINV-2). Native TCC
+//! queries belong in `polarize-macos`, not in this thin server.
 
 use polarize_core::error::PolarizeError;
 use polarize_core::orchestrate;
@@ -161,25 +156,29 @@ impl PolarizeServer {
     }
 
     /// Posts synthetic key events: either types a literal string, or
-    /// presses one named key with optional modifiers.
+    /// presses one named key with optional modifiers. When the request
+    /// names a `target` app, activates that app first — see PINV-14 in
+    /// `docs/INVARIANTS.md`.
     #[tool(name = "keyboard", input_schema = keyboard_input_schema())]
     fn keyboard(
         &self,
         Parameters(request): Parameters<KeyboardRequest>,
     ) -> Result<Json<KeyboardResponse>, ErrorData> {
-        orchestrate::perform_keyboard(&self.input, &request)
+        orchestrate::perform_keyboard(&self.window, &self.input, &request)
             .map(Json)
             .map_err(to_error_data)
     }
 }
 
 /// `#[tool_router(server_handler)]` would emit this `impl ServerHandler`
-/// for us, but its shorthand cannot pass a server `name` — it would fall
-/// back to `Implementation::from_build_env()`, which resolves at
-/// `rmcp`'s own compile time (not this crate's) and reports the server
-/// as `"rmcp"` to every MCP client. Writing this block out explicitly
-/// lets `#[tool_handler]` splice `name = "polarize"` into *our* crate's
-/// compilation, so `env!("CARGO_PKG_VERSION")` (used for the omitted
-/// `version`) resolves to `apps/polarize`'s own version too.
+/// for us. Its shorthand cannot pass a server `name`, though. Without
+/// one, it falls back to `Implementation::from_build_env()`. That
+/// resolves at `rmcp`'s own compile time, not this crate's, and would
+/// report the server as `"rmcp"` to every MCP client.
+///
+/// Writing this block out explicitly fixes both problems at once:
+/// `#[tool_handler]` splices `name = "polarize"` into *our* crate's
+/// compilation, and the omitted `version` field's `env!("CARGO_PKG_VERSION")`
+/// then resolves to `apps/polarize`'s own version too.
 #[tool_handler(name = "polarize")]
 impl ServerHandler for PolarizeServer {}

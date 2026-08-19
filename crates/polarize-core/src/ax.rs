@@ -58,16 +58,19 @@ pub struct FlatAxNode {
 
 /// # PINV-3: flatten is pre-order and depth-accurate
 ///
-/// - Always: [`flatten`] visits `root` before any of its descendants,
-///   visits a node's children in their original order, and records each
-///   node's depth as the number of ancestors above it (root = 0).
-/// - Because: the `describe` tool's consumer (an agent picking a tap
-///   target) relies on depth to render indentation and on pre-order to
-///   read a subtree as a contiguous run — both silently break if a
-///   traversal bug reorders children or miscounts depth, without ever
-///   producing an error.
-/// - If violated: `describe` output renders as a flat or mis-indented
-///   list, so the agent using it cannot tell which elements nest inside
+/// - Always: [`flatten`] visits `root` before any of its descendants. It
+///   visits a node's children in their original order. It records each
+///   node's depth as the number of ancestors above it, so the root is
+///   depth `0`.
+/// - Because: [`crate::orchestrate::perform_describe`] embeds
+///   [`format_tree`]'s rendering directly in `DescribeResponse::formatted`
+///   (see `crate::schema`'s PINV-9). `format_tree` renders through
+///   `flatten`, so depth must be correct for its indentation to make
+///   sense, and pre-order must hold for a subtree to read as one
+///   contiguous run. A traversal bug could reorder children or miscount
+///   depth without ever producing an error.
+/// - If violated: `describe`'s `formatted` output renders as a flat or
+///   mis-indented list. A reader cannot tell which elements nest inside
 ///   which container.
 pub fn flatten(root: &AxNode) -> Vec<FlatAxNode> {
     let mut out = Vec::new();

@@ -10,28 +10,29 @@ cargo clippy --workspace -- -D warnings
 ```
 
 This project only builds on macOS: `polarize-macos` links real macOS
-frameworks (ScreenCaptureKit, AppKit, and friends). A `rust-toolchain.toml`
-pins the `stable` channel, so `cargo build`/`cargo test` resolve a
-correct toolchain regardless of your machine's ambient rustup default
-(if you're on an Xcode-beta-only machine, running only a nightly
-toolchain by default is a real thing that has happened here before).
+frameworks (ScreenCaptureKit, AppKit, and friends). A
+`rust-toolchain.toml` pins the `stable` channel. `cargo build`/`cargo
+test` then resolve a correct toolchain regardless of your machine's
+ambient rustup default. An Xcode-beta-only machine running only a
+nightly toolchain by default is a real thing that has happened here
+before.
 
 If the built binary fails to launch with `dyld: Library not loaded:
 @rpath/libswift_Concurrency.dylib`, that's a Swift-runtime resolution
-quirk tied to an Xcode-beta-only toolchain select — see README's "Known
+quirk tied to an Xcode-beta-only toolchain select. See README's "Known
 runtime issue" section for the workaround. It's environment-specific,
-not a code or `Cargo.toml` defect; don't "fix" it by baking a
+not a code or `Cargo.toml` defect. Don't "fix" it by baking a
 machine-specific path into the repo.
 
 ## `polarize-macos` needs manual verification
 
 `cargo test --workspace` exercises `polarize-core` in full, plus the
-pure sub-logic `polarize-macos` factors out of its native calls
-(app-identity matching, modifier/keycode/click-sequence mapping, and
-pixel-to-fraction frame clamping — see `docs/INVARIANTS.md`). It does
+pure sub-logic `polarize-macos` factors out of its native calls —
+app-identity matching, modifier/keycode/click-sequence mapping, and
+pixel-to-fraction frame clamping (see `docs/INVARIANTS.md`). It does
 **not** exercise any real native call. No CI runner can grant Screen
 Recording or Accessibility TCC permission, or verify pixel/AX content,
-headlessly — so `polarize-macos`'s real native-API behavior has no
+headlessly. `polarize-macos`'s real native-API behavior has no
 automated coverage anywhere, in this repo or in CI.
 
 If your PR touches `polarize-macos`, verify it manually on a real macOS

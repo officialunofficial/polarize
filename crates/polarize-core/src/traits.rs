@@ -67,8 +67,11 @@ pub trait InputSynthesizer {
 /// Enumerates apps/windows and resolves their pixel geometry.
 /// Implemented by `polarize-macos` over AppKit (objc2-app-kit).
 pub trait WindowManager {
-    /// The frontmost app, used when a tool call omits an explicit app.
-    fn frontmost_app(&self) -> Result<AppIdentifier, PolarizeError>;
+    /// Brings `app` to the front. [`crate::orchestrate::perform_keyboard`]
+    /// calls this first when a request names a `target` app, so typed
+    /// text and key presses reach that app even when it did not already
+    /// have focus.
+    fn activate_app(&self, app: &AppIdentifier) -> Result<(), PolarizeError>;
 
     /// The pixel size of the screen or window a
     /// [`crate::schema::ScreenshotTarget`] refers to — the size

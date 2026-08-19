@@ -2,15 +2,15 @@
 //!
 //! Real native calls throughout; see the crate-level "what is and is not
 //! verified" note. In particular: no click or keystroke posted by this
-//! module has been observed landing on a real screen in this environment
-//! (no display, no Input Monitoring/Accessibility permission to grant), so
-//! a human on a real macOS session needs to confirm a `tap`/`keyboard` call
-//! visibly does what it claims — pure event construction succeeding is not
-//! the same as the target app receiving and acting on the event.
+//! module has landed on a real screen in this environment. There is no
+//! display here, and no Input Monitoring or Accessibility permission to
+//! grant. A human on a real macOS session must confirm a `tap`/`keyboard`
+//! call visibly does what it claims. Pure event construction succeeding
+//! is not the same as the target app receiving and acting on the event.
 //!
-//! The pure pieces this module delegates to — [`crate::keymap`]'s
-//! modifier→flags mapping, keycode table, and multi-click event sequence —
-//! are unit-tested there.
+//! The pure pieces this module delegates to are unit-tested in
+//! [`crate::keymap`]: the modifier-to-flags mapping, the keycode table,
+//! and the multi-click event sequence.
 
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
@@ -29,14 +29,23 @@ use crate::keymap;
 #[derive(Debug, Default)]
 pub struct MacInputSynthesizer;
 
-fn permission_denied() -> PolarizeError {
-    // `CGPreflightPostEventAccess` collapses "never asked" and "explicitly
-    // denied" into the same `false`, same caveat as `AXIsProcessTrusted`
-    // in `accessibility.rs`. See PINV-10/PINV-11 in docs/INVARIANTS.md.
-    PolarizeError::Permission(PermissionError::NotGranted {
-        kind: PermissionKind::Accessibility,
-        state: PermissionState::NotDetermined,
-    })
+/// Checks Accessibility permission before any `CGEvent` post. Every
+/// [`InputSynthesizer`] method calls this first — see PINV-10/PINV-11 in
+/// `docs/INVARIANTS.md`.
+///
+/// `CGPreflightPostEventAccess` collapses "never asked" and "explicitly
+/// denied" into the same `false`, same caveat as `AXIsProcessTrusted` in
+/// `accessibility.rs`. `NotDetermined` is the more conservative of the two
+/// to report when this method cannot tell them apart.
+fn ensure_input_permission() -> Result<(), PolarizeError> {
+    if CGPreflightPostEventAccess() {
+        Ok(())
+    } else {
+        Err(PolarizeError::Permission(PermissionError::NotGranted {
+            kind: PermissionKind::Accessibility,
+            state: PermissionState::NotDetermined,
+        }))
+    }
 }
 
 fn event_source() -> Result<objc2_core_foundation::CFRetained<CGEventSource>, PolarizeError> {
@@ -46,9 +55,7 @@ fn event_source() -> Result<objc2_core_foundation::CFRetained<CGEventSource>, Po
 
 impl InputSynthesizer for MacInputSynthesizer {
     fn click_at_pixel(&self, point: PixelPoint, click_count: u8) -> Result<(), PolarizeError> {
-        if !CGPreflightPostEventAccess() {
-            return Err(permission_denied());
-        }
+        ensure_input_permission()?;
         let source = event_source()?;
         let cg_point = CGPoint {
             x: point.x,
@@ -72,9 +79,7 @@ impl InputSynthesizer for MacInputSynthesizer {
     }
 
     fn type_text(&self, text: &str) -> Result<(), PolarizeError> {
-        if !CGPreflightPostEventAccess() {
-            return Err(permission_denied());
-        }
+        ensure_input_permission()?;
         let source = event_source()?;
         // Virtual key `0` plus an explicit Unicode payload is the standard
         // way to post arbitrary text via `CGEvent` without needing a
@@ -100,9 +105,7 @@ impl InputSynthesizer for MacInputSynthesizer {
     }
 
     fn press_key(&self, key: NamedKey, modifiers: &[Modifier]) -> Result<(), PolarizeError> {
-        if !CGPreflightPostEventAccess() {
-            return Err(permission_denied());
-        }
+        ensure_input_permission()?;
         let source = event_source()?;
         let keycode = keymap::named_key_to_keycode(key);
         let flags = keymap::modifiers_to_cgevent_flags(modifiers);

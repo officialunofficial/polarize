@@ -2,12 +2,14 @@
 //!
 //! Real native calls throughout; see the crate-level "what is and is not
 //! verified" note. In particular: this has never captured a real frame in
-//! this environment (no display, no Screen Recording permission to grant),
-//! so a human on a real macOS session needs to confirm the returned PNG
-//! bytes actually decode to a recognizable screenshot, not just that a
-//! `Result` came back `Ok`.
+//! this environment. There is no display here, and no Screen Recording
+//! permission to grant. A human on a real macOS session must confirm the
+//! returned PNG bytes decode to a recognizable screenshot, not just that
+//! a `Result` came back `Ok`.
 
+use objc2_core_graphics::CGPreflightScreenCaptureAccess;
 use polarize_core::error::PolarizeError;
+use polarize_core::permission::{PermissionError, PermissionKind, PermissionState};
 use polarize_core::schema::AppIdentifier;
 use polarize_core::traits::{CapturedImage, ScreenCapture};
 use screencapturekit::screenshot_manager::SCScreenshotManager;
@@ -17,12 +19,33 @@ use screencapturekit::stream::content_filter::SCContentFilter;
 use crate::content;
 use crate::window::resolve_running_app;
 
+/// Checks Screen Recording permission before any `ScreenCaptureKit` call.
+/// Both [`ScreenCapture`] methods below call this first — see PINV-10 in
+/// `docs/INVARIANTS.md`, which now covers `screenshot` too.
+///
+/// `CGPreflightScreenCaptureAccess` collapses "never asked" and
+/// "explicitly denied" into the same `false`, the same caveat
+/// `accessibility.rs` and `input.rs` document for their own preflight
+/// checks. `NotDetermined` is the more conservative of the two to report
+/// when this method cannot tell them apart.
+fn ensure_screen_recording_permission() -> Result<(), PolarizeError> {
+    if CGPreflightScreenCaptureAccess() {
+        Ok(())
+    } else {
+        Err(PolarizeError::Permission(PermissionError::NotGranted {
+            kind: PermissionKind::ScreenRecording,
+            state: PermissionState::NotDetermined,
+        }))
+    }
+}
+
 /// `ScreenCapture` implementation over `ScreenCaptureKit`.
 #[derive(Debug, Default)]
 pub struct MacScreenCapture;
 
 impl ScreenCapture for MacScreenCapture {
     fn capture_screen(&self, display_id: Option<u32>) -> Result<CapturedImage, PolarizeError> {
+        ensure_screen_recording_permission()?;
         let content = content::shareable_content()?;
         let display = content::find_display(&content, display_id)?;
         let filter = SCContentFilter::create()
@@ -40,6 +63,7 @@ impl ScreenCapture for MacScreenCapture {
         app: &AppIdentifier,
         window_title: Option<&str>,
     ) -> Result<CapturedImage, PolarizeError> {
+        ensure_screen_recording_permission()?;
         let running = resolve_running_app(Some(app))?;
         let pid = running.processIdentifier();
         let content = content::shareable_content()?;
@@ -56,11 +80,12 @@ impl ScreenCapture for MacScreenCapture {
 
 /// Captures via `SCScreenshotManager`, then round-trips the resulting
 /// `CGImage` through `ImageIO`'s real PNG encoder (`save_png`, backed by
-/// `CGImageDestination`) to get PNG bytes: `screencapturekit`/`apple-cf`
-/// expose PNG export only as "write to a file", not "encode to an in-memory
-/// buffer", so a uniquely-named temp file is the bridge — an internal
-/// implementation detail, invisible to `polarize-core`'s base64-in-response
-/// schema (see `schema.rs`'s design-decision doc comment).
+/// `CGImageDestination`) to get PNG bytes. `screencapturekit`/`apple-cf`
+/// expose PNG export only as "write to a file", not "encode to an
+/// in-memory buffer". A uniquely named temp file is the bridge between
+/// them. This is an internal implementation detail: it stays invisible to
+/// `polarize-core`'s base64-in-response schema (see `schema.rs`'s
+/// design-decision doc comment).
 fn capture_and_encode(
     filter: &SCContentFilter,
     config: &SCStreamConfiguration,
@@ -83,9 +108,12 @@ fn capture_and_encode(
     image
         .save_png(&path)
         .map_err(|err| PolarizeError::Platform(format!("PNG encode failed: {err}")))?;
-    let png_bytes = std::fs::read(&path)
-        .map_err(|err| PolarizeError::Platform(format!("reading encoded PNG failed: {err}")))?;
+    // Read, then always clean up the temp file — even when the read
+    // itself fails, so a read error does not also leak the file.
+    let read_result = std::fs::read(&path);
     let _ = std::fs::remove_file(&path);
+    let png_bytes = read_result
+        .map_err(|err| PolarizeError::Platform(format!("reading encoded PNG failed: {err}")))?;
 
     Ok(CapturedImage {
         png_bytes,

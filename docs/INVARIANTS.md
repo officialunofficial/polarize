@@ -14,24 +14,24 @@ the order they were added, not by severity or crate.
 
 ## Testing harness
 
-`polarize-core` is fully unit-tested: it is pure, platform-agnostic
-logic (coordinate normalization, the accessibility-tree data model, MCP
+`polarize-core` is fully unit-tested. It is pure, platform-agnostic
+logic: coordinate normalization, the accessibility-tree data model, MCP
 tool schemas, error types, the permission-state enum, and the trait
-definitions `polarize-macos` implements), and every invariant that lives
-in it has real `cargo test` coverage (55 tests as of this writing).
+definitions `polarize-macos` implements. Every invariant that lives in
+it has real `cargo test` coverage (59 tests as of this writing).
 
 `polarize-macos` implements those traits with real native calls
-(`ScreenCaptureKit`, `AXUIElement`, `CGEvent`, AppKit) that **cannot**
-be automatically tested anywhere — not in this repository, not in CI.
-No CI runner can grant Screen Recording or Accessibility TCC
-permission, or verify pixel/AX content, headlessly. Exercising this
-crate for real requires a real macOS session with Screen Recording and
-Accessibility permissions granted to whatever process runs it, and a
-human (or a scripted local run) driving it interactively. Where
-`polarize-macos` factors a piece of genuinely pure logic out of its
-native calls (`app_lookup`, `keymap`, `geometry`), that piece *is*
-covered by real `cargo test` runs (24 tests as of this writing) —
-everything else in the crate is compile/link-checked only.
+(`ScreenCaptureKit`, `AXUIElement`, `CGEvent`, AppKit). These **cannot**
+be automatically tested anywhere, not in this repository, not in CI. No
+CI runner can grant Screen Recording or Accessibility TCC permission,
+or verify pixel/AX content, headlessly. Exercising this crate for real
+needs a real macOS session with Screen Recording and Accessibility
+permissions granted to whatever process runs it, and a human (or a
+scripted local run) driving it interactively. Where `polarize-macos`
+factors a piece of genuinely pure logic out of its native calls
+(`app_lookup`, `keymap`, `geometry`), that piece *is* covered by real
+`cargo test` runs (22 tests as of this writing). Everything else in the
+crate is compile/link-checked only.
 
 Consequently, every invariant below that touches native-API behavior
 says so explicitly in its enforcement-checklist entry. None of them may
@@ -77,18 +77,19 @@ claim automated coverage they don't have.
 
 ### PINV-3: `describe` output is pre-order and depth-accurate
 
-- Always: `ax::flatten` visits a node before any of its descendants,
-  visits a node's children in their original order, and records each
-  node's depth as the number of ancestors above it (the root is depth
-  `0`). `ax::format_tree` renders that flattened sequence one line per
+- Always: `ax::flatten` visits a node before any of its descendants. It
+  visits a node's children in their original order. It records each
+  node's depth as the number of ancestors above it, so the root is depth
+  `0`. `ax::format_tree` renders that flattened sequence as one line per
   node, indented two spaces per depth level.
-- Because: the `describe` tool's consumer (an agent picking a tap
-  target) relies on depth to render indentation and on pre-order to read
-  a subtree as a contiguous run — both silently break if a traversal bug
-  reorders children or miscounts depth, without ever producing an error.
-- If violated: `describe` output renders as a flat or mis-indented list,
-  so the agent using it cannot tell which elements nest inside which
-  container.
+- Because: `orchestrate::perform_describe` embeds `format_tree`'s
+  rendering directly in `DescribeResponse::formatted` (PINV-9). Depth
+  must be correct for its indentation to make sense. Pre-order must hold
+  for a subtree to read as one contiguous run. A traversal bug could
+  reorder children or miscount depth without ever producing an error.
+- If violated: `describe`'s `formatted` output renders as a flat or
+  mis-indented list. A reader cannot tell which elements nest inside
+  which container.
 
 ### PINV-4: a tap's fraction is normalized before the platform ever sees it
 
@@ -101,9 +102,9 @@ claim automated coverage they don't have.
   `InputSynthesizer` is invoked at all.
 - Because: `InputSynthesizer` implementations are real `CGEvent` calls
   that cannot be exercised in CI. Pushing the fraction-to-pixel decision
-  into this pure, testable function is what lets a fake implementation
-  prove the platform layer receives correct pixel coordinates, and is
-  never invoked on invalid input, without ever running on a real screen.
+  into this pure, testable function lets a fake implementation prove two
+  things without a real screen: the platform layer receives correct
+  pixel coordinates, and it is never invoked on invalid input.
 - If violated: a `tap` request appears to succeed but clicks the wrong
   point — either because the fraction leaked through unconverted, or
   because it was normalized against the wrong target's size.
@@ -155,21 +156,21 @@ claim automated coverage they don't have.
 
 - Always: `geometry::safe_normalize_frame` converts a pixel
   position/size pair to a `NormalizedFrame` whose `x`, `y`, `width`, and
-  `height` are all clamped into `0.0..=1.0`, even when the input pixel
-  rectangle falls partly or fully outside `screen_size` (and even when
-  `screen_size` itself is non-positive, which is guarded against
+  `height` are all clamped into `0.0..=1.0`. This holds even when the
+  input pixel rectangle falls partly or fully outside `screen_size`, and
+  even when `screen_size` itself is non-positive (guarded against
   dividing by zero).
-- Because: unlike a `tap` fraction (PINV-1, which must error loudly on
-  bad input to catch a caller's coordinate-space mistake), a `describe`
-  response is built from real AX geometry the caller never supplied —
-  an off-screen element is a legitimate, common case (multi-monitor
-  setups, partially dragged-off windows), not a caller error, so it must
-  degrade to a best-effort frame instead of vanishing from the tree or
-  propagating an error that would blank out an entire subtree.
-- If violated: either `describe` panics/errors on the first off-screen
-  element it meets (multi-monitor setups become unusable), or it passes
-  an out-of-range frame through to callers who trusted the `[0,1]`
-  contract every other normalized frame in the response honors.
+- Because: a `tap` fraction must error loudly on bad input, to catch a
+  caller's coordinate-space mistake (PINV-1). A `describe` response is
+  different: it is built from real AX geometry the caller never
+  supplied. An off-screen element is a legitimate, common case —
+  multi-monitor setups, or a window dragged half off-screen — not a
+  caller error. It must degrade to a best-effort frame, not vanish from
+  the tree or blank out an entire subtree with a propagated error.
+- If violated: `describe` either panics or errors on the first
+  off-screen element it meets, making multi-monitor setups unusable. Or
+  it passes an out-of-range frame through to callers who trusted the
+  `[0,1]` contract every other normalized frame in the response honors.
 
 ### PINV-9: a `screenshot` response is a self-contained base64 PNG, never a file path
 
@@ -179,59 +180,54 @@ claim automated coverage they don't have.
   `orchestrate::perform_screenshot` uses, and it always base64-encodes;
   nothing in `polarize-core` or `polarize-macos` writes a screenshot to
   a path and returns that path instead.
-- Because: `polarize` is a stdio MCP server whose client is often a
-  separate, possibly sandboxed process with no shared filesystem
-  namespace guarantee, and MCP's own image content type already expects
-  base64-encoded bytes inline. A file path would need a second,
-  out-of-band contract (where the file lives, who deletes it, whether
-  the client can read it before/after the server exits) that base64 in
-  the response avoids entirely — every tool response stays
-  self-contained. (`polarize-macos`'s `capture_and_encode` does use a
-  uniquely-named temp file internally, because `ScreenCaptureKit`'s PNG
-  export is file-based, not buffer-based — but it reads the bytes back
-  and deletes the file before returning, so that detail never crosses
-  the `polarize-core` API boundary.)
+- Because: `polarize`'s client is often a separate, possibly sandboxed
+  process, with no shared filesystem namespace guaranteed. MCP's own
+  image content type already expects base64-encoded bytes inline. A file
+  path would need a second, out-of-band contract instead: where the file
+  lives, who deletes it, whether the client can read it before or after
+  the server exits. Base64 in the response avoids all of that, and every
+  tool response stays self-contained. (`polarize-macos`'s
+  `capture_and_encode` does use a uniquely named temp file internally,
+  because `ScreenCaptureKit`'s PNG export is file-based, not
+  buffer-based. It reads the bytes back and deletes the file before
+  returning, so that detail never crosses the `polarize-core` API
+  boundary.)
 - If violated: a screenshot response either silently fails against a
   sandboxed MCP client that cannot resolve a returned path, or leaks a
   temp file the caller never asked for and nothing ever cleans up.
 
-### PINV-10: `describe`/`tap`/`keyboard` preflight the real Accessibility permission before any native call; `screenshot` does not yet
+### PINV-10: every tool preflights its real permission before any other native call
 
 - Always: `MacAccessibilityInspector::describe` checks
-  `AXIsProcessTrusted()` and `MacInputSynthesizer`'s `click_at_pixel`/
-  `type_text`/`press_key` each check `CGPreflightPostEventAccess()` —
-  in every case, before making any further native call — and return
-  `PolarizeError::Permission` when the check fails, rather than letting
-  the underlying `AXUIElement`/`CGEvent` call run and fail on its own
-  terms. `MacScreenCapture`'s `capture_screen`/`capture_window` have no
-  equivalent `CGPreflightScreenCaptureAccess`-style check today; a
-  missing Screen Recording grant surfaces as whatever raw error
-  `SCScreenshotManager` itself returns.
+  `AXIsProcessTrusted()`. `MacInputSynthesizer`'s `click_at_pixel`,
+  `type_text`, and `press_key` each check `CGPreflightPostEventAccess()`.
+  `MacScreenCapture`'s `capture_screen` and `capture_window` each check
+  `CGPreflightScreenCaptureAccess()`. In every case, the check runs
+  before any further native call, and returns `PolarizeError::Permission`
+  when it fails — instead of letting the underlying `AXUIElement`/
+  `CGEvent`/`ScreenCaptureKit` call run and fail on its own terms.
 - Because: without this preflight, a denied or not-yet-granted
-  permission and a genuinely missing UI element/app can both surface as
-  an opaque native failure, and a caller has no reliable way to tell
-  "grant Accessibility" apart from "your app/window identifier is
+  permission and a genuinely missing UI element or app can both surface
+  as an opaque native failure. A caller has no reliable way to tell
+  "grant this permission" apart from "your app/window identifier is
   wrong". The preflight turns the common case into a clean, typed
   `PolarizeError::Permission` before any ambiguous native error has a
   chance to occur.
-- If violated: for `describe`/`tap`/`keyboard`, a permission problem
-  would surface as a confusing native error instead of an actionable
-  one. For `screenshot`, this is already the current, documented state
-  — not a hypothetical: see `apps/polarize/src/server.rs`'s module doc
-  comment for the open gap.
+- If violated: a permission problem surfaces as a confusing native error
+  instead of an actionable one.
 
 ### PINV-11: a native permission preflight failure always reports `NotDetermined`, never falsely `Denied`
 
-- Always: when `AXIsProcessTrusted()` or `CGPreflightPostEventAccess()`
-  returns `false`, `polarize-macos` reports `PermissionState::NotDetermined`
-  — it never reports `PermissionState::Denied` on the strength of that
-  boolean alone.
-- Because: both of those APIs collapse "the user was never asked" and
-  "the user explicitly denied it" into the same `false` return value;
-  `polarize-macos` cannot distinguish the two from the boolean alone.
-  Reporting `Denied` would claim the user made an explicit choice that
-  `polarize` has no evidence for, which is a stronger (and potentially
-  wrong) claim than the API actually supports; `NotDetermined` is the
+- Always: when `AXIsProcessTrusted()`, `CGPreflightPostEventAccess()`, or
+  `CGPreflightScreenCaptureAccess()` returns `false`, `polarize-macos`
+  reports `PermissionState::NotDetermined`. It never reports
+  `PermissionState::Denied` on the strength of that boolean alone.
+- Because: all three of those APIs collapse "the user was never asked"
+  and "the user explicitly denied it" into the same `false` return
+  value. `polarize-macos` cannot distinguish the two from the boolean
+  alone. Reporting `Denied` would claim the user made an explicit choice
+  `polarize` has no evidence for — a stronger, and potentially wrong,
+  claim than the API actually supports. `NotDetermined` is the
   conservative, honest reading of an ambiguous `false`.
 - If violated: a caller who has simply never been asked for
   Accessibility access would be told they explicitly "denied" it —
@@ -250,12 +246,12 @@ claim automated coverage they don't have.
   unreadable `AXFocused`-settable check or `AXUIElementCopyActionNames`
   call defaults to `false`. No single attribute failure ever aborts
   `describe` for that node or its subtree.
-- Because: real-world AX trees are inconsistent — plenty of elements
-  legitimately lack a title, or a third-party app's AX implementation
-  returns an error for an attribute Apple's own apps always supply.
-  Treating any one such gap as fatal would make `describe` unusable
-  against exactly the less-polished apps where an agent most needs
-  accessibility introspection to work.
+- Because: real-world AX trees are inconsistent. Plenty of elements
+  legitimately lack a title. A third-party app's AX implementation may
+  error on an attribute Apple's own apps always supply. Treating any one
+  such gap as fatal would make `describe` unusable against exactly the
+  less-polished apps where an agent most needs accessibility
+  introspection to work.
 - If violated: `describe` would fail outright (or silently truncate the
   whole tree) the moment it meets one AX element with an unreadable
   attribute, instead of describing everything it successfully could.
@@ -267,34 +263,52 @@ claim automated coverage they don't have.
   included in the tree (role, label, frame, flags), but its `children`
   field is forced to an empty `Vec` rather than recursing further. No
   error is raised and no earlier ancestor is affected.
-- Because: real AX trees are supposed to be finite and shallow, but a
+- Because: real AX trees are supposed to be finite and shallow. A
   misbehaving or adversarial app could in principle expose a very deep,
-  or effectively cyclic, tree (some accessibility proxies re-expose a
-  wrapped element under a new node). Without a cap, walking such a tree
-  would hang or exhaust memory instead of returning a (merely
-  incomplete) result.
+  or effectively cyclic, tree — some accessibility proxies re-expose a
+  wrapped element under a new node. Without a cap, walking such a tree
+  would hang or exhaust memory instead of returning a merely incomplete
+  result.
 - If violated: a single pathological app's AX tree could hang or crash
   every future `describe` call, not just fail to fully describe that
   one app.
 
+### PINV-14: a `keyboard` request activates its target app first
+
+- Always: when a `keyboard` request names a `target` app,
+  `orchestrate::perform_keyboard` calls `WindowManager::activate_app`
+  with it before calling either `InputSynthesizer::type_text` or
+  `InputSynthesizer::press_key`. When `target` is `None`, it calls
+  neither.
+- Because: `CGEvent` posts to whichever app is currently frontmost, not
+  to an app named in the request. Without activating the target first, a
+  `target`-scoped `keyboard` call would silently type into whatever app
+  the user happened to have focused instead.
+- If violated: text or key presses land in the wrong app. Or — if
+  `target` were dropped from the schema instead of wired up — `polarize`
+  would advertise a field its `keyboard` tool never honors.
+
 ## Known gap this document does not paper over
 
 `WindowManager::resolve_target_size` (`crates/polarize-macos/src/window.rs`)
-returns only a `PixelSize` — no origin — for an `App`/`Window`-scoped
-target. `perform_tap` (PINV-4) normalizes a tap fraction against that
-size and hands the result to `click_at_pixel`, whose contract requires a
-pixel point in the **global** display coordinate space. For
-`Screen { display_id: None }` (global origin `(0, 0)`) this is exactly
-correct. For a non-primary display, or an `App`/`Window` target whose
-window does not start at the global origin, the resulting pixel point
-is window/display-relative, not global — a real, open gap between this
-trait shape and `click_at_pixel`'s documented contract, not an
-invariant that currently holds. It is not listed above as a PINV because
-an invariant states a property that *does* hold; this one, for those two
-target shapes, does not. Fixing it needs either a `PixelSize` →
-`PixelRect` change in `polarize-core` or a trait shape that passes the
-origin through to `InputSynthesizer` directly. See `window.rs`'s own
-"Known limitation" doc comment.
+returns only a `PixelSize` for an `App`/`Window`-scoped target. It
+carries no origin. `perform_tap` (PINV-4) normalizes a tap fraction
+against that size, then hands the result to `click_at_pixel`, whose
+contract needs a pixel point in the **global** display coordinate space.
+
+For `Screen { display_id: None }`, the global origin is `(0, 0)`, so
+this is exactly correct. For a non-primary display, or an `App`/`Window`
+target whose window does not start at the global origin, the resulting
+pixel point stays window- or display-relative instead. This is a real,
+open gap between this trait's shape and `click_at_pixel`'s documented
+contract, not an invariant that currently holds. It is not listed above
+as a PINV, because an invariant states a property that *does* hold, and
+this one does not for those two target shapes.
+
+Fixing it needs one of two changes in `polarize-core`: a `PixelSize` to
+`PixelRect` change, or a trait shape that passes the origin through to
+`InputSynthesizer` directly. See `window.rs`'s own "Known limitation"
+doc comment.
 
 ## Enforcement checklist
 
@@ -306,18 +320,18 @@ origin through to `InputSynthesizer` directly. See `window.rs`'s own
   `cargo test -p polarize-core` (`permission::tests`): every
   `ToolKind`→`PermissionKind` mapping, the
   granted/denied/not-determined/restricted usability rule, and the
-  absent-status-means-not-determined rule. Note: `required_permission`/
-  `check_permission` are not currently called from `polarize-macos` or
-  `apps/polarize` — the real tool implementations gate permission a
-  different way (see PINV-10). That real-world gating path is native-only
-  and has **not** been automatically tested anywhere; it was exercised
-  once, manually, during `apps/polarize`'s implementation phase by
-  driving the built binary over stdio with no permission granted (not
-  repeatable in CI, and not re-verified since).
+  absent-status-means-not-determined rule. Note:
+  `required_permission`/`check_permission` are not currently called from
+  `polarize-macos` or `apps/polarize`. The real tool implementations gate
+  permission a different way (see PINV-10). That real-world gating path
+  is native-only, and has **not** been automatically tested anywhere.
 - **PINV-3** — fully covered by automated `cargo test -p polarize-core`
   (`ax::tests`): depth-zero single node, pre-order traversal with
   correct depths across a multi-level tree, children-order preservation,
-  and exact `format_tree` output for a hand-built tree.
+  and exact `format_tree` output for a hand-built tree. `orchestrate::tests`
+  additionally asserts `perform_describe`'s `formatted` field equals
+  `ax::format_tree`'s output for the same tree, confirming the real
+  consumer this invariant names.
 - **PINV-4** — the orchestration half (fraction→pixel conversion, dispatch,
   and the "never call the platform on bad input" rule) is fully covered
   by automated `cargo test -p polarize-core` (`orchestrate::tests`)
@@ -345,9 +359,8 @@ origin through to `InputSynthesizer` directly. See `window.rs`'s own
 - **PINV-8** — fully covered by automated `cargo test -p polarize-macos`
   (`geometry::tests`): an on-screen rectangle normalizing exactly,
   negative position clamping to `0.0`, an out-of-bounds position
-  clamping to `1.0`, an oversized dimension clamping to `1.0`, a
-  non-positive `screen_size` not dividing by zero, and the
-  best-effort/clamped-fallback pair.
+  clamping to `1.0`, an oversized dimension clamping to `1.0`, and a
+  non-positive `screen_size` not dividing by zero.
 - **PINV-9** — the response-shape half (always base64, round-trips
   correctly, an all-`polarize-core` decision) is fully covered by
   automated `cargo test -p polarize-core` (`schema::tests`:
@@ -360,16 +373,16 @@ origin through to `InputSynthesizer` directly. See `window.rs`'s own
   Recording permission granted.
 - **PINV-10** — **not** automated anywhere; this is entirely native
   behavior (`AXIsProcessTrusted`, `CGPreflightPostEventAccess`,
-  `SCScreenshotManager`). It was manually exercised once, during
-  `apps/polarize`'s implementation phase, by driving the built binary
-  over real MCP stdio traffic with no permission granted: `describe`/
-  `tap`/`keyboard` each returned a clean, structured
-  `PolarizeError::Permission` before any further native call; `screenshot`
-  returned `ScreenCaptureKit`'s own raw, unstructured error, confirming
-  the documented gap. That single manual run is not a substitute for
-  automated coverage and has not been re-verified since — needs a real
-  macOS session with (and, to fully exercise the negative path, without)
-  Screen Recording and Accessibility permissions granted.
+  `CGPreflightScreenCaptureAccess`). It has been exercised manually,
+  more than once, by driving the built release binary over real MCP
+  stdio traffic with no permission granted: `screenshot` returns a
+  clean `{"permission_kind":"screen_recording","permission_state":"not_determined"}`
+  error, and `describe`/`keyboard` each return the matching
+  `accessibility` error, all before any further native call runs. This
+  confirms the preflight fires correctly with permission absent. It does
+  **not** confirm the granted path — that a preflight correctly returns
+  `true` once the permission is actually granted — which still needs a
+  real macOS session with both permissions granted.
 - **PINV-11** — **not** automated anywhere. Distinguishing "never asked"
   from "explicitly denied" requires actually denying the permission on a
   real macOS session (e.g. via System Settings) and comparing the
@@ -387,3 +400,17 @@ origin through to `InputSynthesizer` directly. See `window.rs`'s own
   proxy that re-exposes an element cyclically — neither is producible
   without a live accessibility session. `MAX_AX_DEPTH`'s value itself
   (`64`) is a plain constant with no logic to unit test in isolation.
+- **PINV-14** — the orchestration half (activate-before-type,
+  activate-before-key-press, and no-activation-when-`target`-is-`None`)
+  is fully covered by automated `cargo test -p polarize-core`
+  (`orchestrate::tests`) against a fake `WindowManager`. It was also
+  confirmed over real MCP stdio traffic: a `keyboard` call with a
+  `target` reached `WindowManager::activate_app`'s real
+  `resolve_running_app` lookup (observed as `"app not found:
+  com.apple.TextEdit"`, since no matching app runs in this environment),
+  while a `keyboard` call with `target: null` stopped at the
+  Accessibility preflight instead, without attempting activation. What
+  is **not** verified: whether `activateWithOptions` actually brings a
+  real, running target app to the front on a live macOS session — that
+  needs one, with Accessibility permission granted and a real target
+  app running.

@@ -100,6 +100,10 @@ pub struct DescribeRequest {
 pub struct DescribeResponse {
     pub app_name: String,
     pub root: AxNode,
+    /// [`crate::ax::format_tree`]'s indented text rendering of `root` — a
+    /// ready-to-read tree, so a caller does not need to walk `root` itself
+    /// just to see the app's structure. See PINV-3.
+    pub formatted: String,
 }
 
 /// A synthetic mouse click at a normalized `[0.0, 1.0]` fraction point —
@@ -266,6 +270,7 @@ mod tests {
                 interactive: false,
                 children: vec![],
             },
+            formatted: "AXWindow \"Untitled\" (0.00,0.00,1.00,1.00)".to_string(),
         };
         assert_eq!(round_trip(&value), value);
     }

@@ -8,25 +8,29 @@
 //!
 //! ## Known limitation: window-scoped `tap` targets
 //!
-//! [`WindowManager::resolve_target_size`] returns only a [`PixelSize`] (no
-//! origin) for an `App`/`Window`-scoped [`ScreenshotTarget`], matching the
-//! trait as `polarize-core` defines it. `polarize-core`'s `perform_tap`
-//! (PINV-4) then normalizes the request's fraction against that size alone
-//! and hands [`crate::input::MacInputSynthesizer::click_at_pixel`] the
-//! result — but [`InputSynthesizer::click_at_pixel`]'s contract requires a
-//! pixel point in the **global** display coordinate space, and a
-//! window-relative size carries no origin to translate into that space.
-//! For a `Screen { display_id: None }` target (global origin `(0, 0)`) this
-//! is exactly correct. For a non-primary display or an `App`/`Window`
-//! target whose origin is not `(0, 0)`, the resulting pixel point is
-//! window/display-relative, not global — a real, open gap between this
-//! trait shape and `click_at_pixel`'s documented contract. Fixing it needs
-//! either a `PixelSize` → `PixelRect` change in `polarize-core` or a
-//! trait shape that passes the origin through to `InputSynthesizer`
-//! directly; flagged here rather than silently worked around.
+//! [`WindowManager::resolve_target_size`] returns only a [`PixelSize`] for
+//! an `App`/`Window`-scoped [`ScreenshotTarget`]. It carries no origin.
+//! This matches the trait as `polarize-core` defines it.
+//!
+//! `polarize-core`'s `perform_tap` (PINV-4) normalizes the request's
+//! fraction against that size alone. It then hands the result to
+//! [`crate::input::MacInputSynthesizer::click_at_pixel`].
+//! [`InputSynthesizer::click_at_pixel`]'s contract needs a pixel point in
+//! the **global** display coordinate space. A window-relative size has no
+//! origin to translate into that space.
+//!
+//! For a `Screen { display_id: None }` target, the global origin is
+//! `(0, 0)`, so this is exactly correct. For a non-primary display, or an
+//! `App`/`Window` target whose origin is not `(0, 0)`, the resulting pixel
+//! point stays window- or display-relative instead. This is a real, open
+//! gap between this trait's shape and `click_at_pixel`'s documented
+//! contract. Fixing it needs one of two changes in `polarize-core`: a
+//! `PixelSize` to `PixelRect` change, or a trait shape that passes the
+//! origin through to `InputSynthesizer` directly. This comment flags the
+//! gap rather than working around it silently.
 
 use objc2::rc::Retained;
-use objc2_app_kit::{NSRunningApplication, NSWorkspace};
+use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace};
 use objc2_core_graphics::{CGDisplayBounds, CGMainDisplayID};
 use polarize_core::coords::PixelSize;
 use polarize_core::error::PolarizeError;
@@ -80,23 +84,24 @@ pub fn resolve_running_app(
     Ok(running[idx].clone())
 }
 
-fn to_app_identifier(app: &NSRunningApplication) -> AppIdentifier {
-    AppIdentifier {
-        bundle_id: app.bundleIdentifier().map(|s| s.to_string()),
-        app_name: app.localizedName().map(|s| s.to_string()),
-    }
-}
-
 /// `WindowManager` implementation over `NSWorkspace`/`CGDirectDisplay`.
 #[derive(Debug, Default)]
 pub struct MacWindowManager;
 
 impl WindowManager for MacWindowManager {
-    fn frontmost_app(&self) -> Result<AppIdentifier, PolarizeError> {
-        let app = NSWorkspace::sharedWorkspace()
-            .frontmostApplication()
-            .ok_or_else(|| PolarizeError::AppNotFound("no frontmost app".to_string()))?;
-        Ok(to_app_identifier(&app))
+    fn activate_app(&self, app: &AppIdentifier) -> Result<(), PolarizeError> {
+        let running = resolve_running_app(Some(app))?;
+        // `ActivateIgnoringOtherApps` is deprecated since macOS 14 and has
+        // no effect there; the default (empty) options already bring the
+        // app's main and key windows forward, which is what a `keyboard`
+        // call needs before it can reach that app.
+        if running.activateWithOptions(NSApplicationActivationOptions::empty()) {
+            Ok(())
+        } else {
+            Err(PolarizeError::Platform(format!(
+                "activateWithOptions returned false for {app:?}"
+            )))
+        }
     }
 
     fn resolve_target_size(&self, target: &ScreenshotTarget) -> Result<PixelSize, PolarizeError> {

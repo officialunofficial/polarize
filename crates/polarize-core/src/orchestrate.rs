@@ -64,7 +64,8 @@ where
 
 /// Dispatches a `describe` request to the resolved app (or the
 /// frontmost app when `request.app` is `None`) and shapes the result
-/// into a [`DescribeResponse`].
+/// into a [`DescribeResponse`], including its `formatted` rendering
+/// (PINV-3).
 pub fn perform_describe<A>(
     inspector: &A,
     request: &DescribeRequest,
@@ -73,7 +74,12 @@ where
     A: AccessibilityInspector,
 {
     let (app_name, root) = inspector.describe(request.app.as_ref())?;
-    Ok(DescribeResponse { app_name, root })
+    let formatted = crate::ax::format_tree(&root);
+    Ok(DescribeResponse {
+        app_name,
+        root,
+        formatted,
+    })
 }
 
 /// Dispatches a `screenshot` request's [`ScreenshotTarget`] to the
@@ -99,15 +105,35 @@ where
     ))
 }
 
-/// Dispatches a `keyboard` request to either [`InputSynthesizer::type_text`]
-/// or [`InputSynthesizer::press_key`], depending on its variant.
-pub fn perform_keyboard<I>(
+/// # PINV-14: a `keyboard` request activates its target app first
+///
+/// - Always: when `request` names a `target` app, [`perform_keyboard`]
+///   calls [`WindowManager::activate_app`] with it before calling either
+///   [`InputSynthesizer::type_text`] or [`InputSynthesizer::press_key`].
+///   When `target` is `None`, it calls neither.
+/// - Because: `CGEvent` posts to whichever app is currently frontmost,
+///   not to an app named in the request. Without activating the target
+///   first, a `target`-scoped `keyboard` call would silently type into
+///   whatever app the user happened to have focused instead.
+/// - If violated: text or key presses land in the wrong app, or — if
+///   `target` is dropped from the schema entirely instead of wired up —
+///   `polarize` advertises a field its `keyboard` tool never honors.
+pub fn perform_keyboard<W, I>(
+    window_manager: &W,
     input: &I,
     request: &KeyboardRequest,
 ) -> Result<KeyboardResponse, PolarizeError>
 where
+    W: WindowManager,
     I: InputSynthesizer,
 {
+    let target = match request {
+        KeyboardRequest::Type { target, .. } => target,
+        KeyboardRequest::KeyPress { target, .. } => target,
+    };
+    if let Some(app) = target {
+        window_manager.activate_app(app)?;
+    }
     match request {
         KeyboardRequest::Type { text, .. } => input.type_text(text)?,
         KeyboardRequest::KeyPress { key, modifiers, .. } => input.press_key(*key, modifiers)?,
@@ -128,14 +154,22 @@ mod tests {
 
     struct FakeWindowManager {
         size: PixelSize,
+        activated: RefCell<Vec<AppIdentifier>>,
+    }
+
+    impl FakeWindowManager {
+        fn new(size: PixelSize) -> Self {
+            Self {
+                size,
+                activated: RefCell::new(Vec::new()),
+            }
+        }
     }
 
     impl WindowManager for FakeWindowManager {
-        fn frontmost_app(&self) -> Result<AppIdentifier, PolarizeError> {
-            Ok(AppIdentifier {
-                bundle_id: None,
-                app_name: Some("Fake".to_string()),
-            })
+        fn activate_app(&self, app: &AppIdentifier) -> Result<(), PolarizeError> {
+            self.activated.borrow_mut().push(app.clone());
+            Ok(())
         }
 
         fn resolve_target_size(
@@ -240,12 +274,10 @@ mod tests {
 
     #[test]
     fn perform_tap_normalizes_center_fraction_to_pixel_center() {
-        let wm = FakeWindowManager {
-            size: PixelSize {
-                width: 2000.0,
-                height: 1000.0,
-            },
-        };
+        let wm = FakeWindowManager::new(PixelSize {
+            width: 2000.0,
+            height: 1000.0,
+        });
         let input = FakeInputSynthesizer::default();
         let request = TapRequest {
             x: 0.5,
@@ -278,12 +310,10 @@ mod tests {
 
     #[test]
     fn perform_tap_defaults_click_count_to_one() {
-        let wm = FakeWindowManager {
-            size: PixelSize {
-                width: 100.0,
-                height: 100.0,
-            },
-        };
+        let wm = FakeWindowManager::new(PixelSize {
+            width: 100.0,
+            height: 100.0,
+        });
         let input = FakeInputSynthesizer::default();
         let request = TapRequest {
             x: 0.0,
@@ -299,12 +329,10 @@ mod tests {
 
     #[test]
     fn perform_tap_forwards_explicit_click_count() {
-        let wm = FakeWindowManager {
-            size: PixelSize {
-                width: 100.0,
-                height: 100.0,
-            },
-        };
+        let wm = FakeWindowManager::new(PixelSize {
+            width: 100.0,
+            height: 100.0,
+        });
         let input = FakeInputSynthesizer::default();
         let request = TapRequest {
             x: 0.0,
@@ -320,12 +348,10 @@ mod tests {
 
     #[test]
     fn perform_tap_rejects_out_of_range_fraction_without_calling_platform() {
-        let wm = FakeWindowManager {
-            size: PixelSize {
-                width: 100.0,
-                height: 100.0,
-            },
-        };
+        let wm = FakeWindowManager::new(PixelSize {
+            width: 100.0,
+            height: 100.0,
+        });
         let input = FakeInputSynthesizer::default();
         let request = TapRequest {
             x: 1.5,
@@ -357,6 +383,20 @@ mod tests {
 
         assert_eq!(response.app_name, "TextEdit");
         assert_eq!(response.root, leaf_tree());
+    }
+
+    #[test]
+    fn perform_describe_fills_formatted_from_ax_format_tree() {
+        let root = leaf_tree();
+        let inspector = FakeAccessibilityInspector {
+            app_name: "TextEdit".to_string(),
+            root: root.clone(),
+        };
+        let request = DescribeRequest { app: None };
+
+        let response = perform_describe(&inspector, &request).unwrap();
+
+        assert_eq!(response.formatted, crate::ax::format_tree(&root));
     }
 
     // ---- perform_screenshot -----------------------------------------------
@@ -420,13 +460,17 @@ mod tests {
 
     #[test]
     fn perform_keyboard_type_dispatches_to_type_text() {
+        let wm = FakeWindowManager::new(PixelSize {
+            width: 100.0,
+            height: 100.0,
+        });
         let input = FakeInputSynthesizer::default();
         let request = KeyboardRequest::Type {
             text: "hi".to_string(),
             target: None,
         };
 
-        let response = perform_keyboard(&input, &request).unwrap();
+        let response = perform_keyboard(&wm, &input, &request).unwrap();
 
         assert_eq!(response, KeyboardResponse { sent: true });
         assert_eq!(input.typed.borrow().as_slice(), &["hi".to_string()]);
@@ -435,6 +479,10 @@ mod tests {
 
     #[test]
     fn perform_keyboard_key_press_dispatches_to_press_key_with_modifiers() {
+        let wm = FakeWindowManager::new(PixelSize {
+            width: 100.0,
+            height: 100.0,
+        });
         let input = FakeInputSynthesizer::default();
         let request = KeyboardRequest::KeyPress {
             key: NamedKey::Return,
@@ -442,12 +490,78 @@ mod tests {
             target: None,
         };
 
-        perform_keyboard(&input, &request).unwrap();
+        perform_keyboard(&wm, &input, &request).unwrap();
 
         assert_eq!(
             input.pressed.borrow().as_slice(),
             &[(NamedKey::Return, vec![Modifier::Command])]
         );
         assert!(input.typed.borrow().is_empty());
+    }
+
+    // ---- perform_keyboard target activation -----------------------------
+    //
+    // PINV-14: a `keyboard` request naming a `target` app activates that
+    // app before posting any key event, so the input actually reaches it.
+
+    #[test]
+    fn perform_keyboard_activates_target_app_before_typing() {
+        let wm = FakeWindowManager::new(PixelSize {
+            width: 100.0,
+            height: 100.0,
+        });
+        let input = FakeInputSynthesizer::default();
+        let target = AppIdentifier {
+            bundle_id: Some("com.apple.TextEdit".to_string()),
+            app_name: None,
+        };
+        let request = KeyboardRequest::Type {
+            text: "hi".to_string(),
+            target: Some(target.clone()),
+        };
+
+        perform_keyboard(&wm, &input, &request).unwrap();
+
+        assert_eq!(wm.activated.borrow().as_slice(), &[target]);
+        assert_eq!(input.typed.borrow().as_slice(), &["hi".to_string()]);
+    }
+
+    #[test]
+    fn perform_keyboard_activates_target_app_before_key_press() {
+        let wm = FakeWindowManager::new(PixelSize {
+            width: 100.0,
+            height: 100.0,
+        });
+        let input = FakeInputSynthesizer::default();
+        let target = AppIdentifier {
+            bundle_id: None,
+            app_name: Some("Safari".to_string()),
+        };
+        let request = KeyboardRequest::KeyPress {
+            key: NamedKey::Return,
+            modifiers: vec![],
+            target: Some(target.clone()),
+        };
+
+        perform_keyboard(&wm, &input, &request).unwrap();
+
+        assert_eq!(wm.activated.borrow().as_slice(), &[target]);
+    }
+
+    #[test]
+    fn perform_keyboard_does_not_activate_anything_when_target_is_none() {
+        let wm = FakeWindowManager::new(PixelSize {
+            width: 100.0,
+            height: 100.0,
+        });
+        let input = FakeInputSynthesizer::default();
+        let request = KeyboardRequest::Type {
+            text: "hi".to_string(),
+            target: None,
+        };
+
+        perform_keyboard(&wm, &input, &request).unwrap();
+
+        assert!(wm.activated.borrow().is_empty());
     }
 }

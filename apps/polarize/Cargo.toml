@@ -15,12 +15,12 @@ path = "src/main.rs"
 polarize-core = { path = "../../crates/polarize-core" }
 polarize-macos = { path = "../../crates/polarize-macos" }
 # `rmcp`'s "macros" feature re-exports `rmcp-macros`'s `#[tool]`/
-# `#[tool_router]`/`#[tool_handler]` attributes as `rmcp::{tool, ...}` —
-# see `rmcp::lib`'s `pub use rmcp_macros::*`. A direct `rmcp-macros`
-# dependency is therefore unnecessary; depending on it separately here
-# resolved a second, version-mismatched copy of the proc-macro crate
-# alongside the one `rmcp` pulls in itself (see the server-phase report
-# for the concrete versions).
+# `#[tool_router]`/`#[tool_handler]` attributes as `rmcp::{tool, ...}`.
+# See `rmcp::lib`'s `pub use rmcp_macros::*`. A direct `rmcp-macros`
+# dependency is unnecessary because of that re-export. Depending on it
+# separately here resolved a second, version-mismatched copy of the
+# proc-macro crate, alongside the one `rmcp` pulls in itself — see
+# `Cargo.lock`'s single `rmcp-macros` entry after removing it.
 rmcp = { version = "3.1.1", features = ["server", "macros", "transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
 serde = { version = "1", features = ["derive"] }
