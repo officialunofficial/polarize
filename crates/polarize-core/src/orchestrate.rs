@@ -20,18 +20,24 @@ use crate::traits::{AccessibilityInspector, InputSynthesizer, ScreenCapture, Win
 ///
 /// - Always: [`perform_tap`] converts `request.x`/`request.y` to a pixel
 ///   point via [`crate::coords::fraction_to_pixel`] against the resolved
-///   target's real size, and only calls
+///   target's `size`, adds the target's `origin` to land in the
+///   **global** display coordinate space, and only calls
 ///   [`InputSynthesizer::click_at_pixel`] with that already-resolved
-///   pixel point — never with the raw fraction.
+///   global pixel point — never with the raw fraction, and never with a
+///   window- or display-relative point.
 /// - Because: [`InputSynthesizer`] implementations are real `CGEvent`
 ///   calls that cannot be exercised in CI; pushing the fraction→pixel
 ///   decision into this pure, testable function is what lets a fake
 ///   implementation prove the platform layer receives correct pixel
-///   coordinates without ever running on a real screen.
+///   coordinates without ever running on a real screen. `origin` matters
+///   because `App`/`Window` targets, and non-primary displays, do not
+///   start at the global origin — omitting it clicks whatever happens
+///   to sit at that offset on the primary display instead of the
+///   intended element.
 /// - If violated: a `tap` request appears to succeed but clicks the
 ///   wrong point — either because the fraction leaked through
 ///   unconverted, or because it was normalized against the wrong
-///   target's size.
+///   target's size, or because the target's screen origin was dropped.
 pub fn perform_tap<W, I>(
     window_manager: &W,
     input: &I,
@@ -45,14 +51,18 @@ where
         .target
         .clone()
         .unwrap_or(ScreenshotTarget::Screen { display_id: None });
-    let size = window_manager.resolve_target_size(&target)?;
-    let pixel = coords::fraction_to_pixel(
+    let rect = window_manager.resolve_target_rect(&target)?;
+    let local = coords::fraction_to_pixel(
         Fraction {
             x: request.x,
             y: request.y,
         },
-        size,
+        rect.size,
     )?;
+    let pixel = crate::coords::PixelPoint {
+        x: rect.origin.x + local.x,
+        y: rect.origin.y + local.y,
+    };
     let click_count = request.click_count.unwrap_or(1);
     input.click_at_pixel(pixel, click_count)?;
     Ok(TapResponse {
@@ -145,7 +155,7 @@ where
 mod tests {
     use super::*;
     use crate::ax::{AxNode, NormalizedFrame};
-    use crate::coords::PixelSize;
+    use crate::coords::{PixelPoint, PixelRect, PixelSize};
     use crate::schema::{AppIdentifier, Modifier, NamedKey};
     use crate::traits::CapturedImage;
     use std::cell::RefCell;
@@ -153,14 +163,20 @@ mod tests {
     // ---- fakes -------------------------------------------------------
 
     struct FakeWindowManager {
-        size: PixelSize,
+        rect: PixelRect,
         activated: RefCell<Vec<AppIdentifier>>,
     }
 
     impl FakeWindowManager {
+        /// A target at the global origin — what every existing test
+        /// before PINV-4's origin fix assumed.
         fn new(size: PixelSize) -> Self {
+            Self::with_origin(PixelPoint { x: 0.0, y: 0.0 }, size)
+        }
+
+        fn with_origin(origin: PixelPoint, size: PixelSize) -> Self {
             Self {
-                size,
+                rect: PixelRect { origin, size },
                 activated: RefCell::new(Vec::new()),
             }
         }
@@ -172,11 +188,11 @@ mod tests {
             Ok(())
         }
 
-        fn resolve_target_size(
+        fn resolve_target_rect(
             &self,
             _target: &ScreenshotTarget,
-        ) -> Result<PixelSize, PolarizeError> {
-            Ok(self.size)
+        ) -> Result<PixelRect, PolarizeError> {
+            Ok(self.rect)
         }
     }
 
@@ -344,6 +360,52 @@ mod tests {
         perform_tap(&wm, &input, &request).unwrap();
 
         assert_eq!(input.clicks.borrow()[0].1, 2);
+    }
+
+    #[test]
+    fn perform_tap_adds_target_origin_to_the_global_pixel_point() {
+        // A window that does not start at the global origin — e.g. a
+        // window sitting at screen offset (100, 50) — must have that
+        // offset added to the resolved pixel point. Regression test for
+        // PINV-4's origin fix: before it, an `App`/`Window`-scoped tap
+        // silently clicked window-relative coordinates instead of the
+        // real global point, hitting whatever sat at that offset on the
+        // primary display instead of the intended element.
+        let wm = FakeWindowManager::with_origin(
+            PixelPoint { x: 100.0, y: 50.0 },
+            PixelSize {
+                width: 2000.0,
+                height: 1000.0,
+            },
+        );
+        let input = FakeInputSynthesizer::default();
+        let request = TapRequest {
+            x: 0.5,
+            y: 0.5,
+            target: None,
+            click_count: None,
+        };
+
+        let response = perform_tap(&wm, &input, &request).unwrap();
+
+        assert_eq!(
+            response,
+            TapResponse {
+                tapped: true,
+                pixel_x: 1100.0,
+                pixel_y: 550.0
+            }
+        );
+        assert_eq!(
+            input.clicks.borrow().as_slice(),
+            &[(
+                crate::coords::PixelPoint {
+                    x: 1100.0,
+                    y: 550.0
+                },
+                1
+            )]
+        );
     }
 
     #[test]

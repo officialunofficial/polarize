@@ -6,33 +6,20 @@
 //! [`crate::app_lookup::find_matching_app_index`]; see the crate-level
 //! "what is and is not verified" note.
 //!
-//! ## Known limitation: window-scoped `tap` targets
-//!
-//! [`WindowManager::resolve_target_size`] returns only a [`PixelSize`] for
-//! an `App`/`Window`-scoped [`ScreenshotTarget`]. It carries no origin.
-//! This matches the trait as `polarize-core` defines it.
-//!
-//! `polarize-core`'s `perform_tap` (PINV-4) normalizes the request's
-//! fraction against that size alone. It then hands the result to
-//! [`crate::input::MacInputSynthesizer::click_at_pixel`].
-//! [`InputSynthesizer::click_at_pixel`]'s contract needs a pixel point in
-//! the **global** display coordinate space. A window-relative size has no
-//! origin to translate into that space.
-//!
-//! For a `Screen { display_id: None }` target, the global origin is
-//! `(0, 0)`, so this is exactly correct. For a non-primary display, or an
-//! `App`/`Window` target whose origin is not `(0, 0)`, the resulting pixel
-//! point stays window- or display-relative instead. This is a real, open
-//! gap between this trait's shape and `click_at_pixel`'s documented
-//! contract. Fixing it needs one of two changes in `polarize-core`: a
-//! `PixelSize` to `PixelRect` change, or a trait shape that passes the
-//! origin through to `InputSynthesizer` directly. This comment flags the
-//! gap rather than working around it silently.
+//! [`WindowManager::resolve_target_rect`] returns a [`PixelRect`] — size
+//! plus global-space origin — for every [`ScreenshotTarget`] shape, so
+//! `polarize-core`'s `perform_tap` (PINV-4) can turn a normalized
+//! fraction into a real global pixel point regardless of which display
+//! or window it targets. See PINV-4 in `docs/INVARIANTS.md` for why the
+//! origin matters: an `App`/`Window` target, or a non-primary display,
+//! does not start at the global origin, so dropping it would silently
+//! click whatever sits at that pixel offset on the *primary* display
+//! instead of the intended element.
 
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace};
 use objc2_core_graphics::{CGDisplayBounds, CGMainDisplayID};
-use polarize_core::coords::PixelSize;
+use polarize_core::coords::{PixelPoint, PixelRect, PixelSize};
 use polarize_core::error::PolarizeError;
 use polarize_core::schema::{AppIdentifier, ScreenshotTarget};
 use polarize_core::traits::WindowManager;
@@ -104,14 +91,20 @@ impl WindowManager for MacWindowManager {
         }
     }
 
-    fn resolve_target_size(&self, target: &ScreenshotTarget) -> Result<PixelSize, PolarizeError> {
+    fn resolve_target_rect(&self, target: &ScreenshotTarget) -> Result<PixelRect, PolarizeError> {
         match target {
             ScreenshotTarget::Screen { display_id } => {
                 let id = display_id.unwrap_or_else(|| CGMainDisplayID());
                 let bounds = CGDisplayBounds(id);
-                Ok(PixelSize {
-                    width: bounds.size.width,
-                    height: bounds.size.height,
+                Ok(PixelRect {
+                    origin: PixelPoint {
+                        x: bounds.origin.x,
+                        y: bounds.origin.y,
+                    },
+                    size: PixelSize {
+                        width: bounds.size.width,
+                        height: bounds.size.height,
+                    },
                 })
             }
             ScreenshotTarget::App { app } | ScreenshotTarget::Window { app, .. } => {
@@ -123,10 +116,16 @@ impl WindowManager for MacWindowManager {
                 let pid = running.processIdentifier();
                 let content = content::shareable_content()?;
                 let window = content::find_window(&content, pid, window_title)?;
-                let size = window.frame().size;
-                Ok(PixelSize {
-                    width: size.width,
-                    height: size.height,
+                let frame = window.frame();
+                Ok(PixelRect {
+                    origin: PixelPoint {
+                        x: frame.origin.x,
+                        y: frame.origin.y,
+                    },
+                    size: PixelSize {
+                        width: frame.size.width,
+                        height: frame.size.height,
+                    },
                 })
             }
         }

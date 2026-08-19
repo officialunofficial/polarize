@@ -32,6 +32,23 @@ pub struct PixelSize {
     pub height: f64,
 }
 
+/// A screenshot/tap target's pixel geometry: its `size` (what a tap
+/// fraction is normalized against, via [`fraction_to_pixel`]) plus its
+/// `origin` — the target's top-left corner in the **global** display
+/// coordinate space that [`crate::traits::InputSynthesizer::click_at_pixel`]
+/// requires.
+///
+/// For a `Screen { display_id: None }` target, `origin` is `(0, 0)`. For
+/// any other target — a non-primary display, or an `App`/`Window` whose
+/// window does not start at the global origin — `origin` is what turns
+/// a window-relative pixel point back into a real, clickable global one.
+/// See PINV-4 in `docs/INVARIANTS.md`.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PixelRect {
+    pub origin: PixelPoint,
+    pub size: PixelSize,
+}
+
 /// Errors produced by fraction/pixel conversion.
 ///
 /// # PINV-1: coordinate conversion never silently clamps

@@ -54,6 +54,15 @@ pub const AX_VALUE_TYPE_CG_SIZE: AXValueType = 2;
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     pub fn AXIsProcessTrusted() -> bool;
+    pub fn AXIsProcessTrustedWithOptions(options: *const CFType) -> bool;
+    /// The options-dictionary key that, when set to `true`, makes
+    /// [`AXIsProcessTrustedWithOptions`] show the system Accessibility
+    /// consent alert (and register this process in the Accessibility
+    /// list) if it is not already trusted, rather than silently
+    /// reporting `false`. Used only by `request-permissions` (see
+    /// `apps/polarize/src/main.rs`) — every real tool call still uses
+    /// the non-prompting [`AXIsProcessTrusted`] (PINV-10/PINV-11).
+    pub static kAXTrustedCheckOptionPrompt: *const CFString;
     pub fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
     #[allow(dead_code)] // reserved for a future "describe whatever's under the cursor" tool
     pub fn AXUIElementCreateSystemWide() -> AXUIElementRef;
@@ -76,6 +85,32 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn CFRetain(cf: *const c_void) -> *const c_void;
     fn CFRelease(cf: *const c_void);
+}
+
+/// Calls `AXIsProcessTrustedWithOptions` with the prompt option set,
+/// which shows the system Accessibility consent alert (and registers
+/// this exact binary in the Accessibility list as a real, functional
+/// grant) if it is not already trusted.
+///
+/// Only `apps/polarize`'s `--request-permissions` bootstrap flag calls
+/// this. It exists because manually adding a raw (non-`.app`) binary
+/// through System Settings' Accessibility "+" picker does not reliably
+/// produce a working grant. The entry can show up toggled on and still
+/// leave `AXIsProcessTrusted` returning `false`. Prompting through the
+/// API is what macOS itself uses to register a real one. Every actual
+/// tool call still goes through the non-prompting `AXIsProcessTrusted`
+/// (PINV-10/PINV-11). This function is a one-time setup helper, not
+/// part of any tool's request path.
+pub fn request_accessibility_permission_with_prompt() -> bool {
+    let prompt_key =
+        unsafe { kAXTrustedCheckOptionPrompt.as_ref() }.expect("ApplicationServices constant");
+    let options =
+        objc2_core_foundation::CFDictionary::from_slices(&[prompt_key], &[CFBoolean::new(true)]);
+    let ptr = CFRetained::as_ptr(&options)
+        .as_ptr()
+        .cast_const()
+        .cast::<CFType>();
+    unsafe { AXIsProcessTrustedWithOptions(ptr) }
 }
 
 /// An owned, retained `AXUIElementRef`. Released on [`Drop`].

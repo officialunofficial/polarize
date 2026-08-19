@@ -94,20 +94,34 @@ claim automated coverage they don't have.
 ### PINV-4: a tap's fraction is normalized before the platform ever sees it
 
 - Always: `orchestrate::perform_tap` converts the request's `x`/`y`
-  fraction to a pixel point via `coords::fraction_to_pixel`, resolved
-  against the real size of the requested target (from `WindowManager`),
-  and only calls `InputSynthesizer::click_at_pixel` with that
-  already-resolved pixel point — never with the raw fraction. An
-  out-of-range fraction returns a `CoordError` (PINV-1) before
-  `InputSynthesizer` is invoked at all.
+  fraction to a pixel point via `coords::fraction_to_pixel`. It resolves
+  that conversion against the `size` of the `PixelRect` the requested
+  target resolves to, from `WindowManager::resolve_target_rect`. It then
+  adds that rect's `origin`, to land in the **global** display
+  coordinate space. Only this already-resolved global pixel point ever
+  reaches `InputSynthesizer::click_at_pixel` — never the raw fraction,
+  and never a window- or display-relative point. An out-of-range
+  fraction returns a `CoordError` (PINV-1) before `InputSynthesizer` is
+  invoked at all.
 - Because: `InputSynthesizer` implementations are real `CGEvent` calls
   that cannot be exercised in CI. Pushing the fraction-to-pixel decision
-  into this pure, testable function lets a fake implementation prove two
-  things without a real screen: the platform layer receives correct
-  pixel coordinates, and it is never invoked on invalid input.
+  into this pure, testable function lets a fake implementation prove
+  three things without a real screen. It proves the platform layer
+  receives correct pixel coordinates. It proves the target's screen
+  origin is actually applied. It proves the platform layer is never
+  invoked on invalid input. The origin matters because an `App`/`Window`
+  target, or a non-primary display, does not start at the global origin.
+  This was not a hypothetical. An earlier
+  version of `resolve_target_rect` (then `resolve_target_size`) returned
+  only size, with no origin. A real `tap` call against a live app
+  window, not positioned at the screen's own origin, then silently
+  clicked whatever sat at that pixel offset on the *primary* display
+  instead. It raised no error at all, because `click_at_pixel` cannot
+  tell a window-relative point from a global one.
 - If violated: a `tap` request appears to succeed but clicks the wrong
-  point — either because the fraction leaked through unconverted, or
-  because it was normalized against the wrong target's size.
+  point — either because the fraction leaked through unconverted,
+  because it was normalized against the wrong target's size, or because
+  the target's screen origin was dropped.
 
 ### PINV-5: bundle id is tried before app name, but a mismatch falls through
 
@@ -288,28 +302,6 @@ claim automated coverage they don't have.
   `target` were dropped from the schema instead of wired up — `polarize`
   would advertise a field its `keyboard` tool never honors.
 
-## Known gap this document does not paper over
-
-`WindowManager::resolve_target_size` (`crates/polarize-macos/src/window.rs`)
-returns only a `PixelSize` for an `App`/`Window`-scoped target. It
-carries no origin. `perform_tap` (PINV-4) normalizes a tap fraction
-against that size, then hands the result to `click_at_pixel`, whose
-contract needs a pixel point in the **global** display coordinate space.
-
-For `Screen { display_id: None }`, the global origin is `(0, 0)`, so
-this is exactly correct. For a non-primary display, or an `App`/`Window`
-target whose window does not start at the global origin, the resulting
-pixel point stays window- or display-relative instead. This is a real,
-open gap between this trait's shape and `click_at_pixel`'s documented
-contract, not an invariant that currently holds. It is not listed above
-as a PINV, because an invariant states a property that *does* hold, and
-this one does not for those two target shapes.
-
-Fixing it needs one of two changes in `polarize-core`: a `PixelSize` to
-`PixelRect` change, or a trait shape that passes the origin through to
-`InputSynthesizer` directly. See `window.rs`'s own "Known limitation"
-doc comment.
-
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -332,16 +324,20 @@ doc comment.
   additionally asserts `perform_describe`'s `formatted` field equals
   `ax::format_tree`'s output for the same tree, confirming the real
   consumer this invariant names.
-- **PINV-4** — the orchestration half (fraction→pixel conversion, dispatch,
-  and the "never call the platform on bad input" rule) is fully covered
-  by automated `cargo test -p polarize-core` (`orchestrate::tests`)
-  against a fake `WindowManager`/`InputSynthesizer`. The half this
-  invariant depends on but cannot itself verify — that `polarize-macos`'s
-  real `CGEvent` call actually lands the click at the given pixel point
-  on a real screen — is **not** automated anywhere. Verifying that
-  requires a real macOS session with Accessibility permission granted,
-  driving the real `tap` tool interactively and observing the result;
-  see also the window-scoped-target gap noted above.
+- **PINV-4** — the orchestration half (fraction→pixel conversion,
+  origin addition, dispatch, and the "never call the platform on bad
+  input" rule) is fully covered by automated `cargo test -p
+  polarize-core` (`orchestrate::tests`) against a fake
+  `WindowManager`/`InputSynthesizer`, including a regression test for a
+  target whose origin is not `(0, 0)`. The half this invariant depends
+  on but cannot itself verify — that `polarize-macos`'s real `CGEvent`
+  call actually lands the click at the given pixel point on a real
+  screen, and that `resolve_target_rect`'s real `CGDisplayBounds`/
+  `SCWindow::frame()` origins are themselves correct — is **not**
+  automated anywhere. Verified manually against a real running app
+  (Uno.app) on 2026-08-19: before the origin fix, an `App`-scoped `tap`
+  silently clicked the wrong point with no error; after it, `tap`
+  against a window not positioned at the screen origin landed correctly.
 - **PINV-5** — fully covered by automated `cargo test -p polarize-macos`
   (`app_lookup::tests`): exact bundle-id match, case-insensitive name
   fallback, bundle-id-mismatch-falls-through-to-name, bundle-id-wins-

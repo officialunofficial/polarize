@@ -103,36 +103,28 @@ cargo build --release
 The release binary is at `target/release/polarize`. This project only
 builds on macOS, since `polarize-macos` links real macOS frameworks.
 
-### Known runtime issue: `libswift_Concurrency.dylib` not found
+### Fixed runtime issue: `libswift_Concurrency.dylib` not found
 
-On at least one build/test machine (a pre-release macOS with an
-Xcode-beta toolchain selected), the built binary fails to launch at
-all:
+Every built binary used to fail to launch:
 
 ```
 dyld[...]: Library not loaded: @rpath/libswift_Concurrency.dylib
   Reason: no LC_RPATH's found
 ```
 
-`polarize-macos` links `ScreenCaptureKit`, whose Swift entry points pull
-in Swift's Concurrency runtime. On a normal macOS install, this resolves
-from the system's dyld shared cache with no help needed. On the
-affected machine, it did not. The binary needed the Swift 5.5
-back-deployment concurrency library made available at run time, for
-example:
+The root cause was a Cargo link-arg propagation gap. It was not a
+machine-specific toolchain quirk. `screencapturekit`'s own `build.rs`
+emits `cargo:rustc-link-arg=-Wl,-rpath,...` for the Swift Concurrency
+runtime. But Cargo only applies a plain `rustc-link-arg` to targets
+built by the *emitting* package. `polarize-macos` and `apps/polarize`
+only depend on `screencapturekit`. They never build its own targets. So
+that rpath never reached `polarize`'s binary or `polarize-macos`'s test
+binary.
 
-```sh
-DYLD_LIBRARY_PATH="$(xcrun --show-sdk-platform-path 2>/dev/null; echo)/../../Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.5/macosx" \
-  ./target/release/polarize
-```
-
-(equivalently, point `DYLD_LIBRARY_PATH` at
-`.../CommandLineTools/usr/lib/swift-5.5/macosx` if you have the Command
-Line Tools installed instead of full Xcode). This is a Swift/Xcode
-toolchain quirk on that one environment, not a `Cargo.toml` or code
-issue. Confirm whether your own machine needs it before assuming it
-does — if `cargo run -p polarize` launches cleanly with no
-`DYLD_LIBRARY_PATH` override, ignore this section.
+`crates/polarize-macos/build.rs` and `apps/polarize/build.rs` now
+re-emit the same rpath flags for their own package, using
+`rustc-link-arg-bins` for the `polarize` binary. A plain `cargo build`
+or `cargo test` fixes this with no environment variable needed.
 
 ## Running tests
 
@@ -170,9 +162,81 @@ it at the built binary:
 
 Adjust the config key/shape to match your client (Claude Code, Claude
 Desktop, or any other MCP-compatible tool) — the command/args pair
-above is the generic stdio shape most clients expect. If your machine
-hits the "Known runtime issue" above, add the same `DYLD_LIBRARY_PATH`
-under an `"env"` key in this config instead of exporting it in a shell.
+above is the generic stdio shape most clients expect.
+
+For Claude Code specifically, register it with:
+
+```sh
+claude mcp add polarize --scope project -- "$(pwd)/target/debug/polarize"
+```
+
+This writes `.mcp.json`. That file is `.gitignore`d: the command it
+writes is an absolute, machine-specific path. Each clone regenerates
+its own by running the command above.
+
+### Keeping TCC permission grants across rebuilds
+
+`describe`, `tap`, and `keyboard` need Accessibility access.
+`screenshot` needs Screen Recording access. macOS ties each grant to
+the binary's code-signing identity. An unsigned `cargo build` output
+falls back to an ad-hoc identity keyed on the binary's content hash. So
+every rebuild produces a "new" binary, and macOS forgets the grant.
+
+Sign the binary with a stable local certificate instead, so its
+identity — and the grant — survives rebuilds. One-time setup:
+
+```sh
+# Create a self-signed Code Signing certificate in your login keychain.
+openssl req -x509 -newkey rsa:2048 -keyout /tmp/polarize-dev.key \
+  -out /tmp/polarize-dev.crt -days 3650 -nodes -sha256 -subj "/CN=polarize-dev" \
+  -addext "extendedKeyUsage=critical,codeSigning" -addext "basicConstraints=critical,CA:false"
+openssl pkcs12 -export -legacy -out /tmp/polarize-dev.p12 \
+  -inkey /tmp/polarize-dev.key -in /tmp/polarize-dev.crt -passout pass:polarize-dev-temp
+security import /tmp/polarize-dev.p12 -k ~/Library/Keychains/login.keychain-db \
+  -P polarize-dev-temp -A -T /usr/bin/codesign
+security add-trusted-cert -p codeSign -k ~/Library/Keychains/login.keychain-db /tmp/polarize-dev.crt
+rm /tmp/polarize-dev.key /tmp/polarize-dev.p12
+```
+
+Then run `just build` instead of `cargo build --workspace`. It signs
+`target/debug/polarize` with that certificate afterward, using a fixed
+`--identifier`. Rebuilding with plain `cargo build` (no re-sign) still
+works. But it loses the stable identity, and reverts to the
+ad-hoc-signature behavior above.
+
+Grant the two permissions once, using the binary's own bootstrap flag
+rather than System Settings' Accessibility/Screen Recording "+"
+picker:
+
+```sh
+./target/debug/polarize --request-permissions
+```
+
+Adding a raw (non-`.app`) binary through that "+" picker does not
+reliably produce a working grant. The entry can show up toggled on.
+Yet `AXIsProcessTrusted`/`CGPreflightScreenCaptureAccess` still report
+`false`. `--request-permissions` calls the OS's own prompting APIs
+instead (`AXIsProcessTrustedWithOptions`, `CGRequestScreenCaptureAccess`).
+That is what actually registers a functional grant. Approve the system
+dialogs it triggers. Then run the flag again to confirm both
+permissions report `true`.
+
+This flag is a one-time setup helper. No MCP tool call uses it. Every
+real `describe`/`tap`/`keyboard`/`screenshot` call still preflights
+with the non-prompting checks — PINV-10/PINV-11 in
+`docs/INVARIANTS.md`.
+
+If Screen Recording still reports `false` after you approve the
+dialog, check your *terminal app* too (Ghostty, iTerm, Terminal.app,
+…). macOS sometimes attributes the request to the terminal, not to
+`polarize` itself. Enable the terminal under System Settings > Privacy
+& Security > Screen Recording as well.
+
+An earlier manual "+"-add can also leave a stuck decision behind.
+Remove that entry first, then retry. Or run `tccutil reset
+ScreenCapture` — this resets Screen Recording for *every* app on the
+Mac, not just `polarize`, so prefer removing the single stuck entry
+when you can.
 
 Stdio matches how a local MCP client, such as Claude Code, actually
 spawns `polarize`: one client, one subprocess, for the process's whole

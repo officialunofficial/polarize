@@ -17,12 +17,20 @@ ambient rustup default. An Xcode-beta-only machine running only a
 nightly toolchain by default is a real thing that has happened here
 before.
 
-If the built binary fails to launch with `dyld: Library not loaded:
-@rpath/libswift_Concurrency.dylib`, that's a Swift-runtime resolution
-quirk tied to an Xcode-beta-only toolchain select. See README's "Known
-runtime issue" section for the workaround. It's environment-specific,
-not a code or `Cargo.toml` defect. Don't "fix" it by baking a
-machine-specific path into the repo.
+`crates/polarize-macos/build.rs` and `apps/polarize/build.rs` re-bake
+the Swift Concurrency runtime's rpath into every binary and test
+target. See README's "Fixed runtime issue" section for why that's
+needed. If you ever see `dyld: Library not loaded:
+@rpath/libswift_Concurrency.dylib` again, check those two files first.
+It means a link-arg regressed, not that you need a machine-specific
+workaround.
+
+Use `just build` instead of `cargo build --workspace` day to day. It
+re-signs the binary with a stable local identity afterward, so
+Accessibility/Screen Recording TCC grants survive rebuilds. Grant
+Accessibility and Screen Recording once with `./target/debug/polarize
+--request-permissions`. See README's "Keeping TCC permission grants
+across rebuilds" section for the full one-time setup.
 
 ## `polarize-macos` needs manual verification
 

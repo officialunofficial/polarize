@@ -23,8 +23,34 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(1).as_deref() == Some("--request-permissions") {
+        request_permissions();
+        return Ok(());
+    }
+
     let server = PolarizeServer::default();
     let running = server.serve(stdio()).await?;
     running.waiting().await?;
     Ok(())
+}
+
+/// One-time setup: shows the system Accessibility and Screen Recording
+/// consent alerts for this exact binary, so their grants survive future
+/// `just build` re-signs. Not part of the MCP server's own startup path
+/// — see `polarize_macos::permission_bootstrap` for why this exists.
+fn request_permissions() {
+    println!("Requesting Accessibility permission...");
+    let accessibility = polarize_macos::permission_bootstrap::request_accessibility();
+    println!("  Accessibility trusted: {accessibility}");
+
+    println!("Requesting Screen Recording permission...");
+    let screen_recording = polarize_macos::permission_bootstrap::request_screen_recording();
+    println!("  Screen Recording trusted: {screen_recording}");
+
+    if !accessibility || !screen_recording {
+        println!(
+            "\nIf a system dialog appeared, approve it, then run \
+             `./target/debug/polarize --request-permissions` again to confirm."
+        );
+    }
 }

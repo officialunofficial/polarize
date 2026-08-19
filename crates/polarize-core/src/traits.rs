@@ -73,12 +73,14 @@ pub trait WindowManager {
     /// have focus.
     fn activate_app(&self, app: &AppIdentifier) -> Result<(), PolarizeError>;
 
-    /// The pixel size of the screen or window a
-    /// [`crate::schema::ScreenshotTarget`] refers to — the size
+    /// The pixel geometry — global-space origin plus size — of the
+    /// screen or window a [`crate::schema::ScreenshotTarget`] refers to.
     /// [`crate::orchestrate::perform_tap`] normalizes a tap fraction
-    /// against.
-    fn resolve_target_size(
+    /// against `size`, then adds `origin` to get a pixel point in the
+    /// global display coordinate space [`InputSynthesizer::click_at_pixel`]
+    /// requires (PINV-4 in `docs/INVARIANTS.md`).
+    fn resolve_target_rect(
         &self,
         target: &crate::schema::ScreenshotTarget,
-    ) -> Result<crate::coords::PixelSize, PolarizeError>;
+    ) -> Result<crate::coords::PixelRect, PolarizeError>;
 }

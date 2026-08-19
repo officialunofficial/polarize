@@ -7,7 +7,7 @@
 //! returned PNG bytes decode to a recognizable screenshot, not just that
 //! a `Result` came back `Ok`.
 
-use objc2_core_graphics::CGPreflightScreenCaptureAccess;
+use objc2_core_graphics::{CGMainDisplayID, CGPreflightScreenCaptureAccess};
 use polarize_core::error::PolarizeError;
 use polarize_core::permission::{PermissionError, PermissionKind, PermissionState};
 use polarize_core::schema::AppIdentifier;
@@ -28,7 +28,20 @@ use crate::window::resolve_running_app;
 /// `accessibility.rs` and `input.rs` document for their own preflight
 /// checks. `NotDetermined` is the more conservative of the two to report
 /// when this method cannot tell them apart.
+///
+/// Calls `CGMainDisplayID` first, purely for its side effect of
+/// establishing this process's connection to the WindowServer.
+/// `polarize` has no `NSApplication` run loop. Nothing else in the
+/// `screenshot` path touches CoreGraphics before `ScreenCaptureKit`
+/// does. Without that connection already open, `SCShareableContent::get()`
+/// crashes the whole process — `Assertion failed: (did_initialize),
+/// function CGS_REQUIRE_INIT` — instead of returning an `Err`.
+/// `describe`'s AX-frame math happens to call
+/// `CGMainDisplayID`/`CGDisplayBounds` too, which is why only a
+/// `screenshot`-first process (no prior `describe` call in the same
+/// process) can hit this.
 fn ensure_screen_recording_permission() -> Result<(), PolarizeError> {
+    let _ = CGMainDisplayID();
     if CGPreflightScreenCaptureAccess() {
         Ok(())
     } else {

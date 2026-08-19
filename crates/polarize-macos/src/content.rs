@@ -1,7 +1,7 @@
 //! Shared `ScreenCaptureKit` content lookups used by both
 //! [`crate::capture`] (pixels) and [`crate::window`] (window/app geometry
 //! for `tap` normalization) — kept in one place so a screenshot and a
-//! `resolve_target_size` call for the same target agree on which window
+//! `resolve_target_rect` call for the same target agree on which window
 //! they mean.
 //!
 //! Real native calls throughout; see the crate-level "what is and is not
@@ -20,7 +20,7 @@ pub fn shareable_content() -> Result<SCShareableContent, PolarizeError> {
 
 /// Finds the display matching `display_id`, or the first display when
 /// `display_id` is `None` (macOS does not guarantee display enumeration
-/// order matches "main display first", but `resolve_target_size`'s
+/// order matches "main display first", but `resolve_target_rect`'s
 /// `CGMainDisplayID`-based path is what actually decides "main" for
 /// sizing — this lookup only needs *a* display to build a capture filter
 /// from when the caller did not ask for a specific one).
