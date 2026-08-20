@@ -25,7 +25,7 @@
 //! ## Permissions
 //!
 //! These four tools do not need the same grants, and
-//! [`crate::permission::workspace_tool_permission`] says which needs
+//! [`crate::permission::required_permission`] says which needs
 //! what. `list_windows` needs Accessibility, for its accessibility half
 //! only. `app_launch`, `app_quit`, and `list_displays` need no macOS
 //! permission at all.

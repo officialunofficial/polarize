@@ -53,27 +53,35 @@ claim automated coverage they don't have.
   tap at the wrong point instead of a clear error that points at the
   caller's bug.
 
-### PINV-2: every tool call is gated on exactly one permission (decision logic)
+### PINV-2: every tool call is gated on at most one permission (decision logic)
 
-- Always: `permission::required_permission` maps each `ToolKind`
-  (`Screenshot`, `Describe`, `Tap`, `Keyboard`) to exactly one
-  `PermissionKind` (`ScreenRecording` or `Accessibility`), and
-  `permission::check_permission` refuses to run a tool whose required
-  permission is not `Granted` (a permission absent from the caller's
-  status list is treated as `NotDetermined`, never as implicitly
-  granted).
+- Always: `permission::required_permission` maps each `ToolKind` to at
+  most one `PermissionKind`, and `permission::check_permission` refuses
+  to run a tool whose required permission is not `Granted` (a permission
+  absent from the caller's status list is treated as `NotDetermined`,
+  never as implicitly granted). A tool that needs no TCC grant maps to
+  `None` and always passes the check.
 - Because: `polarize-macos`'s native calls fail in ways that are easy to
   misdiagnose from the raw OS error alone (a denied AX permission and a
   genuinely missing UI element can both surface as "element not found").
   Deciding, from a permission-status list, whether a tool may run — in
   one pure, testable place — is what makes that decision auditable
   independent of which real API `polarize-macos` happens to call to
-  learn the status. (Scope note: this function encodes the *decision*;
-  see PINV-10 for how `polarize-macos`'s real tool implementations
-  actually learn the permission status and gate on it today.)
+  learn the status. The mapping must be able to say "none", because
+  several tools really need nothing: `app_launch`, `app_quit`,
+  `list_displays`, `frontmost_app`, `await_workspace_event`, and a
+  clipboard *write* are all unprivileged. A table that could only name a
+  permission would force each of those to claim a grant it never uses,
+  and the table is read as the answer to "what does `polarize` need?".
+  (Scope note: this function encodes the *decision*; see PINV-10 for how
+  `polarize-macos`'s real tool implementations actually learn the
+  permission status and gate on it today.)
 - If violated: a caller sees a confusing native failure (or, worse, a
   `tap`/`keyboard` call that silently no-ops) instead of "grant
-  Accessibility access to run this tool".
+  Accessibility access to run this tool". Map a tool to a permission it
+  does not use, and the table lies the other way: a caller grants
+  something nothing needed, and an audit of what `polarize` asks for
+  stops matching what it does.
 
 ### PINV-3: `describe` output is pre-order and depth-accurate
 

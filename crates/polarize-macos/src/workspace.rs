@@ -13,7 +13,7 @@
 //! ## Which call needs which permission
 //!
 //! The four tools do not share a permission, and
-//! [`polarize_core::permission::workspace_tool_permission`] states the
+//! [`polarize_core::permission::required_permission`] states the
 //! rule. This module follows it:
 //!
 //! - [`MacWorkspace::accessibility_windows`] reads the accessibility

@@ -114,13 +114,31 @@ pub enum ToolKind {
     /// `dismiss_notification` — closes one banner. See
     /// `crate::notifications` (PINV-35).
     DismissNotification,
+    /// `list_windows` — merges the AX window list with the window
+    /// server's. See `crate::workspace` (PINV-30).
+    ListWindows,
+    /// `app_launch` — starts an app. See `crate::workspace`.
+    AppLaunch,
+    /// `app_quit` — asks an app to exit. See `crate::workspace`
+    /// (PINV-31).
+    AppQuit,
+    /// `list_displays` — reports every active display. See
+    /// `crate::workspace`.
+    ListDisplays,
+    /// `frontmost_app` — reports the app that holds focus now. See
+    /// `crate::workspace_events` (PINV-36).
+    FrontmostApp,
+    /// `await_workspace_event` — waits for an app switch, a wake, or a
+    /// session change. See `crate::workspace_events` (PINV-36).
+    AwaitWorkspaceEvent,
 }
 
-/// # PINV-2: every tool call is gated on exactly one permission
+/// # PINV-2: every tool call is gated on at most one permission
 ///
-/// - Always: [`required_permission`] maps each [`ToolKind`] to exactly
+/// - Always: [`required_permission`] maps each [`ToolKind`] to at most
 ///   one [`PermissionKind`], and [`check_permission`] refuses to run a
-///   tool whose required permission is not `Granted`.
+///   tool whose required permission is not `Granted`. A tool that needs
+///   no TCC grant maps to `None`, and always passes the check.
 /// - Because: `polarize-macos`'s native calls fail in ways that are easy
 ///   to misdiagnose from the raw OS error alone (a denied AX permission
 ///   and a genuinely missing UI element can both surface as "element not
@@ -129,44 +147,52 @@ pub enum ToolKind {
 /// - If violated: a caller sees a confusing native failure (or, worse, a
 ///   `tap`/`keyboard` call that silently no-ops) instead of "grant
 ///   Accessibility access to run this tool".
-pub fn required_permission(tool: ToolKind) -> PermissionKind {
+pub fn required_permission(tool: ToolKind) -> Option<PermissionKind> {
     match tool {
-        ToolKind::Screenshot => PermissionKind::ScreenRecording,
-        ToolKind::Describe | ToolKind::Tap | ToolKind::Keyboard => PermissionKind::Accessibility,
-        ToolKind::PerformAction => PermissionKind::Accessibility,
+        ToolKind::Screenshot => Some(PermissionKind::ScreenRecording),
+        ToolKind::Describe | ToolKind::Tap | ToolKind::Keyboard => {
+            Some(PermissionKind::Accessibility)
+        }
+        ToolKind::PerformAction => Some(PermissionKind::Accessibility),
         // Both `await` tools read the accessibility tree, and
         // `AXObserverCreate` needs the same trust as `AXUIElement` does.
-        ToolKind::AwaitUiElement | ToolKind::AwaitScreenIdle => PermissionKind::Accessibility,
-        ToolKind::RunAppleScript | ToolKind::ScriptDictionary => PermissionKind::Automation,
+        ToolKind::AwaitUiElement | ToolKind::AwaitScreenIdle => Some(PermissionKind::Accessibility),
+        ToolKind::RunAppleScript | ToolKind::ScriptDictionary => Some(PermissionKind::Automation),
         // `set_value` writes through `AXUIElementSetAttributeValue`,
         // which needs the same trust every other AX call needs.
-        ToolKind::SetValue => PermissionKind::Accessibility,
+        ToolKind::SetValue => Some(PermissionKind::Accessibility),
         // A hit test reads the accessibility tree, so it needs the same
         // trust `describe` needs.
-        ToolKind::HitTest => PermissionKind::Accessibility,
-        // A write never prompts, so it needs no grant today. This
-        // mapping exists because PINV-2 gives every tool exactly one
-        // permission. `polarize-macos` preflights neither clipboard
-        // tool; see PINV-34.
-        ToolKind::ClipboardRead | ToolKind::ClipboardWrite => PermissionKind::Clipboard,
+        ToolKind::HitTest => Some(PermissionKind::Accessibility),
+        // macOS can withhold the pasteboard contents from a read
+        // (PINV-34). It never refuses a write, so a write is gated on
+        // nothing.
+        ToolKind::ClipboardRead => Some(PermissionKind::Clipboard),
+        ToolKind::ClipboardWrite => None,
         // Both window tools read and write `AXUIElement` attributes.
-        ToolKind::SetWindowFrame | ToolKind::WindowAction => PermissionKind::Accessibility,
+        ToolKind::SetWindowFrame | ToolKind::WindowAction => Some(PermissionKind::Accessibility),
         // `find_text` adds no new TCC surface. Vision itself needs no
         // permission. Its pixels come from the same `ScreenCaptureKit`
         // capture `screenshot` uses, so it needs the same one.
-        ToolKind::FindText => PermissionKind::ScreenRecording,
+        ToolKind::FindText => Some(PermissionKind::ScreenRecording),
         // Both notification tools read the notification centre's
         // accessibility tree, and one of them presses a control in it.
         // See PINV-35.
-        //
-        // The two workspace tools (PINV-36) have no `ToolKind` here on
-        // purpose. `frontmost_app` and `await_workspace_event` need no
-        // TCC permission at all, and this table maps every tool to
-        // exactly one. Naming a permission they do not need would be a
-        // false entry in a table an auditor reads.
         ToolKind::DescribeNotifications | ToolKind::DismissNotification => {
-            PermissionKind::Accessibility
+            Some(PermissionKind::Accessibility)
         }
+        // `list_windows` reads the AX window list for titles and frames.
+        ToolKind::ListWindows => Some(PermissionKind::Accessibility),
+        // These need no TCC grant at all. `NSWorkspace` app control,
+        // `CGGetActiveDisplayList`, and reading the frontmost app are
+        // all unprivileged, and a clipboard write never prompts. Naming
+        // a permission here would put a false row in the very table this
+        // function exists to keep honest.
+        ToolKind::AppLaunch
+        | ToolKind::AppQuit
+        | ToolKind::ListDisplays
+        | ToolKind::FrontmostApp
+        | ToolKind::AwaitWorkspaceEvent => None,
     }
 }
 
@@ -187,7 +213,10 @@ pub fn check_permission(
     tool: ToolKind,
     statuses: &[PermissionStatus],
 ) -> Result<(), PermissionError> {
-    let kind = required_permission(tool);
+    let Some(kind) = required_permission(tool) else {
+        // Nothing to withhold, so nothing can block this call.
+        return Ok(());
+    };
     let state = statuses
         .iter()
         .find(|status| status.kind == kind)
@@ -218,10 +247,49 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_that_needs_no_permission_reports_none() {
+        // Three tools genuinely need no TCC grant. Naming one anyway
+        // would put a false row in the table PINV-2 makes auditable.
+        assert_eq!(required_permission(ToolKind::AppLaunch), None);
+        assert_eq!(required_permission(ToolKind::AppQuit), None);
+        assert_eq!(required_permission(ToolKind::ListDisplays), None);
+        assert_eq!(required_permission(ToolKind::ClipboardWrite), None);
+        assert_eq!(required_permission(ToolKind::FrontmostApp), None);
+        assert_eq!(required_permission(ToolKind::AwaitWorkspaceEvent), None);
+    }
+
+    #[test]
+    fn a_tool_that_needs_no_permission_always_passes_the_check() {
+        // No permission required means nothing can withhold it, even
+        // when every grant this process holds is denied.
+        let denied = [
+            PermissionStatus {
+                kind: PermissionKind::Accessibility,
+                state: PermissionState::Denied,
+            },
+            PermissionStatus {
+                kind: PermissionKind::ScreenRecording,
+                state: PermissionState::Denied,
+            },
+        ];
+        assert!(check_permission(ToolKind::AppLaunch, &denied).is_ok());
+        assert!(check_permission(ToolKind::ListDisplays, &[]).is_ok());
+    }
+
+    #[test]
+    fn list_windows_still_requires_accessibility() {
+        // It reads the AX window list, so it is not in the free set.
+        assert_eq!(
+            required_permission(ToolKind::ListWindows),
+            Some(PermissionKind::Accessibility)
+        );
+    }
+
+    #[test]
     fn screenshot_requires_screen_recording() {
         assert_eq!(
             required_permission(ToolKind::Screenshot),
-            PermissionKind::ScreenRecording
+            Some(PermissionKind::ScreenRecording)
         );
     }
 
@@ -229,15 +297,15 @@ mod tests {
     fn describe_tap_and_keyboard_require_accessibility() {
         assert_eq!(
             required_permission(ToolKind::Describe),
-            PermissionKind::Accessibility
+            Some(PermissionKind::Accessibility)
         );
         assert_eq!(
             required_permission(ToolKind::Tap),
-            PermissionKind::Accessibility
+            Some(PermissionKind::Accessibility)
         );
         assert_eq!(
             required_permission(ToolKind::Keyboard),
-            PermissionKind::Accessibility
+            Some(PermissionKind::Accessibility)
         );
     }
 
@@ -282,7 +350,7 @@ mod tests {
     fn perform_action_requires_accessibility() {
         assert_eq!(
             required_permission(ToolKind::PerformAction),
-            PermissionKind::Accessibility
+            Some(PermissionKind::Accessibility)
         );
     }
 
@@ -304,11 +372,11 @@ mod tests {
     fn the_await_tools_require_accessibility() {
         assert_eq!(
             required_permission(ToolKind::AwaitUiElement),
-            PermissionKind::Accessibility
+            Some(PermissionKind::Accessibility)
         );
         assert_eq!(
             required_permission(ToolKind::AwaitScreenIdle),
-            PermissionKind::Accessibility
+            Some(PermissionKind::Accessibility)
         );
     }
 
@@ -316,11 +384,11 @@ mod tests {
     fn applescript_tools_require_automation() {
         assert_eq!(
             required_permission(ToolKind::RunAppleScript),
-            PermissionKind::Automation
+            Some(PermissionKind::Automation)
         );
         assert_eq!(
             required_permission(ToolKind::ScriptDictionary),
-            PermissionKind::Automation
+            Some(PermissionKind::Automation)
         );
     }
 
@@ -333,7 +401,7 @@ mod tests {
     fn find_text_requires_screen_recording_and_adds_no_new_permission() {
         assert_eq!(
             required_permission(ToolKind::FindText),
-            PermissionKind::ScreenRecording
+            Some(PermissionKind::ScreenRecording)
         );
         assert_eq!(
             required_permission(ToolKind::FindText),
@@ -358,7 +426,7 @@ mod tests {
     fn set_value_requires_accessibility() {
         assert_eq!(
             required_permission(ToolKind::SetValue),
-            PermissionKind::Accessibility
+            Some(PermissionKind::Accessibility)
         );
     }
 
@@ -366,20 +434,20 @@ mod tests {
     fn hit_test_requires_accessibility() {
         assert_eq!(
             required_permission(ToolKind::HitTest),
-            PermissionKind::Accessibility
+            Some(PermissionKind::Accessibility)
         );
     }
 
     #[test]
-    fn the_clipboard_tools_require_the_clipboard_permission() {
+    fn only_the_clipboard_read_needs_a_permission() {
+        // macOS can withhold the pasteboard contents from a read, so a
+        // read is gated. It never refuses a write, so gating a write
+        // would claim a grant `polarize` does not use. See PINV-34.
         assert_eq!(
             required_permission(ToolKind::ClipboardRead),
-            PermissionKind::Clipboard
+            Some(PermissionKind::Clipboard)
         );
-        assert_eq!(
-            required_permission(ToolKind::ClipboardWrite),
-            PermissionKind::Clipboard
-        );
+        assert_eq!(required_permission(ToolKind::ClipboardWrite), None);
     }
 
     #[test]
@@ -403,179 +471,13 @@ mod tests {
     fn both_window_tools_need_accessibility() {
         assert_eq!(
             required_permission(ToolKind::SetWindowFrame),
-            PermissionKind::Accessibility
+            Some(PermissionKind::Accessibility)
         );
         assert_eq!(
             required_permission(ToolKind::WindowAction),
-            PermissionKind::Accessibility
+            Some(PermissionKind::Accessibility)
         );
     }
 }
 
 // ---- the workspace tools: list_windows, app_launch, app_quit, list_displays ----
-
-/// One of the four workspace tools — see [`crate::workspace`].
-///
-/// These four sit apart from [`ToolKind`] on purpose. [`ToolKind`] pairs
-/// with [`required_permission`], which returns exactly one
-/// [`PermissionKind`] for every tool. Three of these four need no macOS
-/// permission at all, and that signature cannot say so. Folding them into
-/// [`ToolKind`] would force each of them to name a permission it does not
-/// use, which is exactly the wrong answer: a tool gated on a permission it
-/// does not need refuses to run for a reason that is not real.
-/// [`workspace_tool_permission`] returns an `Option` instead, and it is
-/// the one place that says which of these tools needs what.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkspaceTool {
-    /// `list_windows` — joins the accessibility window list with the
-    /// window-server list (PINV-30).
-    ListWindows,
-    /// `app_launch` — opens an app through `NSWorkspace`.
-    AppLaunch,
-    /// `app_quit` — quits an app through `NSRunningApplication`
-    /// (PINV-31).
-    AppQuit,
-    /// `list_displays` — reads the attached displays.
-    ListDisplays,
-}
-
-/// The permission `tool` needs, or `None` when it needs none.
-///
-/// `list_windows` needs Accessibility, because half of its answer comes
-/// from `kAXWindowsAttribute`. Its other half,
-/// `CGWindowListCopyWindowInfo`, needs no grant, although macOS hides
-/// window titles from a process without Screen Recording permission.
-/// `list_windows` still works there; the titles simply come from the
-/// accessibility half instead.
-///
-/// `app_launch`, `app_quit`, and `list_displays` need nothing. Opening an
-/// app, quitting an app, and reading display geometry are all ordinary
-/// `NSWorkspace`/`NSRunningApplication`/`CGDirectDisplay` calls that any
-/// process may make. None of them captures pixels, reads the
-/// accessibility tree, or posts input.
-pub fn workspace_tool_permission(tool: WorkspaceTool) -> Option<PermissionKind> {
-    match tool {
-        WorkspaceTool::ListWindows => Some(PermissionKind::Accessibility),
-        WorkspaceTool::AppLaunch | WorkspaceTool::AppQuit | WorkspaceTool::ListDisplays => None,
-    }
-}
-
-/// Checks a workspace tool's permission against `statuses`.
-///
-/// A tool that needs no permission always passes, whatever `statuses`
-/// holds. A tool that needs one follows the same rule
-/// [`check_permission`] applies: an absent status reads as
-/// [`PermissionState::NotDetermined`], never as implicitly granted.
-pub fn check_workspace_permission(
-    tool: WorkspaceTool,
-    statuses: &[PermissionStatus],
-) -> Result<(), PermissionError> {
-    let Some(kind) = workspace_tool_permission(tool) else {
-        return Ok(());
-    };
-    let state = statuses
-        .iter()
-        .find(|status| status.kind == kind)
-        .map(|status| status.state)
-        .unwrap_or(PermissionState::NotDetermined);
-    if state.is_usable() {
-        Ok(())
-    } else {
-        Err(PermissionError::NotGranted { kind, state })
-    }
-}
-
-#[cfg(test)]
-mod workspace_tool_tests {
-    use super::*;
-
-    #[test]
-    fn list_windows_needs_accessibility() {
-        assert_eq!(
-            workspace_tool_permission(WorkspaceTool::ListWindows),
-            Some(PermissionKind::Accessibility)
-        );
-    }
-
-    #[test]
-    fn the_three_lifecycle_tools_need_no_permission() {
-        assert_eq!(workspace_tool_permission(WorkspaceTool::AppLaunch), None);
-        assert_eq!(workspace_tool_permission(WorkspaceTool::AppQuit), None);
-        assert_eq!(workspace_tool_permission(WorkspaceTool::ListDisplays), None);
-    }
-
-    #[test]
-    fn a_permission_free_tool_passes_with_no_status_at_all() {
-        assert!(check_workspace_permission(WorkspaceTool::AppLaunch, &[]).is_ok());
-        assert!(check_workspace_permission(WorkspaceTool::AppQuit, &[]).is_ok());
-        assert!(check_workspace_permission(WorkspaceTool::ListDisplays, &[]).is_ok());
-    }
-
-    #[test]
-    fn a_permission_free_tool_passes_even_when_every_permission_is_denied() {
-        let statuses = [
-            PermissionStatus {
-                kind: PermissionKind::Accessibility,
-                state: PermissionState::Denied,
-            },
-            PermissionStatus {
-                kind: PermissionKind::ScreenRecording,
-                state: PermissionState::Denied,
-            },
-        ];
-        assert!(check_workspace_permission(WorkspaceTool::AppQuit, &statuses).is_ok());
-    }
-
-    #[test]
-    fn list_windows_refuses_without_accessibility() {
-        let err = check_workspace_permission(WorkspaceTool::ListWindows, &[]).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "Accessibility permission is NotDetermined, not granted"
-        );
-    }
-
-    #[test]
-    fn list_windows_passes_with_accessibility_granted() {
-        let statuses = [PermissionStatus {
-            kind: PermissionKind::Accessibility,
-            state: PermissionState::Granted,
-        }];
-        assert!(check_workspace_permission(WorkspaceTool::ListWindows, &statuses).is_ok());
-    }
-
-    #[test]
-    fn list_windows_is_not_satisfied_by_screen_recording() {
-        let statuses = [PermissionStatus {
-            kind: PermissionKind::ScreenRecording,
-            state: PermissionState::Granted,
-        }];
-        let err = check_workspace_permission(WorkspaceTool::ListWindows, &statuses).unwrap_err();
-        assert_eq!(
-            err,
-            PermissionError::NotGranted {
-                kind: PermissionKind::Accessibility,
-                state: PermissionState::NotDetermined
-            }
-        );
-    }
-
-    #[test]
-    fn a_workspace_tool_serializes_in_snake_case() {
-        let json = serde_json::to_string(&WorkspaceTool::ListDisplays).unwrap();
-        assert_eq!(json, r#""list_displays""#);
-    }
-
-    #[test]
-    fn both_notification_tools_need_accessibility() {
-        assert_eq!(
-            required_permission(ToolKind::DescribeNotifications),
-            PermissionKind::Accessibility
-        );
-        assert_eq!(
-            required_permission(ToolKind::DismissNotification),
-            PermissionKind::Accessibility
-        );
-    }
-}
