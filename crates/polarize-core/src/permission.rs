@@ -48,6 +48,11 @@ pub enum PermissionKind {
     /// (caller, target) pair, not once for the whole system. See
     /// PINV-21.
     Automation,
+    /// Clipboard — macOS 26 can ask the user to allow a programmatic
+    /// read of the pasteboard. A read that no paste gesture preceded is
+    /// the case that prompts. A write never prompts. See PINV-34 and
+    /// [`crate::clipboard`].
+    Clipboard,
 }
 
 impl fmt::Display for PermissionKind {
@@ -56,6 +61,7 @@ impl fmt::Display for PermissionKind {
             PermissionKind::ScreenRecording => write!(f, "Screen Recording"),
             PermissionKind::Accessibility => write!(f, "Accessibility"),
             PermissionKind::Automation => write!(f, "Automation"),
+            PermissionKind::Clipboard => write!(f, "Clipboard"),
         }
     }
 }
@@ -84,6 +90,12 @@ pub enum ToolKind {
     AwaitScreenIdle,
     RunAppleScript,
     ScriptDictionary,
+    /// `hit_test_at_point` — see [`crate::hit_test`] (PINV-32).
+    HitTest,
+    /// `clipboard_read` — see [`crate::clipboard`] (PINV-34).
+    ClipboardRead,
+    /// `clipboard_write` — see [`crate::clipboard`].
+    ClipboardWrite,
 }
 
 /// # PINV-2: every tool call is gated on exactly one permission
@@ -108,6 +120,14 @@ pub fn required_permission(tool: ToolKind) -> PermissionKind {
         // `AXObserverCreate` needs the same trust as `AXUIElement` does.
         ToolKind::AwaitUiElement | ToolKind::AwaitScreenIdle => PermissionKind::Accessibility,
         ToolKind::RunAppleScript | ToolKind::ScriptDictionary => PermissionKind::Automation,
+        // A hit test reads the accessibility tree, so it needs the same
+        // trust `describe` needs.
+        ToolKind::HitTest => PermissionKind::Accessibility,
+        // A write never prompts, so it needs no grant today. This
+        // mapping exists because PINV-2 gives every tool exactly one
+        // permission. `polarize-macos` preflights neither clipboard
+        // tool; see PINV-34.
+        ToolKind::ClipboardRead | ToolKind::ClipboardWrite => PermissionKind::Clipboard,
     }
 }
 
@@ -280,6 +300,44 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Automation permission is Denied, not granted"
+        );
+    }
+
+    #[test]
+    fn hit_test_requires_accessibility() {
+        assert_eq!(
+            required_permission(ToolKind::HitTest),
+            PermissionKind::Accessibility
+        );
+    }
+
+    #[test]
+    fn the_clipboard_tools_require_the_clipboard_permission() {
+        assert_eq!(
+            required_permission(ToolKind::ClipboardRead),
+            PermissionKind::Clipboard
+        );
+        assert_eq!(
+            required_permission(ToolKind::ClipboardWrite),
+            PermissionKind::Clipboard
+        );
+    }
+
+    #[test]
+    fn clipboard_permission_displays_its_own_name() {
+        assert_eq!(PermissionKind::Clipboard.to_string(), "Clipboard");
+    }
+
+    #[test]
+    fn check_permission_reports_a_refused_clipboard_read() {
+        let statuses = [PermissionStatus {
+            kind: PermissionKind::Clipboard,
+            state: PermissionState::NotDetermined,
+        }];
+        let err = check_permission(ToolKind::ClipboardRead, &statuses).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Clipboard permission is NotDetermined, not granted"
         );
     }
 }
