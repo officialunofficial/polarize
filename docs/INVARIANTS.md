@@ -584,6 +584,86 @@ claim automated coverage they don't have.
   it on, and the caller never sees an error — only a tool call that
   never returns.
 
+### PINV-35: a notification banner is found by structure, and a dismiss is proved by a re-read
+
+- Always: `notifications::extract_banners` identifies a banner from the
+  shape of the notification centre's accessibility tree — a container
+  that holds prose text, usually with a close control beside it. A
+  subrole, an identifier, or a role description only ever adds evidence.
+  No string value is required for a banner to be found, so a tree shape
+  this code has never seen still yields every banner it can identify.
+  A control becomes the dismiss control only when it publishes an action
+  **and** names itself: subrole `AXCloseButton`, or a label, identifier,
+  help string, or subrole that holds "close", "dismiss", or "clear". A
+  plain pressable button is never enough.
+  `notifications::perform_dismiss_notification` reads the tree again
+  after the press, and reports `dismissed` from that second read alone.
+- Because: Apple renames banner subroles between macOS releases, and has
+  restructured the banner hierarchy more than once. A matcher keyed on
+  `"AXNotificationCenterBanner"` reports zero banners on the first macOS
+  that renames it, and reports that as a normal empty result, which a
+  caller cannot tell from a quiet Mac. Structure has stayed stable
+  across every one of those changes. The named-control rule exists
+  because a banner can carry a "Reply" button next to its close button:
+  pressing the wrong one sends a message the caller never wrote. The
+  re-read exists because `AXUIElementPerformAction` returns success for
+  a press that changed nothing, and because a banner leaves the screen
+  with an animation, so the first read after the press can still carry
+  it.
+- If violated: `describe_notifications` returns an empty list on a Mac
+  that is showing a banner. Or `dismiss_notification` presses "Reply"
+  on a message and calls it a dismiss. Or it reports `dismissed: true`
+  for a banner still on screen, which is the one claim the tool exists
+  to make honestly.
+
+### PINV-36: a workspace wait watches two channels, and names the one that saw the event
+
+- Always: `workspace_events::diff_snapshots` derives every workspace
+  event a pair of snapshots can prove, and marks each one
+  `WorkspaceEventSource::Poll`.
+  `workspace_events::perform_await_workspace_event` reports an event
+  from either the notification channel or the poll channel, and every
+  event it returns names the channel that saw it.
+  `WorkspaceEventKind::WillSleep` is the one kind a poll cannot produce,
+  and `WorkspaceEventKind::is_poll_observable` says so. A waiter that
+  reports an error ends the wait with that error, rather than looping
+  on. `polarize_macos::workspace_events` runs one whole `NSWorkspace`
+  observer lifecycle on one thread, exactly as PINV-20 requires of an
+  `AXObserver`, and sleeps out its budget when nothing arrives.
+- Because: `NSWorkspace` delivers its notifications through a run loop.
+  `apps/polarize` runs `tokio` on its main thread, so no `CFRunLoop`
+  runs there. Apple does not document which run loop the
+  distributed-notification port is scheduled on, so nobody yet knows
+  whether these notifications reach this process at all. A wait built on
+  notifications alone would answer "nothing happened" while an app
+  really did come to the front. A poll of
+  `NSWorkspace.frontmostApplication` and the login-session flags proves
+  the same facts with no run loop, so the feature works either way, and
+  the source field tells the first human on real macOS which channel
+  works. The waiter is also the only thing that makes a wait slice take
+  time: carrying on after it fails would re-read the workspace as fast
+  as the CPU allows.
+- If violated: `await_workspace_event` times out on a Mac where the
+  event really happened, and nothing in the response explains it. Or a
+  `will_sleep` result implies a poll can see a sleep coming, which it
+  cannot. Or a failed observer turns the tool into a busy loop that
+  pins a core for the whole timeout.
+- Scope note: `polarize` reports a workspace event only while an
+  `await_workspace_event` call is running. It has no event stream. An
+  `rmcp` stdio server answers discrete tool calls and has nowhere to
+  push an asynchronous stream, so the tool call itself is the delivery
+  point. An event that happens between two calls is not reported, and
+  the tool's own documentation says so rather than implying a complete
+  history.
+- Scope note: neither workspace tool preflights the login session
+  (PINV-23), and neither needs a TCC permission. Both read
+  `NSWorkspace`, which captures no pixels, reads no accessibility tree,
+  and posts no input. Refusing to run off the console would also break
+  the one tool that reports the console: `frontmost_app` returns
+  `on_console` as a field, and `await_workspace_event` exists partly to
+  report a Fast User Switch. This is the same reasoning PINV-23's
+  exclusion note gives for the two AppleScript tools.
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -862,3 +942,84 @@ claim automated coverage they don't have.
   prevents is a hang, which only a real subprocess can demonstrate.
   What is **not** automated is `applescript.rs`'s thin adapter over it,
   or whether `osascript` in particular leaves a pipe holder behind.
+- **PINV-35** — split, and the untestable half is the tree shapes
+  themselves. The extraction rules are fully covered by automated `cargo
+  test -p polarize-core` (`notifications::tests`, 37 tests): today's
+  banner shape, a plausible future shape with every subrole renamed and
+  the text split across two sub-groups, a banner whose role this code
+  has never seen, a banner with no close control at all, a "Reply"
+  button proved not to be a dismiss control, action-button text kept out
+  of the body, the one/two/many text readings, an identifier hint
+  holding two sub-groups together, and a path round trip back through
+  `selector::node_at_path`. The dismiss rules are covered too: the
+  pressed path and action, the notification centre addressed rather than
+  the frontmost app, a banner that stays put reported as
+  `dismissed: false`, a re-read that succeeds on the third try, two
+  identical banners counted rather than matched by text, a refusal that
+  presses nothing, and every filter and clamp. All of it runs against
+  hand-built trees, so it needs no macOS session.
+  What is **not** automated, and cannot be: whether any of those tree
+  shapes matches what
+  `com.apple.notificationcenterui` really publishes. **Every banner tree
+  in these tests is an informed guess.** Nobody has recorded a real
+  one. A human on a real macOS session with Accessibility permission
+  granted must: post a notification (`osascript -e 'display
+  notification "body" with title "title"'`), run `describe` against
+  `com.apple.notificationcenterui` and read the raw tree, then run
+  `describe_notifications` and compare the two. Then run
+  `dismiss_notification` and watch the banner leave the screen while the
+  response reports `dismissed: true`. Repeat on a banner that carries
+  action buttons, such as a Messages notification, and confirm the tool
+  presses the close control and not "Reply". Repeat on the notification
+  centre panel opened from the menu bar, which is a different shape
+  again. The macOS code is type-checked against `aarch64-apple-darwin`,
+  and `polarize-macos/src/notifications.rs` holds nothing but wiring and
+  one error message.
+- **PINV-36** — split. The whole decision half is fully covered by
+  automated `cargo test -p polarize-core` (`workspace_events::tests`, 32
+  tests): the notification-name table in both directions, an unknown
+  name, the rule that only `WillSleep` is not poll-observable, every
+  snapshot difference (a new frontmost app, a renamed app with one
+  bundle id proved *not* to be an activation, the console lost and
+  regained, a wake read from a wall-clock jump, a small clock correction
+  proved not to be a wake, three events in one step), and the whole wait
+  policy (a notification ending the wait at once, a poll finding what
+  the notification channel missed, a notification with no app filled in
+  from the snapshot, the app filter narrowing an activation but leaving
+  the other kinds alone, the exact budget sequence `[250, 250, 100]` for
+  a 600 ms timeout, a zero timeout, an empty kind list refused before
+  any wait, and a waiter failure ending the wait after exactly one
+  call). A fake clock advances only when the fake waiter says time
+  passed, so no test sleeps.
+  What is **not** automated is every native call, and one of them is a
+  real open question. A human on a real macOS session must check, in
+  this order:
+  1. **Whether `NSWorkspace` notifications arrive at all.** Run
+     `await_workspace_event`, switch to another app, and read
+     `event.source`. `notification` means
+     `polarize-macos/src/workspace_events.rs` works. `poll` means the
+     notification port is not scheduled on the observer thread's run
+     loop, and the poll channel is carrying the whole feature. Either
+     answer is useful; nobody knows which one is true today.
+  2. **Whether `willSleep` ever fires.** It is the one event the poll
+     channel cannot cover. Start a wait, then close the lid or run
+     `pmset sleepnow`. If it never arrives, and step 1 said `poll`,
+     then `WillSleep` is dead weight and should be removed from
+     `WorkspaceEventKind::ALL` rather than left as a promise.
+  3. **That a wake is reported.** Wake the Mac during a long wait and
+     confirm a `did_wake` event, from either channel.
+  4. **That a Fast User Switch is reported.** Switch to a second user
+     account and back.
+  5. **That nothing leaks.** Run a few hundred waits and watch the
+     process's Mach port count. One thread and one observer object per
+     slice must both go away.
+  6. **That `NSWorkspace.frontmostApplication` is safe off the main
+     thread.** `polarize` reads it from a `tokio` blocking thread and
+     from the observer thread. Apple documents `NSWorkspace` as
+     thread-safe, but nothing here has confirmed it.
+  The macOS code is type-checked against `aarch64-apple-darwin`,
+  including the `define_class!` observer and its selector, and `cargo
+  clippy --target aarch64-apple-darwin -- -D warnings` is clean. A
+  type-check cannot prove the selector name in `sel!` matches the method
+  the macro defined, nor that `addObserver:selector:name:object:`
+  accepts it. Both are runtime facts.

@@ -84,6 +84,12 @@ pub enum ToolKind {
     AwaitScreenIdle,
     RunAppleScript,
     ScriptDictionary,
+    /// `describe_notifications` — reads every notification banner on
+    /// screen. See `crate::notifications` (PINV-35).
+    DescribeNotifications,
+    /// `dismiss_notification` — closes one banner. See
+    /// `crate::notifications` (PINV-35).
+    DismissNotification,
 }
 
 /// # PINV-2: every tool call is gated on exactly one permission
@@ -108,6 +114,18 @@ pub fn required_permission(tool: ToolKind) -> PermissionKind {
         // `AXObserverCreate` needs the same trust as `AXUIElement` does.
         ToolKind::AwaitUiElement | ToolKind::AwaitScreenIdle => PermissionKind::Accessibility,
         ToolKind::RunAppleScript | ToolKind::ScriptDictionary => PermissionKind::Automation,
+        // Both notification tools read the notification centre's
+        // accessibility tree, and one of them presses a control in it.
+        // See PINV-35.
+        //
+        // The two workspace tools (PINV-36) have no `ToolKind` here on
+        // purpose. `frontmost_app` and `await_workspace_event` need no
+        // TCC permission at all, and this table maps every tool to
+        // exactly one. Naming a permission they do not need would be a
+        // false entry in a table an auditor reads.
+        ToolKind::DescribeNotifications | ToolKind::DismissNotification => {
+            PermissionKind::Accessibility
+        }
     }
 }
 
@@ -280,6 +298,18 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Automation permission is Denied, not granted"
+        );
+    }
+
+    #[test]
+    fn both_notification_tools_need_accessibility() {
+        assert_eq!(
+            required_permission(ToolKind::DescribeNotifications),
+            PermissionKind::Accessibility
+        );
+        assert_eq!(
+            required_permission(ToolKind::DismissNotification),
+            PermissionKind::Accessibility
         );
     }
 }
