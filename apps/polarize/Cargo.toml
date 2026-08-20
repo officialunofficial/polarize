@@ -7,17 +7,32 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
-publish.workspace = true
+# No `publish = false` here, deliberately. This is the package that
+# carries the whole workspace's git tag, GitHub Release, and changelog
+# (release-plz.toml, git_only = true). release-plz drops any package
+# Cargo reports as unpublishable before it asks anything else about it
+# — confirmed live: with `publish = false` here, `release-plz release`
+# printed "nothing to release" on every run, even with a real,
+# unpublished v0.1.0 waiting to be tagged.
+#
+# This does not reopen a path to crates.io. Two different settings, two
+# different jobs: this field decides whether release-plz handles the
+# package at all; release-plz.toml's own `publish = false` (workspace
+# default, not overridden for this package) decides whether it ever
+# runs `cargo publish`. A manual `cargo publish` here would also fail
+# on its own regardless — polarize-core/polarize-macos below are path
+# dependencies with no `version` requirement, and Cargo refuses to
+# publish a crate whose path dependencies lack one.
 
 [[bin]]
 name = "polarize"
 path = "src/main.rs"
 
-# `publish = false` above usually marks an internal, unreleased crate.
-# `dist` (see dist-workspace.toml) treats it as "not distributable" by
-# default, for that reason. This package is the one binary `dist`
-# should still release, through GitHub, npm, and Homebrew. This opts
-# it back in explicitly.
+# Explicit, even though this package no longer sets `publish = false`
+# (see above) and so would likely default to distributable anyway. This
+# is the one binary `dist` (see dist-workspace.toml) should release,
+# through GitHub, npm, and Homebrew — spelling that out here removes
+# any doubt if the surrounding config changes again.
 [package.metadata.dist]
 dist = true
 
