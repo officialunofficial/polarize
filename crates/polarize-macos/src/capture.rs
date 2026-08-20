@@ -43,7 +43,7 @@ use crate::window::resolve_running_app;
 fn ensure_screen_recording_permission() -> Result<(), PolarizeError> {
     let _ = CGMainDisplayID();
     if CGPreflightScreenCaptureAccess() {
-        Ok(())
+        crate::session::ensure_session_usable()
     } else {
         Err(PolarizeError::Permission(PermissionError::NotGranted {
             kind: PermissionKind::ScreenRecording,

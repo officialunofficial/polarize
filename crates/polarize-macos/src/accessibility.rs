@@ -49,6 +49,7 @@ impl AccessibilityInspector for MacAccessibilityInspector {
                 state: PermissionState::NotDetermined,
             }));
         }
+        crate::session::ensure_session_usable()?;
 
         let running = resolve_running_app(app)?;
         let pid = running.processIdentifier();

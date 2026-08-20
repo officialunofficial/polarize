@@ -45,4 +45,5 @@ pub mod geometry;
 pub mod input;
 pub mod keymap;
 pub mod permission_bootstrap;
+pub mod session;
 pub mod window;
