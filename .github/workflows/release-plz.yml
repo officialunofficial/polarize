@@ -3,7 +3,7 @@
 #  - release-plz-pr (open/update the Release PR — the next version,
 #    regenerated CHANGELOG.md, updated Cargo.lock) runs ONLY on a manual
 #    `workflow_dispatch`. Run it from the Actions tab when you want to cut
-#    a release; it gathers everything merged since the last tag into one PR.
+#    a release. It gathers everything merged since the last tag into one PR.
 #  - release-plz-release (tag vX.Y.Z + cut the GitHub Release) runs on push
 #    to main, so merging that Release PR auto-tags it. The tag fires
 #    .github/workflows/release.yml (dist) to build and publish the binary.
@@ -11,8 +11,9 @@
 # TOKEN: both jobs mint a GitHub App installation token at runtime with
 # actions/create-github-app-token, from two repo secrets — RELEASE_PLZ_APP_ID
 # and RELEASE_PLZ_APP_PRIVATE_KEY. A tag created with the default
-# GITHUB_TOKEN does NOT trigger other workflows, so dist's release.yml would
-# never fire on the release tag; the App token does. See docs/RELEASING.md.
+# GITHUB_TOKEN does NOT trigger other workflows. dist's release.yml would
+# never fire on the release tag because of that. The App token does fire
+# it. See docs/RELEASING.md.
 #
 # RUNNER: macos-latest, not ubuntu. `polarize-macos` links real macOS
 # frameworks (ScreenCaptureKit, AppKit, ...) — same reason ci.yml and dist's

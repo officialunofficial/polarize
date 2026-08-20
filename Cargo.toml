@@ -12,7 +12,7 @@ rust-version = "1.97"
 # `dist` (see dist-workspace.toml) distributes the built `polarize`
 # binary through GitHub Releases, npm, and Homebrew — never through
 # crates.io. `publish = false` is Cargo's own hard block against
-# `cargo publish` for these crates, not just a cargo-release setting.
+# `cargo publish` for these crates, not just a release-plz setting.
 # See docs/RELEASING.md.
 publish = false
 

@@ -30,22 +30,32 @@ Release for that tag — see `release-plz.toml`'s
 
 None of `polarize`'s three crates publish to crates.io. Every crate's
 `Cargo.toml` sets `publish = false` — a real Cargo manifest field,
-which `release-plz` and a bare `cargo publish` both respect. `dist`
+respected by both `release-plz` and a bare `cargo publish`. `dist`
 distributes the built binary through GitHub Releases, npm, and
 Homebrew instead. `release-plz.toml` sets `git_only = true` on the one
 package that tags and releases, for the same reason: there's no
 crates.io version to compare against, only git tags.
 
-**Token**: both `release-plz` jobs mint a GitHub App installation token
-at runtime (`actions/create-github-app-token`), from two repo secrets —
-`RELEASE_PLZ_APP_ID` and `RELEASE_PLZ_APP_PRIVATE_KEY`. A tag created
-with the default `GITHUB_TOKEN` does not trigger other workflows, so
-`dist`'s release.yml would never fire on the release tag. The App token
-does. Both secrets need to exist first. The App also needs its own
-access to this repo, granted separately. See CONTRIBUTING.md if either
-is still missing.
-
 Pushing that tag triggers `.github/workflows/release.yml`.
+
+## Release PR authentication
+
+Both `release-plz` jobs mint a GitHub App installation token at
+runtime (`actions/create-github-app-token`), from two repo secrets:
+
+| Secret | Purpose |
+|---|---|
+| `RELEASE_PLZ_APP_ID` | The `offuno-release-plz` GitHub App's numeric App ID. |
+| `RELEASE_PLZ_APP_PRIVATE_KEY` | That App's private key (PEM), used to mint short-lived installation tokens. |
+
+Both need to exist before this workflow can run. The App also needs
+its own access to this repo, granted separately under the org's
+installation settings. See CONTRIBUTING.md if either is still missing.
+
+A tag created with the default `GITHUB_TOKEN` does not trigger other
+workflows. `dist`'s release.yml would never fire on the release tag
+because of that. The App token does fire it — that's the whole reason
+this workflow mints one instead of using `GITHUB_TOKEN` directly.
 
 ## What `.github/workflows/release.yml` does
 
@@ -68,6 +78,11 @@ The generated workflow runs four stages:
    build time, every release.
 4. Creates a GitHub Release for the tag and uploads every artifact to
    it.
+
+`dist-workspace.toml` also sets `github-attestations = true`. Each
+built artifact gets a signed build-provenance attestation
+(`actions/attest`), so anyone can verify it really came from this
+repo's CI. This needs no secrets of its own.
 
 It does not publish to the npm registry. It does not push to a
 Homebrew tap either. Both need infrastructure this workflow doesn't
@@ -110,11 +125,11 @@ identity on every release. A local ad-hoc-signed build gets a new
 identity on every rebuild, for the same underlying reason. Either way,
 the old grant doesn't survive.
 
-Until `macos-sign = true` and the three secrets above exist, a user who
-upgrades `polarize` must re-grant both permissions after every release.
-There is no way around that today. README.md's "Installing" section
-states this caveat for users directly. See also
-[`PERMISSIONS.md`](PERMISSIONS.md).
+Until `macos-sign = true` and the three secrets above exist, every
+release stays ad-hoc-signed. A user who upgrades `polarize` must then
+re-grant both permissions after every release, with no way around it.
+README.md's "Installing" section states this caveat for users
+directly. See also [`PERMISSIONS.md`](PERMISSIONS.md).
 
 ## What this doesn't do
 

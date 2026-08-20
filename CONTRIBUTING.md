@@ -33,20 +33,11 @@ Accessibility and Screen Recording once with `./target/debug/polarize
 across rebuilds" section for the full one-time setup.
 
 This local self-signed certificate is a dev-only analog of a real
-problem. A released binary needs the same stable-identity property, for
-the same TCC reason. It needs a real Developer ID Application
-certificate to get it, not a self-signed one. See
-[`docs/RELEASING.md`](docs/RELEASING.md) for that side of it.
-
-## Release automation prerequisites
-
-`.github/workflows/release-plz.yml` needs two repo secrets before it can
-run: `RELEASE_PLZ_APP_ID` and `RELEASE_PLZ_APP_PRIVATE_KEY`. Both belong
-to the org's `offuno-release-plz` GitHub App. That App also needs its
-own access to this repo, granted separately under the org's
-installation settings. See [`docs/RELEASING.md`](docs/RELEASING.md) for
-what these unlock, and why a plain `GITHUB_TOKEN` can't substitute for
-them.
+problem released binaries also have. See
+[`docs/RELEASING.md`](docs/RELEASING.md)'s "Why an unsigned release
+still matters" for that side of it, and its "Release PR authentication"
+section for the separate secrets `.github/workflows/release-plz.yml`
+needs before it can run.
 
 ## `polarize-macos` needs manual verification
 

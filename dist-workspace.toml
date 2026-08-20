@@ -31,7 +31,12 @@ install-updater = false
 # `CODESIGN_IDENTITY`, `CODESIGN_CERTIFICATE_PASSWORD`,
 # `CODESIGN_CERTIFICATE` (see docs/RELEASING.md). Those are `dist`'s own
 # secret names, read by its signing step. It skips signing gracefully
-# when any one is absent. Flipping this to `true` needs no other change
-# here, once the secrets exist — run `dist generate --mode ci` again to
-# pick up the signing step.
+# when any one is absent. Flipping this to `true` needs no other file
+# change once the secrets exist. Just run `dist generate --mode ci`
+# again — it adds the signing step on its own.
 macos-sign = false
+# Attach a signed build-provenance attestation to every release artifact,
+# via GitHub's native `actions/attest-build-provenance`. This proves an
+# artifact really came from this repo's CI, not a tampered copy. It costs
+# nothing extra to enable and needs no secrets of its own.
+github-attestations = true
