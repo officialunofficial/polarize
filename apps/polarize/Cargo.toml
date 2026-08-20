@@ -5,11 +5,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 [[bin]]
 name = "polarize"
 path = "src/main.rs"
+
+# `publish = false` above usually marks an internal, unreleased crate.
+# `dist` (see dist-workspace.toml) treats it as "not distributable" by
+# default, for that reason. This package is the one binary `dist`
+# should still release, through GitHub, npm, and Homebrew. This opts
+# it back in explicitly.
+[package.metadata.dist]
+dist = true
 
 [dependencies]
 polarize-core = { path = "../../crates/polarize-core" }

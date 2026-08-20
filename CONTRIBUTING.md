@@ -32,6 +32,12 @@ Accessibility and Screen Recording once with `./target/debug/polarize
 --request-permissions`. See README's "Keeping TCC permission grants
 across rebuilds" section for the full one-time setup.
 
+This local self-signed certificate is a dev-only analog of a real
+problem. A released binary needs the same stable-identity property, for
+the same TCC reason. It needs a real Developer ID Application
+certificate to get it, not a self-signed one. See
+[`docs/RELEASING.md`](docs/RELEASING.md) for that side of it.
+
 ## `polarize-macos` needs manual verification
 
 `cargo test --workspace` exercises `polarize-core` in full, plus the

@@ -65,6 +65,65 @@ right permission, a tool fails with a clean, structured permission
 error instead of an opaque native one. No tool silently does nothing.
 See PINV-10 in [`docs/INVARIANTS.md`](docs/INVARIANTS.md).
 
+## Installing
+
+`polarize` has no GitHub release yet. The commands in this section do
+not work today. They document the intended install path instead. This
+section stays accurate the moment the first release ships. Every
+install path is built and published by
+[`dist`](https://opensource.axo.dev/cargo-dist/) — see
+[`docs/RELEASING.md`](docs/RELEASING.md) for how.
+
+The recommended path is npm, matching Argent's own install command.
+The package is scoped, not `polarize` — that name is already taken on
+the public npm registry:
+
+```sh
+npx @officialunofficial/polarize@latest
+```
+
+This downloads the release archive for your Mac, verifies its
+checksum, and installs the `polarize` binary.
+
+Prefer a shell script over Node.js? Use the fallback installer instead:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/officialunofficial/polarize/releases/latest/download/polarize-installer.sh | sh
+```
+
+This script detects your Mac's architecture, downloads the matching
+release archive from GitHub Releases, and verifies its checksum.
+
+Homebrew isn't available yet. `dist` builds a formula on every release.
+Publishing it needs a tap repository that doesn't exist yet — see
+"What this doesn't do" in [`docs/RELEASING.md`](docs/RELEASING.md).
+
+Every path installs an **unsigned** binary today. This holds until the
+repo owner adds Apple Developer signing secrets to the release
+workflow (see `docs/RELEASING.md`'s "Signing" section). Until then,
+re-grant Accessibility and Screen Recording after every upgrade. macOS
+ties each TCC grant to the binary's code-signing identity. An unsigned
+binary gets a new identity on every release, so each new release loses
+the old grant.
+
+After installing by either path, run the bootstrap flag once to grant
+permissions:
+
+```sh
+polarize --request-permissions
+```
+
+See [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md) for exactly which
+permission each tool needs, and when `polarize` does and doesn't
+prompt.
+
+Then register `polarize` with your MCP client. For Claude Code:
+
+```sh
+claude mcp add polarize --scope project -- "$(command -v polarize)"
+```
+
 ## Workspace layout
 
 - `crates/polarize-core` — platform-agnostic logic: coordinate
@@ -94,7 +153,10 @@ See PINV-10 in [`docs/INVARIANTS.md`](docs/INVARIANTS.md).
 - `apps/polarize` — the thin `rmcp`-based stdio MCP server binary that
   wires MCP tool calls to the two crates above.
 
-## Building
+## Building from source
+
+This section is for contributors. Most users should follow
+"Installing" above instead.
 
 ```sh
 cargo build --release

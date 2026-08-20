@@ -7,7 +7,14 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/officialunofficial/polarize"
+homepage = "https://github.com/officialunofficial/polarize"
 rust-version = "1.97"
+# `dist` (see dist-workspace.toml) distributes the built `polarize`
+# binary through GitHub Releases, npm, and Homebrew — never through
+# crates.io. `publish = false` is Cargo's own hard block against
+# `cargo publish` for these crates, not just a cargo-release setting.
+# See docs/RELEASING.md.
+publish = false
 
 [profile.release]
 lto = true
@@ -22,3 +29,8 @@ strip = true
 inherits = "release"
 debug = true
 strip = false
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

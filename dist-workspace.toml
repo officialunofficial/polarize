@@ -1,0 +1,37 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "npm", "homebrew"]
+# The unscoped name "polarize" is already taken on the public npm
+# registry (confirmed against registry.npmjs.org). Publish under this
+# scope instead, matching Argent's own "@swmansion/argent" convention.
+npm-scope = "@officialunofficial"
+# Target platforms to build apps for (Rust target-triple syntax).
+#
+# macOS only. `polarize-macos` links real macOS frameworks
+# (ScreenCaptureKit, AppKit, ...), so it cannot build for Linux or
+# Windows. See README.md's "Workspace layout" section.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Where to host releases
+hosting = "github"
+# Whether to install an updater program
+install-updater = false
+# Whether to sign released macOS binaries with a Developer ID identity.
+#
+# Off until the repo owner adds three GitHub Actions secrets:
+# `CODESIGN_IDENTITY`, `CODESIGN_CERTIFICATE_PASSWORD`,
+# `CODESIGN_CERTIFICATE` (see docs/RELEASING.md). Those are `dist`'s own
+# secret names, read by its signing step. It skips signing gracefully
+# when any one is absent. Flipping this to `true` needs no other change
+# here, once the secrets exist — run `dist generate --mode ci` again to
+# pick up the signing step.
+macos-sign = false
