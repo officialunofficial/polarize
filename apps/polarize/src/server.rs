@@ -1,7 +1,31 @@
-//! The `polarize` MCP server: wires the four MCP tools (`screenshot`,
-//! `describe`, `tap`, `keyboard`) to `polarize-core`'s orchestration
-//! functions, backed by `polarize-macos`'s real macOS framework
-//! bindings.
+//! The `polarize` MCP server: wires all nine MCP tools (`screenshot`,
+//! `describe`, `tap`, `keyboard`, `perform_action`, `await_ui_element`,
+//! `await_screen_idle`, `run_applescript`, `script_dictionary`) to
+//! `polarize-core`'s orchestration functions, backed by
+//! `polarize-macos`'s real macOS framework bindings.
+//!
+//! ## Why some tools are `async` and the rest are not
+//!
+//! `rmcp` runs each tool call on the `tokio` runtime. A blocking call
+//! there parks a worker thread, and enough concurrent ones starve the
+//! stdio transport itself. So every tool that can run long goes through
+//! [`blocking`], which moves the work to `tokio`'s blocking pool:
+//!
+//! - `await_ui_element` and `await_screen_idle` block for as long as
+//!   their timeout allows — five seconds by default, and more on
+//!   request.
+//! - `run_applescript` runs a subprocess, for up to two minutes.
+//! - `script_dictionary` runs `sdef`, which reads an app bundle.
+//! - `perform_action` walks a whole accessibility tree, then makes a
+//!   synchronous `AXUIElementPerformAction` call that some apps answer
+//!   slowly.
+//!
+//! `screenshot`, `describe`, `tap`, and `keyboard` stay synchronous.
+//! Each returns in milliseconds.
+//!
+//! The `polarize-macos` types are all zero-sized unit structs, so a
+//! `blocking` closure constructs fresh ones rather than borrowing `self`
+//! across the await point.
 //!
 //! This module carries no logic of its own beyond argument/result
 //! plumbing: every tool method deserializes its MCP call into a
@@ -15,10 +39,11 @@
 //!
 //! ## Permission errors surface, but are not pre-flighted here
 //!
-//! All four `polarize-macos` implementations check their real TCC
+//! Every `polarize-macos` implementation checks its real TCC
 //! permission before making a native call (`AXIsProcessTrusted` for
-//! `describe`/`tap`/`keyboard`, `CGPreflightScreenCaptureAccess` for
-//! `screenshot`). Each returns `PolarizeError::Permission` when its
+//! `describe`/`tap`/`keyboard`/`perform_action`/the `await` tools,
+//! `CGPreflightScreenCaptureAccess` for `screenshot`, and
+//! `AEDeterminePermissionToAutomateTarget` for the AppleScript tools). Each returns `PolarizeError::Permission` when its
 //! permission is not granted. That error flows through `to_error_data`
 //! below like any other.
 //!
@@ -61,14 +86,16 @@ use std::sync::Arc;
 /// implementation of one `polarize-core` trait; every one is zero-sized
 /// (`#[derive(Default)]` unit structs), so constructing this server has
 /// no runtime cost of its own.
+///
+/// Only the synchronous tools hold their implementation here. A tool
+/// that runs through [`blocking`] constructs its own inside the closure,
+/// because the closure must own everything it touches.
 #[derive(Debug, Default)]
 pub struct PolarizeServer {
     capture: MacScreenCapture,
     inspector: MacAccessibilityInspector,
     input: MacInputSynthesizer,
     window: MacWindowManager,
-    action: MacActionPerformer,
-    script: MacAppleScriptRunner,
 }
 
 /// Maps a [`PolarizeError`] to the MCP [`ErrorData`] shape a tool call
@@ -223,13 +250,18 @@ impl PolarizeServer {
     /// element does not publish, and refuses a disabled element, before
     /// it calls the platform (PINV-17).
     #[tool(name = "perform_action")]
-    fn perform_action(
+    async fn perform_action(
         &self,
         Parameters(request): Parameters<PerformActionRequest>,
     ) -> Result<Json<PerformActionResponse>, ErrorData> {
-        action::perform_element_action(&self.inspector, &self.action, &request)
-            .map(Json)
-            .map_err(to_error_data)
+        blocking(move || {
+            action::perform_element_action(
+                &MacAccessibilityInspector,
+                &MacActionPerformer,
+                &request,
+            )
+        })
+        .await
     }
 
     /// Waits until an element appears in an app's accessibility tree, or
@@ -277,26 +309,22 @@ impl PolarizeServer {
     /// scriptable apps — Finder, Mail, Safari, Music, Notes — with
     /// semantic operations no accessibility or `CGEvent` call can express.
     #[tool(name = "run_applescript")]
-    fn run_applescript(
+    async fn run_applescript(
         &self,
         Parameters(request): Parameters<RunAppleScriptRequest>,
     ) -> Result<Json<RunAppleScriptResponse>, ErrorData> {
-        script::perform_run_applescript(&self.script, &request)
-            .map(Json)
-            .map_err(to_error_data)
+        blocking(move || script::perform_run_applescript(&MacAppleScriptRunner, &request)).await
     }
 
     /// Lists a scriptable app's own verbs and classes, read from its
     /// `sdef` scripting dictionary. Call it before `run_applescript` to
     /// find out what an app accepts.
     #[tool(name = "script_dictionary")]
-    fn script_dictionary(
+    async fn script_dictionary(
         &self,
         Parameters(request): Parameters<ScriptDictionaryRequest>,
     ) -> Result<Json<ScriptDictionaryResponse>, ErrorData> {
-        script::perform_script_dictionary(&self.script, &request)
-            .map(Json)
-            .map_err(to_error_data)
+        blocking(move || script::perform_script_dictionary(&MacAppleScriptRunner, &request)).await
     }
 }
 

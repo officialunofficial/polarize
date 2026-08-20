@@ -70,6 +70,9 @@ pub struct PerformActionRequest {
 pub struct PerformActionResponse {
     /// Always `true`. A failed action returns an error instead.
     pub performed: bool,
+    /// The app the action addressed, as `describe` resolved it. A
+    /// request that named no app reports the app that was frontmost.
+    pub app_name: String,
     /// The action the tool performed, after the default was applied.
     pub action: String,
     /// The child indices the selector resolved to, from the tree root.
@@ -104,12 +107,6 @@ pub enum ActionError {
     PathNotResolved { path: ElementPath },
 }
 
-/// Reports a refusal as a [`PolarizeError`].
-///
-/// `polarize-core` owns no variant for a refusal yet, so a refusal
-/// travels as [`PolarizeError::Platform`]. Replace this impl with an
-/// `#[error(transparent)] Action(#[from] ActionError)` variant on
-/// `PolarizeError` when `error.rs` can take one.
 /// A short rendering of one node, for an error message.
 fn describe_node(node: &AxNode) -> String {
     let mut parts = vec![format!("role={:?}", node.role)];
@@ -148,7 +145,7 @@ where
     A: AccessibilityInspector,
     P: ActionPerformer,
 {
-    let (_app_name, root) = inspector.describe(request.app.as_ref())?;
+    let (app_name, root) = inspector.describe(request.app.as_ref())?;
     let path = selector::find_one(&root, &request.selector)?;
     let node = selector::node_at_path(&root, &path)
         .ok_or_else(|| ActionError::PathNotResolved { path: path.clone() })?;
@@ -170,15 +167,42 @@ where
         .into());
     }
 
-    performer.perform_action_at_path(request.app.as_ref(), &path, action)?;
+    // Address the app `describe` actually resolved, not `request.app`.
+    // The two differ when the request named no app: `request.app` is
+    // `None`, which both calls read as "whatever is frontmost now". A
+    // focus change between the two calls would then send the press into
+    // a different app, at the same index path, while the response still
+    // named the original element. Naming the resolved app closes that
+    // window. See PINV-18.
+    let target = resolved_target(request.app.as_ref(), &app_name);
+    performer.perform_action_at_path(target.as_ref(), &path, action)?;
 
     Ok(PerformActionResponse {
         performed: true,
+        app_name,
         action: action.to_string(),
         path,
         role: node.role.clone(),
         label: node.label.clone(),
     })
+}
+
+/// The app identifier the action should address.
+///
+/// A request that named an app keeps that identifier, because it may
+/// carry a bundle id, which matches more precisely than a name does. A
+/// request that named none falls back to the localized name `describe`
+/// resolved, so both calls address one app rather than "whatever is
+/// frontmost now", twice.
+fn resolved_target(requested: Option<&AppIdentifier>, app_name: &str) -> Option<AppIdentifier> {
+    match requested {
+        Some(app) => Some(app.clone()),
+        None if app_name.is_empty() => None,
+        None => Some(AppIdentifier {
+            bundle_id: None,
+            app_name: Some(app_name.to_string()),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -323,6 +347,7 @@ mod tests {
             response,
             PerformActionResponse {
                 performed: true,
+                app_name: "TestApp".to_string(),
                 action: "AXShowMenu".to_string(),
                 path: vec![1, 1],
                 role: "AXButton".to_string(),
@@ -347,7 +372,16 @@ mod tests {
 
         assert_eq!(
             performer.calls.borrow().as_slice(),
-            &[(None, vec![1, 1], "AXShowMenu".to_string())]
+            &[(
+                // The app `describe` resolved, not `None` — see
+                // `resolved_target`.
+                Some(AppIdentifier {
+                    bundle_id: None,
+                    app_name: Some("TestApp".to_string()),
+                }),
+                vec![1, 1],
+                "AXShowMenu".to_string()
+            )]
         );
     }
 
@@ -506,6 +540,57 @@ mod tests {
         assert!(err.to_string().contains("AXPress"));
     }
 
+    #[test]
+    fn a_request_naming_no_app_pins_the_action_to_the_app_describe_resolved() {
+        // `describe` reports "TestApp". The performer must address that
+        // app by name, not `None`, which would re-read "frontmost".
+        let inspector = FakeInspector::new(tree());
+        let performer = RecordingPerformer::default();
+
+        perform_element_action(&inspector, &performer, &request(by_label("Save"))).unwrap();
+
+        assert_eq!(
+            performer.calls.borrow()[0].0,
+            Some(AppIdentifier {
+                bundle_id: None,
+                app_name: Some("TestApp".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn a_request_naming_an_app_keeps_the_caller_identifier() {
+        // A caller's own identifier may carry a bundle id, which matches
+        // more precisely than a localized name does. Keep it.
+        let inspector = FakeInspector::new(tree());
+        let performer = RecordingPerformer::default();
+        let named = AppIdentifier {
+            bundle_id: Some("com.apple.TextEdit".to_string()),
+            app_name: None,
+        };
+        let mut req = request(by_label("Save"));
+        req.app = Some(named.clone());
+
+        perform_element_action(&inspector, &performer, &req).unwrap();
+
+        assert_eq!(performer.calls.borrow()[0].0.clone(), Some(named));
+    }
+
+    #[test]
+    fn an_empty_resolved_app_name_falls_back_to_frontmost() {
+        // `NSRunningApplication::localizedName` can be absent, and
+        // `describe` reports that as an empty string. An empty name
+        // would match no app at all, so address the frontmost instead.
+        assert_eq!(resolved_target(None, ""), None);
+        assert_eq!(
+            resolved_target(None, "Finder"),
+            Some(AppIdentifier {
+                bundle_id: None,
+                app_name: Some("Finder".to_string()),
+            })
+        );
+    }
+
     // ---- selector failures ---------------------------------------------
 
     #[test]
@@ -622,6 +707,7 @@ mod tests {
     fn the_response_round_trips_through_json() {
         let response = PerformActionResponse {
             performed: true,
+            app_name: "TestApp".to_string(),
             action: "AXPress".to_string(),
             path: vec![1, 0],
             role: "AXButton".to_string(),

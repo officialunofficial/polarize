@@ -258,14 +258,6 @@ impl AxElement {
             .collect()
     }
 
-    /// Whether the element has at least one AX action it can perform (a
-    /// button-like "this can be clicked" signal). Errors are treated as
-    /// "no actions" rather than propagated — a best-effort classification,
-    /// not a hard fact the caller should branch safety-critical logic on.
-    pub fn has_actions(&self) -> bool {
-        !self.action_names().is_empty()
-    }
-
     /// Whether `attribute` is settable on this element — used as a
     /// best-effort "can this receive keyboard focus" signal for
     /// `AXFocused`. Errors are treated as "not settable".

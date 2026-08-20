@@ -374,8 +374,14 @@ claim automated coverage they don't have.
   known limitation this invariant does not remove: the app can change
   its interface between the two walks. `walk_path` reports an
   out-of-range index as an error rather than acting on the parent.
+  Both walks also address one app, never "whatever is frontmost now",
+  twice: a request that names no app has `action::resolved_target`
+  substitute the app name `describe` resolved, so a focus change
+  between the walks cannot send the press into a second app at the
+  same path.
 - If violated: `perform_action` presses a different element than the
-  one its own response names, and no error reports the difference.
+  one its own response names, and no error reports the difference. Drop
+  the app substitution, and it presses that element in a different app.
 
 ### PINV-19: a wait checks at least once, and never waits past its deadline
 
@@ -659,6 +665,11 @@ claim automated coverage they don't have.
   well. The check is pure logic over an in-memory tree, so it needs no
   macOS session at all.
 - **PINV-18** — split, and the untestable half is the important one.
+  The app-substitution rule is fully covered by automated `cargo test -p
+  polarize-core` (`action::tests`): a request naming no app reaches the
+  performer as the name `describe` resolved, a request naming an app
+  keeps the caller's own identifier including its bundle id, and an
+  empty resolved name falls back to the frontmost app.
   The `polarize-core` half is covered by automated `cargo test -p
   polarize-core`: `selector::tests` proves every found path reads back
   to a matching node, and `action::tests` proves the recording fake
