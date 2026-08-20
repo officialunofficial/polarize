@@ -219,3 +219,89 @@ pub trait AppleScriptRunner {
     /// Returns `app`'s scripting dictionary as raw `sdef` XML.
     fn app_sdef(&self, app: &AppIdentifier) -> Result<AppSdef, PolarizeError>;
 }
+
+// ---- workspace tools: list_windows, app_launch, app_quit, list_displays ----
+
+/// Reads the two window lists [`crate::workspace::merge_window_lists`]
+/// joins. Implemented by `polarize-macos` over `kAXWindowsAttribute` and
+/// `CGWindowListCopyWindowInfo`.
+///
+/// Neither call decides anything. Each one fetches a plain list of plain
+/// structs, and the join that turns two lists into one record set is pure
+/// logic in [`crate::workspace`] (PINV-30).
+pub trait WindowLister {
+    /// The process id of the app `app` names. `polarize-macos` resolves
+    /// it the same way every other tool does, so PINV-5's "bundle id
+    /// first, then name" rule still holds here.
+    fn resolve_app_pid(&self, app: &AppIdentifier) -> Result<i32, PolarizeError>;
+
+    /// Every window the accessibility tree publishes for `app`, or for
+    /// every regular app when `app` is `None`.
+    fn accessibility_windows(
+        &self,
+        app: Option<&AppIdentifier>,
+    ) -> Result<Vec<crate::workspace::AxWindow>, PolarizeError>;
+
+    /// Every window the window server publishes, across all apps.
+    fn window_server_windows(&self) -> Result<Vec<crate::workspace::ServerWindow>, PolarizeError>;
+
+    /// Every running app, reduced to the fields a window record names.
+    fn running_apps(&self) -> Result<Vec<crate::workspace::RunningApp>, PolarizeError>;
+}
+
+/// Starts and stops apps. Implemented by `polarize-macos` over
+/// `NSWorkspace` and `NSRunningApplication`.
+///
+/// The policy that calls these — wait for a launch to appear, ask
+/// politely before forcing, give up at a deadline — is pure logic in
+/// [`crate::workspace`] (PINV-31).
+pub trait AppLifecycle {
+    /// The running app `app` names, or `None` when it is not running.
+    fn find_running_app(
+        &self,
+        app: &AppIdentifier,
+    ) -> Result<Option<crate::workspace::RunningApp>, PolarizeError>;
+
+    /// Asks macOS to open the app `app` names.
+    ///
+    /// Returns the running app when the platform hands one back at once.
+    /// Returns `None` when the launch is still in flight;
+    /// [`crate::workspace::perform_app_launch`] then polls
+    /// [`Self::find_running_app`] until the app appears.
+    fn open_app(
+        &self,
+        app: &AppIdentifier,
+    ) -> Result<Option<crate::workspace::RunningApp>, PolarizeError>;
+
+    /// Brings the app with this process id to the front. Returns what
+    /// the platform reported.
+    fn activate_app_by_pid(&self, pid: i32) -> Result<bool, PolarizeError>;
+
+    /// Asks the app with this process id to quit. `force` selects
+    /// `forceTerminate()` over `terminate()`. Returns whether the
+    /// platform accepted the request, which is not the same as the app
+    /// having exited. See PINV-31.
+    fn request_terminate(&self, pid: i32, force: bool) -> Result<bool, PolarizeError>;
+
+    /// Blocks for at most `budget`, and reports whether the process has
+    /// exited.
+    ///
+    /// With `pid` set, an implementation reports `true` once that
+    /// process is gone. With `pid` as `None` it sleeps out the budget
+    /// and reports `false`. This is the one time-consuming primitive
+    /// `app_launch` and `app_quit` need. The policy that calls it lives
+    /// in [`crate::workspace`], where a fake implementation covers it.
+    fn sleep_until_exit(
+        &self,
+        pid: Option<i32>,
+        budget: std::time::Duration,
+    ) -> Result<bool, PolarizeError>;
+}
+
+/// Lists the attached displays. Implemented by `polarize-macos` over
+/// `CGGetActiveDisplayList` and `CGDisplayBounds`.
+pub trait DisplayLister {
+    /// Every active display, with its bounds in the same global pixel
+    /// space [`WindowManager::resolve_target_rect`] returns.
+    fn displays(&self) -> Result<Vec<crate::workspace::DisplayInfo>, PolarizeError>;
+}

@@ -283,3 +283,159 @@ mod tests {
         );
     }
 }
+
+// ---- the workspace tools: list_windows, app_launch, app_quit, list_displays ----
+
+/// One of the four workspace tools — see [`crate::workspace`].
+///
+/// These four sit apart from [`ToolKind`] on purpose. [`ToolKind`] pairs
+/// with [`required_permission`], which returns exactly one
+/// [`PermissionKind`] for every tool. Three of these four need no macOS
+/// permission at all, and that signature cannot say so. Folding them into
+/// [`ToolKind`] would force each of them to name a permission it does not
+/// use, which is exactly the wrong answer: a tool gated on a permission it
+/// does not need refuses to run for a reason that is not real.
+/// [`workspace_tool_permission`] returns an `Option` instead, and it is
+/// the one place that says which of these tools needs what.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceTool {
+    /// `list_windows` — joins the accessibility window list with the
+    /// window-server list (PINV-30).
+    ListWindows,
+    /// `app_launch` — opens an app through `NSWorkspace`.
+    AppLaunch,
+    /// `app_quit` — quits an app through `NSRunningApplication`
+    /// (PINV-31).
+    AppQuit,
+    /// `list_displays` — reads the attached displays.
+    ListDisplays,
+}
+
+/// The permission `tool` needs, or `None` when it needs none.
+///
+/// `list_windows` needs Accessibility, because half of its answer comes
+/// from `kAXWindowsAttribute`. Its other half,
+/// `CGWindowListCopyWindowInfo`, needs no grant, although macOS hides
+/// window titles from a process without Screen Recording permission.
+/// `list_windows` still works there; the titles simply come from the
+/// accessibility half instead.
+///
+/// `app_launch`, `app_quit`, and `list_displays` need nothing. Opening an
+/// app, quitting an app, and reading display geometry are all ordinary
+/// `NSWorkspace`/`NSRunningApplication`/`CGDirectDisplay` calls that any
+/// process may make. None of them captures pixels, reads the
+/// accessibility tree, or posts input.
+pub fn workspace_tool_permission(tool: WorkspaceTool) -> Option<PermissionKind> {
+    match tool {
+        WorkspaceTool::ListWindows => Some(PermissionKind::Accessibility),
+        WorkspaceTool::AppLaunch | WorkspaceTool::AppQuit | WorkspaceTool::ListDisplays => None,
+    }
+}
+
+/// Checks a workspace tool's permission against `statuses`.
+///
+/// A tool that needs no permission always passes, whatever `statuses`
+/// holds. A tool that needs one follows the same rule
+/// [`check_permission`] applies: an absent status reads as
+/// [`PermissionState::NotDetermined`], never as implicitly granted.
+pub fn check_workspace_permission(
+    tool: WorkspaceTool,
+    statuses: &[PermissionStatus],
+) -> Result<(), PermissionError> {
+    let Some(kind) = workspace_tool_permission(tool) else {
+        return Ok(());
+    };
+    let state = statuses
+        .iter()
+        .find(|status| status.kind == kind)
+        .map(|status| status.state)
+        .unwrap_or(PermissionState::NotDetermined);
+    if state.is_usable() {
+        Ok(())
+    } else {
+        Err(PermissionError::NotGranted { kind, state })
+    }
+}
+
+#[cfg(test)]
+mod workspace_tool_tests {
+    use super::*;
+
+    #[test]
+    fn list_windows_needs_accessibility() {
+        assert_eq!(
+            workspace_tool_permission(WorkspaceTool::ListWindows),
+            Some(PermissionKind::Accessibility)
+        );
+    }
+
+    #[test]
+    fn the_three_lifecycle_tools_need_no_permission() {
+        assert_eq!(workspace_tool_permission(WorkspaceTool::AppLaunch), None);
+        assert_eq!(workspace_tool_permission(WorkspaceTool::AppQuit), None);
+        assert_eq!(workspace_tool_permission(WorkspaceTool::ListDisplays), None);
+    }
+
+    #[test]
+    fn a_permission_free_tool_passes_with_no_status_at_all() {
+        assert!(check_workspace_permission(WorkspaceTool::AppLaunch, &[]).is_ok());
+        assert!(check_workspace_permission(WorkspaceTool::AppQuit, &[]).is_ok());
+        assert!(check_workspace_permission(WorkspaceTool::ListDisplays, &[]).is_ok());
+    }
+
+    #[test]
+    fn a_permission_free_tool_passes_even_when_every_permission_is_denied() {
+        let statuses = [
+            PermissionStatus {
+                kind: PermissionKind::Accessibility,
+                state: PermissionState::Denied,
+            },
+            PermissionStatus {
+                kind: PermissionKind::ScreenRecording,
+                state: PermissionState::Denied,
+            },
+        ];
+        assert!(check_workspace_permission(WorkspaceTool::AppQuit, &statuses).is_ok());
+    }
+
+    #[test]
+    fn list_windows_refuses_without_accessibility() {
+        let err = check_workspace_permission(WorkspaceTool::ListWindows, &[]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Accessibility permission is NotDetermined, not granted"
+        );
+    }
+
+    #[test]
+    fn list_windows_passes_with_accessibility_granted() {
+        let statuses = [PermissionStatus {
+            kind: PermissionKind::Accessibility,
+            state: PermissionState::Granted,
+        }];
+        assert!(check_workspace_permission(WorkspaceTool::ListWindows, &statuses).is_ok());
+    }
+
+    #[test]
+    fn list_windows_is_not_satisfied_by_screen_recording() {
+        let statuses = [PermissionStatus {
+            kind: PermissionKind::ScreenRecording,
+            state: PermissionState::Granted,
+        }];
+        let err = check_workspace_permission(WorkspaceTool::ListWindows, &statuses).unwrap_err();
+        assert_eq!(
+            err,
+            PermissionError::NotGranted {
+                kind: PermissionKind::Accessibility,
+                state: PermissionState::NotDetermined
+            }
+        );
+    }
+
+    #[test]
+    fn a_workspace_tool_serializes_in_snake_case() {
+        let json = serde_json::to_string(&WorkspaceTool::ListDisplays).unwrap();
+        assert_eq!(json, r#""list_displays""#);
+    }
+}
