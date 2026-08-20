@@ -922,6 +922,36 @@ claim automated coverage they don't have.
   a faint line appears or disappears at the edge of the screen.
 - If violated: `index: 1` presses a different control on each call, and
   the caller cannot see it happen, because both calls succeed.
+### PINV-41: a batched attribute read is used only when it is aligned and type-checked
+
+- Always: `ax_ffi::AxElement::node_attributes` reads the eleven value
+  attributes of one node in a single
+  `AXUIElementCopyMultipleAttributeValues` call. It trusts that result
+  only when both of two things hold. The array holds exactly one slot
+  per name asked for. And a slot's own Core Foundation type matches the
+  attribute that slot fills. A slot that fails the type check degrades
+  to the same default the one-at-a-time path produces. A result array of
+  any other length is discarded whole. A batch call that fails outright
+  is discarded the same way. After either kind of discard, every
+  attribute is read again with one call each. Both paths build the node
+  through `ax_batch::AxAttributes::into_node`, so both produce the same
+  `AxNode`.
+- Because: the batch call does not drop a slot it could not read. It
+  writes an `AXValue` of type `kAXValueAXErrorType` into that slot. The
+  placeholder is a real object of a real type. Only a type check
+  separates it from a value. Reading it as a value writes a wrong role,
+  a wrong frame, or a wrong `enabled` flag into the tree. PINV-16
+  forbids exactly that, and the walk still reports success, so nobody
+  sees it happen. A short result array is worse. Every slot after the
+  gap then answers for the wrong attribute. A slow tree is a nuisance,
+  and a wrong tree is a trap, so an untrusted batch is thrown away
+  instead of guessed at.
+- If violated: `describe` returns a tree that looks complete and names
+  the wrong things. A control reads as disabled because its `AXEnabled`
+  slot held an error. An element reports another element's identifier.
+  A caller then selects on that identifier and acts on the wrong
+  control.
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -1049,7 +1079,15 @@ claim automated coverage they don't have.
   value a real app publishes needs a live macOS session with
   Accessibility permission granted. The macOS code is type-checked
   against `aarch64-apple-darwin`, and CI compiles it on a real macOS
-  runner, but neither runs it.
+  runner, but neither runs it. These attributes now arrive in one
+  batched read (PINV-41), which adds a second way to get them wrong: a
+  slot holding the batch call's error placeholder could be read as a
+  real value. The slot-to-field mapping that must prevent it is covered
+  by automated `cargo test -p polarize-core` (`ax_batch::tests`), but
+  the conversion from a real Core Foundation slot to that mapping's
+  input has never run. A human must confirm on a real session that a
+  batched `describe` reports the same `enabled`, `subrole`,
+  `identifier`, and `help` values a human reads off the app itself.
 - **PINV-17** — fully covered by automated `cargo test -p polarize-core`
   (`action::tests`): an action the element does not publish, an element
   that publishes no action at all, a disabled element, the exact text of
@@ -1491,3 +1529,43 @@ claim automated coverage they don't have.
   `aarch64-apple-darwin` and nothing more: no `VNRecognizeTextRequest`
   has ever run here. A human must also confirm the first call's roughly
   27 second model compile, and that later calls return in about 100 ms.
+
+- **PINV-41** — split, and the native half is the risky half. The pure
+  half — the mapping from a positional slot array to node attributes —
+  is fully covered by automated `cargo test -p polarize-core`
+  (`ax_batch::tests`): a full result set, an empty one, a short one, an
+  over-long one, an unread slot in every one of the eleven positions, a
+  wrong value type in every position, a point in the size slot, the
+  title/description/value label order, an empty string reading as
+  absent, an empty role staying empty, the wrong-length rejection that
+  triggers the fallback, and the attribute names matching their index
+  constants. Every case asserts that one bad slot disturbs no other
+  field.
+
+  The native half is **not** automated anywhere, and no AX call of any
+  kind has run in this environment. Nothing here confirms that
+  `AXUIElementCopyMultipleAttributeValues` returns the array this code
+  expects. Nothing confirms that a slot it could not read really holds
+  a `kAXValueAXErrorType` placeholder, or that `AXValueGetType` names
+  it. An error slot read as a value produces a wrong node and no error
+  message, so it stays invisible until somebody runs it. The macOS code
+  is type-checked against `aarch64-apple-darwin` and nothing more.
+
+  A human on a real macOS session with Accessibility permission granted
+  must do three things. First, run `describe` against a rich app, such
+  as Xcode or a browser, and compare the tree to the tree this code
+  produced before the batching. They must match node for node. Second,
+  run `describe` against an app with a sparse or unusual accessibility
+  tree, where many attributes fail to read. No node may show a value
+  that belongs to another attribute. Third, measure. This change is a
+  performance change, and no number in this repository is measured.
+  Time `describe` on a large tree before and after, and record the two
+  numbers here. The round-trip arithmetic predicts the shape of the
+  win: the walk made twelve to fourteen calls per node before, and it
+  makes four after (one batch, one settable check, one action list, one
+  `AXChildren` read). One case deserves its own measurement. The batch
+  always asks for `AXValue`, and the old path skipped it whenever
+  `AXTitle` answered. An element with a title and a very large value
+  therefore copies more text than it used to. The tree is identical
+  either way, so only a timing run against a text-heavy app can show
+  it.

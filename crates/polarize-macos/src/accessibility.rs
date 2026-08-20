@@ -11,7 +11,7 @@
 
 use objc2_core_graphics::{CGDisplayBounds, CGMainDisplayID};
 use polarize_core::ax::AxNode;
-use polarize_core::coords::{PixelPoint, PixelSize};
+use polarize_core::coords::PixelSize;
 use polarize_core::error::PolarizeError;
 use polarize_core::permission::{PermissionError, PermissionKind, PermissionState};
 use polarize_core::schema::AppIdentifier;
@@ -80,51 +80,24 @@ impl AccessibilityInspector for MacAccessibilityInspector {
     }
 }
 
-/// See PINV-12 (a single unreadable attribute degrades to a default,
-/// never aborts the walk) and PINV-13 (recursion stops at
-/// [`MAX_AX_DEPTH`], truncating rather than erroring) in
-/// `docs/INVARIANTS.md`.
+/// Builds one node, then its subtree.
+///
+/// The eleven value attributes a node carries are read in one batch
+/// call (PINV-41), with a one-at-a-time fallback. Three round trips
+/// stay: the settable-`AXFocused` check, the action list, and
+/// `AXChildren`. See also PINV-12 (a single unreadable attribute
+/// degrades to a default, never aborts the walk) and PINV-13
+/// (recursion stops at [`MAX_AX_DEPTH`], truncating rather than
+/// erroring) in `docs/INVARIANTS.md`.
 fn build_node(element: &AxElement, screen_size: PixelSize, depth: usize) -> AxNode {
-    let role = element
-        .string_attribute("AXRole")
-        .unwrap_or_else(|| "AXUnknown".to_string());
-    let label = ["AXTitle", "AXDescription", "AXValue"]
-        .into_iter()
-        .find_map(|attr| {
-            element
-                .string_attribute(attr)
-                .filter(|value| !value.is_empty())
-        });
+    let attributes = element.node_attributes();
+    let frame = safe_normalize_frame(attributes.position, attributes.size, screen_size);
 
-    let position = element.point_attribute("AXPosition").unwrap_or_default();
-    let size = element.size_attribute("AXSize").unwrap_or_default();
-    let frame = safe_normalize_frame(
-        PixelPoint {
-            x: position.x,
-            y: position.y,
-        },
-        PixelSize {
-            width: size.width,
-            height: size.height,
-        },
-        screen_size,
-    );
-
+    // Neither of these two reads has a batched form.
+    // `AXUIElementIsAttributeSettable` and
+    // `AXUIElementCopyActionNames` are their own calls.
     let focusable = element.is_attribute_settable("AXFocused");
     let actions = element.action_names();
-    let interactive = !actions.is_empty();
-    // A missing `AXEnabled` means "this element does not publish an
-    // enabled state", not "this element is disabled" — see PINV-16.
-    let enabled = element.bool_attribute("AXEnabled").unwrap_or(true);
-    let non_empty = |attribute: &str| {
-        element
-            .string_attribute(attribute)
-            .filter(|value| !value.is_empty())
-    };
-    let subrole = non_empty("AXSubrole");
-    let role_description = non_empty("AXRoleDescription");
-    let identifier = non_empty("AXIdentifier");
-    let help = non_empty("AXHelp");
 
     let children = if depth >= MAX_AX_DEPTH {
         Vec::new()
@@ -136,18 +109,5 @@ fn build_node(element: &AxElement, screen_size: PixelSize, depth: usize) -> AxNo
             .collect()
     };
 
-    AxNode {
-        role,
-        label,
-        frame,
-        focusable,
-        interactive,
-        enabled,
-        subrole,
-        role_description,
-        identifier,
-        help,
-        actions,
-        children,
-    }
+    attributes.into_node(frame, focusable, actions, children)
 }

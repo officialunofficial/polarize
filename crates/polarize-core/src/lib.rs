@@ -9,6 +9,8 @@
 
 pub mod action;
 pub mod ax;
+/// The pure half of a batched AX attribute read. See PINV-41.
+pub mod ax_batch;
 pub mod clipboard;
 pub mod coords;
 pub mod error;

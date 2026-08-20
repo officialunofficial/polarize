@@ -27,6 +27,8 @@
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFNumber, CFRange, CFRetained, CFString, CFType, CGPoint, CGSize,
 };
+use polarize_core::ax_batch::{AxAttributeSlot, AxAttributes, BATCHED_ATTRIBUTES};
+use polarize_core::coords::{PixelPoint, PixelSize};
 use std::ffi::c_void;
 use std::ptr;
 use std::ptr::NonNull;
@@ -64,6 +66,18 @@ pub type AXValueType = u32;
 pub const AX_VALUE_TYPE_CG_POINT: AXValueType = 1;
 pub const AX_VALUE_TYPE_CG_SIZE: AXValueType = 2;
 pub const AX_VALUE_TYPE_CF_RANGE: AXValueType = 4;
+/// `kAXValueAXErrorType`. This one is never a value `polarize` wants.
+/// [`AXUIElementCopyMultipleAttributeValues`] writes it into every slot
+/// it could not read — see [`AxElement::batch_attributes`] and PINV-41.
+pub const AX_VALUE_TYPE_AX_ERROR: AXValueType = 5;
+
+/// `typedef UInt32 AXCopyMultipleAttributeOptions;`
+/// (`AXUIElement.h`). `polarize` passes no option, which is what keeps
+/// the result array aligned with the names it asked for. The one flag,
+/// `kAXCopyMultipleAttributeOptionStopOnError`, would instead truncate
+/// the result at the first attribute that failed.
+pub type AXCopyMultipleAttributeOptions = u32;
+pub const AX_COPY_MULTIPLE_ATTRIBUTE_OPTIONS_NONE: AXCopyMultipleAttributeOptions = 0;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
@@ -84,6 +98,19 @@ unsafe extern "C" {
         element: AXUIElementRef,
         attribute: *const CFString,
         value: *mut *const CFType,
+    ) -> AXError;
+    /// Reads many attributes of one element in one call.
+    ///
+    /// With no option set, `values` comes back with exactly one slot
+    /// per name in `attributes`, in the same order. A slot the call
+    /// could not read holds an `AXValue` of type
+    /// `kAXValueAXErrorType`, not a gap and not a null. See
+    /// [`AxElement::batch_attributes`] and PINV-41.
+    fn AXUIElementCopyMultipleAttributeValues(
+        element: AXUIElementRef,
+        attributes: *const CFArray,
+        options: AXCopyMultipleAttributeOptions,
+        values: *mut *const CFArray,
     ) -> AXError;
     fn AXUIElementCopyActionNames(element: AXUIElementRef, names: *mut *const CFArray) -> AXError;
     fn AXUIElementIsAttributeSettable(
@@ -258,6 +285,105 @@ impl AxElement {
                 Some(unsafe { AxElement::from_retained(retained.cast()) })
             })
             .collect()
+    }
+
+    /// Reads every attribute an [`AxNode`](polarize_core::ax::AxNode)
+    /// carries, in one call where that works.
+    ///
+    /// This is the read path a tree walk repeats once per node, so its
+    /// cost is the cost of `describe`. One batch call replaces the nine
+    /// to eleven single reads the fallback below performs.
+    ///
+    /// The fallback runs when the batch call fails outright, and when
+    /// its result array does not line up with the names it was asked
+    /// for. A degraded but correct read beats a fast wrong one, so a
+    /// batch this code cannot trust is never guessed at. See PINV-41.
+    pub fn node_attributes(&self) -> AxAttributes {
+        self.batch_attributes(&BATCHED_ATTRIBUTES)
+            .and_then(|slots| AxAttributes::from_batch(&slots))
+            .unwrap_or_else(|| self.node_attributes_one_at_a_time())
+    }
+
+    /// Reads `attributes` in one `AXUIElementCopyMultipleAttributeValues`
+    /// call, as one slot per name.
+    ///
+    /// Returns `None` when the call itself fails. The caller then reads
+    /// the attributes one at a time (PINV-41).
+    ///
+    /// ## The error placeholder
+    ///
+    /// No option is passed, so the call reads every name it can and
+    /// reports the rest in place. A slot it could not read holds an
+    /// `AXValue` of type `kAXValueAXErrorType`. That placeholder is a
+    /// real Core Foundation object of a real type. Only its
+    /// `AXValueType` separates it from a value, so
+    /// [`slot_from_value`] checks that type on every slot.
+    pub fn batch_attributes(&self, attributes: &[&str]) -> Option<Vec<AxAttributeSlot>> {
+        let names: Vec<CFRetained<CFString>> = attributes
+            .iter()
+            .map(|name| CFString::from_str(name))
+            .collect();
+        let names = CFArray::from_retained_objects(&names);
+        let names: &CFArray = AsRef::as_ref(&*names);
+
+        let mut values: *const CFArray = ptr::null();
+        let err = unsafe {
+            AXUIElementCopyMultipleAttributeValues(
+                self.0,
+                ptr::from_ref(names),
+                AX_COPY_MULTIPLE_ATTRIBUTE_OPTIONS_NONE,
+                &mut values,
+            )
+        };
+        if err != AX_ERROR_SUCCESS {
+            return None;
+        }
+        let values = NonNull::new(values.cast_mut())?;
+        let values: CFRetained<CFArray> = unsafe { CFRetained::from_raw(values) };
+        Some(
+            (0..values.count())
+                .map(|index| slot_from_value(unsafe { values.value_at_index(index) }))
+                .collect(),
+        )
+    }
+
+    /// Reads the same attributes with one call each.
+    ///
+    /// This is the fallback [`Self::node_attributes`] uses when the
+    /// batch call fails. It reads exactly the attributes
+    /// [`BATCHED_ATTRIBUTES`] names, and it degrades each one to the
+    /// same default (PINV-12, PINV-16), so both paths build the same
+    /// node.
+    fn node_attributes_one_at_a_time(&self) -> AxAttributes {
+        let defaults = AxAttributes::default();
+        let non_empty = |attribute: &str| {
+            self.string_attribute(attribute)
+                .filter(|value| !value.is_empty())
+        };
+        let role = self.string_attribute("AXRole").unwrap_or(defaults.role);
+        let label = ["AXTitle", "AXDescription", "AXValue"]
+            .into_iter()
+            .find_map(non_empty);
+        let position = self.point_attribute("AXPosition").unwrap_or_default();
+        let size = self.size_attribute("AXSize").unwrap_or_default();
+        let enabled = self.bool_attribute("AXEnabled").unwrap_or(defaults.enabled);
+        AxAttributes {
+            role,
+            label,
+            position: PixelPoint {
+                x: position.x,
+                y: position.y,
+            },
+            size: PixelSize {
+                width: size.width,
+                height: size.height,
+            },
+            enabled,
+            subrole: non_empty("AXSubrole"),
+            role_description: non_empty("AXRoleDescription"),
+            identifier: non_empty("AXIdentifier"),
+            help: non_empty("AXHelp"),
+        }
     }
 
     /// The element's AX action names, e.g. `["AXPress", "AXShowMenu"]`.
@@ -447,6 +573,78 @@ impl AxElement {
         }
         // The copy already retained it.
         Some(unsafe { AxElement::from_retained(raw) })
+    }
+}
+
+/// Reads one slot of a batch result into an [`AxAttributeSlot`].
+///
+/// `raw` is borrowed (+0) out of the result array, exactly as
+/// [`AxElement::children`] borrows a child.
+///
+/// Every branch that is not a value this reader understands ends at
+/// [`AxAttributeSlot::Unread`], which the pure reader then degrades to
+/// the field's default. That covers a null slot, the batch call's
+/// `kAXValueAXErrorType` placeholder, and a value of a type the
+/// attribute does not use. Each conversion mirrors one single-attribute
+/// reader above, so a batched read and a one-at-a-time read of the same
+/// element agree. See PINV-41.
+fn slot_from_value(raw: *const c_void) -> AxAttributeSlot {
+    let Some(borrowed) = NonNull::new(raw.cast_mut()) else {
+        return AxAttributeSlot::Unread;
+    };
+    // Retain the borrowed reference so `CFRetained` owns a real +1 —
+    // the same handoff `children` and `action_names` perform.
+    let retained = unsafe { CFRetain(borrowed.as_ptr()) };
+    let Some(retained) = NonNull::new(retained.cast_mut().cast::<CFType>()) else {
+        return AxAttributeSlot::Unread;
+    };
+    let value: CFRetained<CFType> = unsafe { CFRetained::from_raw(retained) };
+
+    // Mirrors `string_attribute`.
+    if let Some(text) = value.downcast_ref::<CFString>() {
+        return AxAttributeSlot::Text(text.to_string());
+    }
+    // Mirrors `bool_attribute`.
+    if let Some(flag) = value.downcast_ref::<CFBoolean>() {
+        return AxAttributeSlot::Flag(flag.value());
+    }
+
+    let raw = value_as_ax_value_ptr(&value);
+    match unsafe { AXValueGetType(raw) } {
+        // The placeholder for a slot the batch call could not read. It
+        // is a real object of a real type, so nothing but this check
+        // separates it from a value. Treating it as one would write a
+        // wrong point, size, or string into the node, which PINV-16
+        // forbids.
+        AX_VALUE_TYPE_AX_ERROR => AxAttributeSlot::Unread,
+        // Mirrors `point_attribute`.
+        AX_VALUE_TYPE_CG_POINT => {
+            let mut point = CGPoint::ZERO;
+            let ok =
+                unsafe { AXValueGetValue(raw, AX_VALUE_TYPE_CG_POINT, (&raw mut point).cast()) };
+            if ok {
+                AxAttributeSlot::Point(PixelPoint {
+                    x: point.x,
+                    y: point.y,
+                })
+            } else {
+                AxAttributeSlot::Unread
+            }
+        }
+        // Mirrors `size_attribute`.
+        AX_VALUE_TYPE_CG_SIZE => {
+            let mut size = CGSize::ZERO;
+            let ok = unsafe { AXValueGetValue(raw, AX_VALUE_TYPE_CG_SIZE, (&raw mut size).cast()) };
+            if ok {
+                AxAttributeSlot::Size(PixelSize {
+                    width: size.width,
+                    height: size.height,
+                })
+            } else {
+                AxAttributeSlot::Unread
+            }
+        }
+        _ => AxAttributeSlot::Unread,
     }
 }
 
