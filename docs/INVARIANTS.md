@@ -338,6 +338,55 @@ claim automated coverage they don't have.
   `AXIdentifier` as a real, empty identifier it can select on.
 
 
+### PINV-19: a wait checks at least once, and never waits past its deadline
+
+- Always: `wait::perform_await_ui_element` and
+  `wait::perform_await_screen_idle` read the accessibility tree once
+  before they can report a timeout, even when `timeout_ms` is `0`.
+  Between two reads they wait for at most
+  `min(poll_interval_ms, milliseconds left to the deadline)`. A
+  `UiChangeWaiter` that reports no change neither ends the wait early
+  nor extends it. A `SelectorError::Empty` fails at once, without
+  waiting.
+- Because: this is the hybrid design the tools depend on. `polarize-macos`
+  wakes a wait on an accessibility notification, but some trees never
+  post one. A web view inside a native window is the usual case: its
+  content changes and no `AXLayoutChanged` arrives. Bounding every wait
+  by the poll interval turns a missed notification into one extra tree
+  read instead of a hang for the whole timeout. Reading the tree before
+  the deadline test matters because `timeout_ms: 0` is a legal "is it
+  there right now" request. An empty selector matches the application
+  root, so retrying it would spend the whole timeout on a request that
+  is already wrong (PINV-15).
+- If violated: `await_ui_element` blocks for its full timeout against
+  any app whose accessibility tree under-reports, or a zero timeout
+  returns a timeout error without ever looking at the tree.
+
+### PINV-20: one thread owns a whole `AXObserver` lifecycle
+
+- Always: `observer::MacUiChangeWaiter::wait_for_change` preflights
+  `AXIsProcessTrusted`, then starts one thread. That thread creates the
+  `AXUIElement`, the `AXObserver`, and the `CFRunLoop` source, runs the
+  run loop, removes the source, removes each notification, and releases
+  both handles, all before it ends. Only a `Result<bool, String>`
+  crosses back. Registration is best-effort: the wait fails only when
+  every one of `AXCreated`, `AXLayoutChanged`, and `AXValueChanged` is
+  refused. The call returns `false` only after its budget really
+  elapsed.
+- Because: an `AXObserverRef` and a `CFRunLoopRef` belong to the thread
+  that made them, and neither is `Send`. `apps/polarize` is an async
+  `rmcp` server, so no Tokio worker thread runs a `CFRunLoop` at all.
+  Cleanup matters because the server runs for hours and calls this once
+  per poll interval; one leaked run-loop source per call is a real leak.
+  Partial registration matters because many apps support only some
+  notifications, and failing on the first refusal would break the tool
+  on them. Returning early with `false` would make `wait`'s poll
+  fallback re-walk the whole tree as fast as the CPU allows.
+- If violated: undefined behavior from using a Core Foundation handle on
+  the wrong thread, a leaked run-loop source per tool call, a busy loop
+  that pins a core, or an `await` tool that refuses to run against
+  common apps.
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -462,3 +511,36 @@ claim automated coverage they don't have.
   Accessibility permission granted. The macOS code is type-checked
   against `aarch64-apple-darwin`, and CI compiles it on a real macOS
   runner, but neither runs it.
+
+- **PINV-19** — fully covered by automated `cargo test -p polarize-core`
+  (`wait::tests`, 31 tests). A fake `AccessibilityInspector` returns a
+  different tree on each call, a fake `UiChangeWaiter` records every
+  budget it is handed, and a fake `Clock` advances only when the fake
+  waiter says time passed, so no test sleeps. The tests cover: a match
+  on the first read with no wait at all, a match after several polls, a
+  match when the waiter never signals (the poll fallback), a wait that
+  ends early when the waiter does signal, the exact budget sequence
+  `[250, 250, 100]` for a 600 ms timeout at a 250 ms poll interval, a
+  timeout with its message, a zero timeout that still reads the tree
+  once, an empty selector that fails without waiting, an `index` that is
+  not reached yet and keeps waiting, the idle window restarting on a
+  change, an idle timeout, and every default and clamp. The real
+  `SystemClock` is checked only for "starts near zero, never goes
+  backwards"; it wraps `Instant`, which has nothing else to test.
+- **PINV-20** — **not** automated anywhere, and it cannot be. Every
+  claim in it is native behavior: `AXObserverCreate`,
+  `AXObserverAddNotification`, `AXObserverGetRunLoopSource`,
+  `CFRunLoopAddSource`, `CFRunLoopRunInMode`, and `CFRelease`. No CI
+  runner can grant Accessibility permission or post a real `AXCreated`
+  notification. The module type-checks clean against
+  `aarch64-apple-darwin`, including the `AXObserverCallback` signature's
+  shape, but a type-check cannot prove the signature matches Apple's
+  header — a wrong one is undefined behavior that compiles. A human on a
+  real macOS session with Accessibility permission granted must confirm,
+  against both a native app and an app with a web view: an
+  `await_ui_element` call returns as soon as the element appears rather
+  than at the next poll (which proves notifications arrive at all); an
+  `await_screen_idle` call reports idle while the app is quiet; the
+  three notifications actually register on an application-level element;
+  and a long run of repeated calls leaks no run-loop sources (check with
+  Instruments, or watch the process's Mach port count).

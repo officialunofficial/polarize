@@ -69,6 +69,10 @@ pub enum ToolKind {
     Describe,
     Tap,
     Keyboard,
+    /// `await_ui_element` — see [`crate::wait`].
+    AwaitUiElement,
+    /// `await_screen_idle` — see [`crate::wait`].
+    AwaitScreenIdle,
 }
 
 /// # PINV-2: every tool call is gated on exactly one permission
@@ -88,6 +92,9 @@ pub fn required_permission(tool: ToolKind) -> PermissionKind {
     match tool {
         ToolKind::Screenshot => PermissionKind::ScreenRecording,
         ToolKind::Describe | ToolKind::Tap | ToolKind::Keyboard => PermissionKind::Accessibility,
+        // Both `await` tools read the accessibility tree, and
+        // `AXObserverCreate` needs the same trust as `AXUIElement` does.
+        ToolKind::AwaitUiElement | ToolKind::AwaitScreenIdle => PermissionKind::Accessibility,
     }
 }
 
@@ -211,6 +218,17 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Accessibility permission is NotDetermined, not granted"
+        );
+    }
+    #[test]
+    fn the_await_tools_require_accessibility() {
+        assert_eq!(
+            required_permission(ToolKind::AwaitUiElement),
+            PermissionKind::Accessibility
+        );
+        assert_eq!(
+            required_permission(ToolKind::AwaitScreenIdle),
+            PermissionKind::Accessibility
         );
     }
 }

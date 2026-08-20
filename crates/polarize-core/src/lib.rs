@@ -15,3 +15,4 @@ pub mod permission;
 pub mod schema;
 pub mod selector;
 pub mod traits;
+pub mod wait;
