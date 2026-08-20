@@ -60,13 +60,18 @@ impl WindowController for MacWindowController {
         Ok((resolved, infos))
     }
 
-    fn apply_window_write(
+    fn apply_window_writes(
         &self,
         app: Option<&AppIdentifier>,
         index: usize,
-        write: &WindowWrite,
+        writes: &[WindowWrite],
     ) -> Result<(), PolarizeError> {
         preflight()?;
+        // Resolve the window ONCE, then write to that element for the
+        // whole plan. Re-reading `AXWindows` between writes would follow
+        // the app's own reordering: un-minimizing or raising moves the
+        // window to the front, so the same index would then name a
+        // different window. See PINV-28.
         let (_, windows) = app_windows(app)?;
         let count = windows.len();
         let window = windows.into_iter().nth(index).ok_or_else(|| {
@@ -77,6 +82,16 @@ impl WindowController for MacWindowController {
             ))
         })?;
 
+        for write in writes {
+            apply_one(&window, write)?;
+        }
+        Ok(())
+    }
+}
+
+/// Applies one write to an already-resolved window element.
+fn apply_one(window: &AxElement, write: &WindowWrite) -> Result<(), PolarizeError> {
+    {
         match write {
             WindowWrite::SetPosition(point) => window
                 .set_point_attribute(
@@ -102,11 +117,11 @@ impl WindowController for MacWindowController {
             WindowWrite::SetMain(value) => window
                 .set_bool_attribute("AXMain", *value)
                 .map_err(PolarizeError::Platform),
-            WindowWrite::SetFullScreen(value) => set_full_screen(&window, *value),
+            WindowWrite::SetFullScreen(value) => set_full_screen(window, *value),
             WindowWrite::Raise => window
                 .perform_action("AXRaise")
                 .map_err(PolarizeError::Platform),
-            WindowWrite::Close => press_close_button(&window),
+            WindowWrite::Close => press_close_button(window),
         }
     }
 }

@@ -107,6 +107,9 @@ unsafe extern "C" {
         y: f32,
         element: *mut AXUIElementRef,
     ) -> AXError;
+    /// The process id that owns `element`. A hit test needs this: the
+    /// system-wide element can return an element of any app.
+    fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
     fn AXValueGetType(value: *const c_void) -> AXValueType;
     fn AXValueGetValue(value: *const c_void, the_type: AXValueType, out: *mut c_void) -> bool;
     /// Wraps a `CGPoint`/`CGSize` in the `AXValue` box every geometric
@@ -416,6 +419,17 @@ impl AxElement {
         let range = CFRange { location, length };
         let boxed = ax_value(AX_VALUE_TYPE_CF_RANGE, &range)?;
         self.set_attribute(attribute, &boxed)
+    }
+
+    /// The process id of the app that owns this element.
+    ///
+    /// A hit test asks the system-wide element, so the element it gets
+    /// back may belong to any app — including one the caller never
+    /// named. This is how the caller learns which. See PINV-32.
+    pub fn pid(&self) -> Option<i32> {
+        let mut pid: i32 = 0;
+        let err = unsafe { AXUIElementGetPid(self.0, &mut pid) };
+        (err == AX_ERROR_SUCCESS && pid > 0).then_some(pid)
     }
 
     /// The deepest element at `x`/`y`, in the **global display**

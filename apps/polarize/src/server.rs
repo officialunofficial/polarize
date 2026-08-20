@@ -16,6 +16,8 @@
 //!   request.
 //! - `run_applescript` runs a subprocess, for up to two minutes.
 //! - `script_dictionary` runs `sdef`, which reads an app bundle.
+//! - `clipboard_read` can raise a macOS consent prompt, which blocks
+//!   until the user answers it.
 //! - `perform_action` walks a whole accessibility tree, then makes a
 //!   synchronous `AXUIElementPerformAction` call that some apps answer
 //!   slowly.
@@ -393,13 +395,13 @@ impl PolarizeServer {
     /// error rather than empty text, because macOS can withhold the
     /// contents from a programmatic read (PINV-34).
     #[tool(name = "clipboard_read")]
-    fn clipboard_read(
+    async fn clipboard_read(
         &self,
         Parameters(request): Parameters<ClipboardReadRequest>,
     ) -> Result<Json<ClipboardReadResponse>, ErrorData> {
-        clipboard::perform_clipboard_read(&self.clipboard, &request)
-            .map(Json)
-            .map_err(to_error_data)
+        // macOS 26 can raise a consent prompt on a programmatic read
+        // (PINV-34), and that prompt blocks until the user answers it.
+        blocking(move || clipboard::perform_clipboard_read(&MacClipboard, &request)).await
     }
 
     /// Replaces the pasteboard contents. macOS never refuses a write, so

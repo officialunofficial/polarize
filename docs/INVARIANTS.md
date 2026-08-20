@@ -663,6 +663,14 @@ claim automated coverage they don't have.
 - If violated: `window_action` closes the wrong document window, or it
   reports a window went full screen while nothing on screen changed.
 
+- Always, second: every write of one action crosses to
+  `polarize-macos` in a single `apply_window_writes` call, and the
+  implementation resolves the window index once for the whole plan. A
+  write reorders the list — un-minimizing a window or raising it moves it
+  to the front — so re-resolving between writes would send the rest of
+  the plan to whatever moved into that slot. A `focus` on a minimized
+  window plans three writes, which is exactly where this bites.
+
 ### PINV-29: a window tool reports the frame it re-read, never the frame it requested
 
 - Always: `window_control::perform_set_window_frame` and
@@ -1305,9 +1313,9 @@ claim automated coverage they don't have.
   then repeat with `force: true` and confirm the app dies with no
   dialog.
 - **Workspace tool permissions** (`polarize-core/src/permission.rs`,
-  `workspace_tool_permission`, no invariant number) — the mapping is
+  `required_permission`, no invariant number) — the mapping is
   fully covered by automated `cargo test -p polarize-core`
-  (`permission::workspace_tool_tests`): `list_windows` needs
+  (`permission::tests`): `list_windows` needs
   Accessibility, the other three need nothing, a permission-free tool
   passes even when every permission is denied, and `list_windows` is not
   satisfied by a granted Screen Recording status. What is **not**

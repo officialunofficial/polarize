@@ -419,13 +419,39 @@ pub fn reselect_window(
     title: Option<&str>,
     index: Option<usize>,
     previous: usize,
+    was: &WindowInfo,
     app: &str,
 ) -> Option<usize> {
-    match select_window(windows, title, index, app) {
-        Ok(found) => Some(found),
-        Err(_) if previous < windows.len() => Some(previous),
-        Err(_) => None,
+    // A request that named a title can just look it up again. That is
+    // the identity the caller chose, and a reorder does not change it.
+    if title.is_some() {
+        return match select_window(windows, title, index, app) {
+            Ok(found) => Some(found),
+            Err(_) if previous < windows.len() => Some(previous),
+            Err(_) => None,
+        };
     }
+
+    // A request that named only an index cannot re-use it. The writes
+    // just ran, and `AXRaise` or an un-minimize moves the window to the
+    // front — so that index now names whatever took its place. Follow
+    // the window's own title instead, when it has a unique one.
+    if let Some(was_title) = was.title.as_deref() {
+        let mut matches = windows
+            .iter()
+            .enumerate()
+            .filter(|(_, window)| window.title.as_deref() == Some(was_title));
+        if let Some((found, _)) = matches.next()
+            && matches.next().is_none()
+        {
+            return Some(found);
+        }
+    }
+
+    // An untitled window, or one of several sharing a title, has no
+    // identity to follow across a reorder. The index is the only thing
+    // left. See PINV-29's note on what that cannot promise.
+    (previous < windows.len()).then_some(previous)
 }
 
 /// Converts a request's `position` and `size` into global pixels.
@@ -702,16 +728,21 @@ where
     let index = select_window(&windows, title, request.window_index, &resolved.name)?;
     let target = resolved_target(request.app.as_ref(), &resolved);
 
-    for write in plan_frame_writes(position, size) {
-        control.apply_window_write(target.as_ref(), index, &write)?;
-    }
+    control.apply_window_writes(target.as_ref(), index, &plan_frame_writes(position, size))?;
 
     // PINV-29: read the app again, and report what it really did.
     let (_, after) = control.list_windows(target.as_ref())?;
-    let found = reselect_window(&after, title, request.window_index, index, &resolved.name)
-        .ok_or_else(|| WindowControlError::NoWindows {
-            app: resolved.name.clone(),
-        })?;
+    let found = reselect_window(
+        &after,
+        title,
+        request.window_index,
+        index,
+        &windows[index],
+        &resolved.name,
+    )
+    .ok_or_else(|| WindowControlError::NoWindows {
+        app: resolved.name.clone(),
+    })?;
     let window = &after[found];
 
     Ok(SetWindowFrameResponse {
@@ -756,18 +787,33 @@ where
     {
         window_manager.activate_app(app)?;
     }
-    for write in &plan {
-        control.apply_window_write(target.as_ref(), index, write)?;
-    }
+    control.apply_window_writes(target.as_ref(), index, &plan)?;
 
     // PINV-29: read the app again, and report what it really did.
-    let (_, after) = control.list_windows(target.as_ref())?;
+    //
+    // A close can take the whole app with it. Preview, TextEdit and many
+    // other document apps exit when their last window closes, so this
+    // read finds no app at all. That is the close succeeding. Any other
+    // action reaching the same error is a real failure, because nothing
+    // it does should end the app.
+    let after = match control.list_windows(target.as_ref()) {
+        Ok((_, after)) => after,
+        Err(PolarizeError::AppNotFound(_)) if request.action == WindowAction::Close => Vec::new(),
+        Err(err) => return Err(err),
+    };
     let closed = request.action == WindowAction::Close && after.len() < before.len();
     let window = if closed {
         None
     } else {
-        reselect_window(&after, title, request.window_index, index, &resolved.name)
-            .map(|found| window_state(found, &after[found], display))
+        reselect_window(
+            &after,
+            title,
+            request.window_index,
+            index,
+            &before[index],
+            &resolved.name,
+        )
+        .map(|found| window_state(found, &after[found], display))
     };
 
     Ok(WindowActionResponse {
@@ -785,6 +831,123 @@ mod tests {
     use std::cell::RefCell;
 
     // ---- fixtures -----------------------------------------------------
+    #[test]
+    fn closing_the_last_window_of_an_app_that_quits_is_not_an_error() {
+        // Preview, TextEdit and many document apps exit with their last
+        // window. The PINV-29 re-read then cannot find the app at all.
+        // That is the close succeeding, not failing.
+        struct QuitsOnClose;
+        impl WindowController for QuitsOnClose {
+            fn list_windows(
+                &self,
+                _app: Option<&AppIdentifier>,
+            ) -> Result<(ResolvedApp, Vec<WindowInfo>), PolarizeError> {
+                thread_local! {
+                    static CALLS: RefCell<usize> = const { RefCell::new(0) };
+                }
+                let first = CALLS.with(|c| {
+                    let mut c = c.borrow_mut();
+                    *c += 1;
+                    *c == 1
+                });
+                if first {
+                    Ok((
+                        ResolvedApp {
+                            name: "Preview".to_string(),
+                            bundle_id: None,
+                        },
+                        vec![window(Some("Doc"))],
+                    ))
+                } else {
+                    Err(PolarizeError::AppNotFound("Preview".to_string()))
+                }
+            }
+
+            fn apply_window_writes(
+                &self,
+                _app: Option<&AppIdentifier>,
+                _index: usize,
+                _writes: &[WindowWrite],
+            ) -> Result<(), PolarizeError> {
+                Ok(())
+            }
+        }
+
+        let request = WindowActionRequest {
+            app: None,
+            window_title: None,
+            window_index: None,
+            action: WindowAction::Close,
+            display_id: None,
+        };
+
+        let response = perform_window_action(&FakeWindows::new(), &QuitsOnClose, &request).unwrap();
+
+        assert_eq!(response.action, WindowAction::Close);
+        assert!(response.window.is_none(), "the window is gone");
+        assert_eq!(response.window_count, 0);
+    }
+
+    #[test]
+    fn every_write_of_one_action_lands_on_one_window() {
+        // `focus` on a minimized window plans three writes. Un-minimizing
+        // reorders `AXWindows`, so re-resolving the index between writes
+        // would send the last two to a different window.
+        let windows = vec![
+            window(Some("Front")),
+            WindowInfo {
+                minimized: true,
+                ..window(Some("Target"))
+            },
+        ];
+        let control = ReorderingController::new(windows);
+        let request = WindowActionRequest {
+            app: None,
+            window_title: Some("Target".to_string()),
+            window_index: None,
+            action: WindowAction::Focus,
+            display_id: None,
+        };
+
+        perform_window_action(&FakeWindows::new(), &control, &request).unwrap();
+
+        assert_eq!(
+            control.hits(),
+            vec!["Target", "Target", "Target"],
+            "a reorder mid-action moved the target"
+        );
+    }
+
+    #[test]
+    fn a_reorder_does_not_make_the_response_describe_another_window() {
+        // Addressed by index, with no title. After the raise, index 1
+        // names a different window, so re-reading by index alone would
+        // report the wrong one.
+        let windows = vec![
+            window(Some("Front")),
+            WindowInfo {
+                rect: rect(10.0, 10.0, 200.0, 200.0),
+                ..window(Some("Target"))
+            },
+        ];
+        let control = ReorderingController::new(windows);
+        let request = WindowActionRequest {
+            app: None,
+            window_title: None,
+            window_index: Some(1),
+            action: WindowAction::Focus,
+            display_id: None,
+        };
+
+        let response = perform_window_action(&FakeWindows::new(), &control, &request).unwrap();
+
+        let window = response.window.expect("the window still exists");
+        assert_eq!(
+            window.title.as_deref(),
+            Some("Target"),
+            "the response named the window that moved into the old index"
+        );
+    }
 
     const DISPLAY: PixelRect = PixelRect {
         origin: PixelPoint { x: 0.0, y: 0.0 },
@@ -815,6 +978,68 @@ mod tests {
     /// A fake [`WindowController`]. It records every call, and it swaps
     /// in a second window list after the first write, so a test can tell
     /// a re-read apart from an echo of the request.
+    /// A controller whose window list REORDERS after the first write,
+    /// the way a real `AXRaise` or un-minimize does. Every write is
+    /// recorded with the window it actually landed on.
+    struct ReorderingController {
+        windows: RefCell<Vec<WindowInfo>>,
+        hits: RefCell<Vec<String>>,
+    }
+
+    impl ReorderingController {
+        fn new(windows: Vec<WindowInfo>) -> Self {
+            Self {
+                windows: RefCell::new(windows),
+                hits: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn hits(&self) -> Vec<String> {
+            self.hits.borrow().clone()
+        }
+    }
+
+    impl WindowController for ReorderingController {
+        fn list_windows(
+            &self,
+            _app: Option<&AppIdentifier>,
+        ) -> Result<(ResolvedApp, Vec<WindowInfo>), PolarizeError> {
+            Ok((
+                ResolvedApp {
+                    name: "TestApp".to_string(),
+                    bundle_id: None,
+                },
+                self.windows.borrow().clone(),
+            ))
+        }
+
+        fn apply_window_writes(
+            &self,
+            _app: Option<&AppIdentifier>,
+            index: usize,
+            writes: &[WindowWrite],
+        ) -> Result<(), PolarizeError> {
+            // Resolve the index ONCE, as a real implementation must.
+            let target = self.windows.borrow()[index].clone();
+            for write in writes {
+                self.hits
+                    .borrow_mut()
+                    .push(target.title.clone().unwrap_or_default());
+                if matches!(write, WindowWrite::SetMinimized(false) | WindowWrite::Raise) {
+                    // The app brings the touched window to the front.
+                    let mut windows = self.windows.borrow_mut();
+                    let at = windows
+                        .iter()
+                        .position(|w| w.title == target.title)
+                        .expect("target still present");
+                    let moved = windows.remove(at);
+                    windows.insert(0, moved);
+                }
+            }
+            Ok(())
+        }
+    }
+
     struct FakeController {
         before: Vec<WindowInfo>,
         after: Option<Vec<WindowInfo>>,
@@ -877,17 +1102,19 @@ mod tests {
             Ok((self.resolved.clone(), windows))
         }
 
-        fn apply_window_write(
+        fn apply_window_writes(
             &self,
             app: Option<&AppIdentifier>,
             index: usize,
-            write: &WindowWrite,
+            writes: &[WindowWrite],
         ) -> Result<(), PolarizeError> {
-            self.writes.borrow_mut().push((app.cloned(), index, *write));
-            match &self.fail_write {
-                Some(message) => Err(PolarizeError::Platform(message.clone())),
-                None => Ok(()),
+            for write in writes {
+                self.writes.borrow_mut().push((app.cloned(), index, *write));
+                if let Some(message) = &self.fail_write {
+                    return Err(PolarizeError::Platform(message.clone()));
+                }
             }
+            Ok(())
         }
     }
 

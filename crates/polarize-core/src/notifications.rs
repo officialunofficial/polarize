@@ -84,6 +84,16 @@ const BANNER_HINTS: [&str; 3] = ["notification", "banner", "alert"];
 /// Lower-case fragments that mark a control as the close control.
 const DISMISS_HINTS: [&str; 3] = ["close", "dismiss", "clear"];
 
+/// Lower-case fragments that mark a control as acting on **every**
+/// notification, not on one banner.
+///
+/// Notification Centre publishes a "Clear All" button. Its label matches
+/// [`DISMISS_HINTS`], and macOS is free to place it inside a banner's own
+/// container — a stacked notification group is the obvious case. Pressing
+/// it discards notifications the caller never named, and nothing undoes
+/// that. See PINV-35.
+const CLEAR_ALL_HINTS: [&str; 2] = ["all", "everything"];
+
 /// The `AXSubrole` macOS gives a window's close button. A close control
 /// that publishes it needs no other evidence.
 const CLOSE_BUTTON_SUBROLE: &str = "AXCloseButton";
@@ -192,6 +202,11 @@ fn dismiss_evidence(node: &AxNode) -> Option<DismissEvidence> {
     if node.actions.is_empty() {
         return None;
     }
+    // Never a single banner's control, whatever else it looks like. A
+    // wrong guess here is not recoverable.
+    if clears_everything(node) {
+        return None;
+    }
     if node.subrole.as_deref() == Some(CLOSE_BUTTON_SUBROLE) {
         return Some(DismissEvidence::Subrole);
     }
@@ -208,6 +223,18 @@ fn dismiss_evidence(node: &AxNode) -> Option<DismissEvidence> {
             .as_deref()
             .is_some_and(|subrole| contains_hint(subrole, &DISMISS_HINTS));
     named.then_some(DismissEvidence::Named)
+}
+
+/// Whether a control's own name says it acts on every notification.
+///
+/// This asks for both halves: a dismiss word and an all-of-them word.
+/// "Clear All" and "Close all notifications" match; "Close" does not,
+/// and neither does an unrelated control that merely says "all".
+fn clears_everything(node: &AxNode) -> bool {
+    [&node.identifier, &node.label, &node.help]
+        .into_iter()
+        .flatten()
+        .any(|value| contains_hint(value, &DISMISS_HINTS) && contains_hint(value, &CLEAR_ALL_HINTS))
 }
 
 fn contains_hint(value: &str, hints: &[&str]) -> bool {
@@ -765,6 +792,220 @@ fn describe_filter(request: &DismissNotificationRequest) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A control that clears EVERY notification is never one banner's
+    /// dismiss control, even when it sits inside that banner's own
+    /// container. Pressing it discards notifications the caller never
+    /// named, and nothing can undo that.
+    #[test]
+    fn a_clear_all_inside_a_banner_is_not_its_dismiss_control() {
+        let tree = AxNode {
+            role: "AXGroup".to_string(),
+            children: vec![AxNode {
+                role: "AXGroup".to_string(),
+                children: vec![
+                    AxNode {
+                        role: "AXStaticText".to_string(),
+                        label: Some("Messages".to_string()),
+                        ..AxNode::default()
+                    },
+                    AxNode {
+                        role: "AXStaticText".to_string(),
+                        label: Some("Hello there".to_string()),
+                        ..AxNode::default()
+                    },
+                    AxNode {
+                        role: "AXButton".to_string(),
+                        label: Some("Clear All".to_string()),
+                        actions: vec!["AXPress".to_string()],
+                        ..AxNode::default()
+                    },
+                ],
+                ..AxNode::default()
+            }],
+            ..AxNode::default()
+        };
+
+        let banners = extract_banners(&tree);
+        assert_eq!(banners.len(), 1);
+        assert_eq!(
+            banners[0].dismiss_path, None,
+            "a dismiss would press Clear All and wipe every notification"
+        );
+    }
+
+    #[test]
+    fn a_plain_close_control_inside_a_banner_still_dismisses_it() {
+        // The guard must not disarm a real close control.
+        let tree = AxNode {
+            role: "AXGroup".to_string(),
+            children: vec![AxNode {
+                role: "AXGroup".to_string(),
+                children: vec![
+                    AxNode {
+                        role: "AXStaticText".to_string(),
+                        label: Some("Messages".to_string()),
+                        ..AxNode::default()
+                    },
+                    AxNode {
+                        role: "AXButton".to_string(),
+                        label: Some("Close".to_string()),
+                        actions: vec!["AXPress".to_string()],
+                        ..AxNode::default()
+                    },
+                ],
+                ..AxNode::default()
+            }],
+            ..AxNode::default()
+        };
+        assert_eq!(extract_banners(&tree)[0].dismiss_path, Some(vec![0, 1]));
+    }
+
+    /// The same hazard, on a tree whose banners do NOT name themselves.
+    /// Here the only thing that can mark a container is its children —
+    /// and the root's children include Clear All, whose label matches
+    /// the "clear" hint. Without a guard the root itself reads as one
+    /// banner, so both notifications merge into one record and a dismiss
+    /// presses Clear All, wiping every notification on screen.
+    #[test]
+    fn a_group_level_clear_all_does_not_swallow_unlabelled_banners() {
+        let banner = |app: &str, body: &str| AxNode {
+            role: "AXGroup".to_string(),
+            children: vec![
+                AxNode {
+                    role: "AXStaticText".to_string(),
+                    label: Some(app.to_string()),
+                    ..AxNode::default()
+                },
+                AxNode {
+                    role: "AXStaticText".to_string(),
+                    label: Some(body.to_string()),
+                    ..AxNode::default()
+                },
+                AxNode {
+                    role: "AXButton".to_string(),
+                    label: Some("Close".to_string()),
+                    actions: vec!["AXPress".to_string()],
+                    ..AxNode::default()
+                },
+            ],
+            ..AxNode::default()
+        };
+        let tree = AxNode {
+            role: "AXGroup".to_string(),
+            children: vec![
+                banner("Messages", "Hello there"),
+                banner("Calendar", "Standup at 10"),
+                AxNode {
+                    role: "AXButton".to_string(),
+                    label: Some("Clear All".to_string()),
+                    actions: vec!["AXPress".to_string()],
+                    ..AxNode::default()
+                },
+            ],
+            ..AxNode::default()
+        };
+
+        let banners = extract_banners(&tree);
+        assert_eq!(
+            banners.len(),
+            2,
+            "Clear All made the whole root read as one banner: {banners:#?}"
+        );
+        let clear_all_path = Some(vec![2]);
+        assert!(
+            banners.iter().all(|b| b.dismiss_path != clear_all_path),
+            "a dismiss would press Clear All and wipe every notification"
+        );
+    }
+
+    /// Notification Centre publishes a "Clear All" button that wipes
+    /// every banner at once. It must never be mistaken for one banner's
+    /// own close control: pressing it discards notifications the caller
+    /// never named, and nothing can undo that.
+    #[test]
+    fn clear_all_is_not_a_banner_dismiss_control() {
+        let tree = AxNode {
+            role: "AXGroup".to_string(),
+            children: vec![
+                AxNode {
+                    role: "AXGroup".to_string(),
+                    subrole: Some("AXNotificationCenterBanner".to_string()),
+                    children: vec![
+                        AxNode {
+                            role: "AXStaticText".to_string(),
+                            label: Some("Messages".to_string()),
+                            ..AxNode::default()
+                        },
+                        AxNode {
+                            role: "AXStaticText".to_string(),
+                            label: Some("Hello there".to_string()),
+                            ..AxNode::default()
+                        },
+                        AxNode {
+                            role: "AXButton".to_string(),
+                            label: Some("Close".to_string()),
+                            actions: vec!["AXPress".to_string()],
+                            ..AxNode::default()
+                        },
+                    ],
+                    ..AxNode::default()
+                },
+                AxNode {
+                    role: "AXGroup".to_string(),
+                    subrole: Some("AXNotificationCenterBanner".to_string()),
+                    children: vec![
+                        AxNode {
+                            role: "AXStaticText".to_string(),
+                            label: Some("Calendar".to_string()),
+                            ..AxNode::default()
+                        },
+                        AxNode {
+                            role: "AXStaticText".to_string(),
+                            label: Some("Standup at 10".to_string()),
+                            ..AxNode::default()
+                        },
+                        AxNode {
+                            role: "AXButton".to_string(),
+                            label: Some("Close".to_string()),
+                            actions: vec!["AXPress".to_string()],
+                            ..AxNode::default()
+                        },
+                    ],
+                    ..AxNode::default()
+                },
+                // The group-level control that wipes everything.
+                AxNode {
+                    role: "AXButton".to_string(),
+                    label: Some("Clear All".to_string()),
+                    actions: vec!["AXPress".to_string()],
+                    ..AxNode::default()
+                },
+            ],
+            ..AxNode::default()
+        };
+
+        let banners = extract_banners(&tree);
+        assert_eq!(
+            banners.len(),
+            2,
+            "the Clear All button collapsed both banners into one unit"
+        );
+        for banner in &banners {
+            assert!(
+                banner.dismiss_path.is_some(),
+                "each banner keeps its own close control"
+            );
+        }
+        // No banner may point at the Clear All button, which is the last
+        // child of the root.
+        let clear_all_path = Some(vec![2]);
+        assert!(
+            banners.iter().all(|b| b.dismiss_path != clear_all_path),
+            "a banner's dismiss would press Clear All"
+        );
+    }
+
     use crate::ax::{AxNode, NormalizedFrame};
     use crate::error::PolarizeError;
     use crate::schema::AppIdentifier;

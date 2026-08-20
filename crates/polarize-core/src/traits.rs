@@ -361,16 +361,26 @@ pub trait WindowController {
         app: Option<&AppIdentifier>,
     ) -> Result<(ResolvedApp, Vec<WindowInfo>), PolarizeError>;
 
-    /// Applies one write to the window at `index` in that same list.
+    /// Applies every write in `writes` to the window at `index` in that
+    /// same list, in order.
+    ///
+    /// An implementation resolves `index` **once**, then applies every
+    /// write to that one element. It must not re-read the window list
+    /// between writes. A write reorders the list: un-minimizing a window
+    /// or raising it moves it to the front, so index `1` names a
+    /// different window immediately afterwards. Re-resolving would send
+    /// the rest of the plan to whatever moved into that slot. That is
+    /// why the whole plan crosses the boundary in one call, rather than
+    /// one write at a time. See PINV-28.
     ///
     /// An index that names no window is an error, not a silent stop. The
     /// app opened or closed a window between the two calls, so writing
     /// to another window would move something the caller never named.
-    fn apply_window_write(
+    fn apply_window_writes(
         &self,
         app: Option<&AppIdentifier>,
         index: usize,
-        write: &WindowWrite,
+        writes: &[WindowWrite],
     ) -> Result<(), PolarizeError>;
 }
 

@@ -9,19 +9,20 @@
 //! element is the element the user sees at that point. Second, an
 //! element that another window covers does not come back.
 //!
-//! ## Known limitation: the hit test reads one app
+//! ## The hit test reads every app, and reports which one answered
 //!
-//! This implementation asks one application element for the element at
-//! the point. So it respects the window order inside that app. A sheet,
-//! a popover, or a second window of the same app hides what is below
-//! it, and the hit test reports the cover. It does **not** see a window
-//! of *another* app over the point. `AXUIElementCopyElementAtPosition`
-//! answers that wider question only from the system-wide element, and
-//! `crate::ax_ffi` publishes no constructor for that element today. The
-//! trait already carries `app: None` for "let the platform pick", so a
-//! system-wide implementation needs no change in `polarize-core`.
-//! Until then, `app: None` reads the frontmost app.
+//! This implementation asks the **system-wide** accessibility element,
+//! so it sees across applications. A sheet, a popover, a second window
+//! of the same app, and a window of a completely different app all count
+//! as cover. That is what makes the tool a usable `tap` preflight.
+//!
+//! The app it reports is therefore the app that owns the element it
+//! found, read from `AXUIElementGetPid` — not the app the request named.
+//! Those differ exactly when something is in the way, which is the case
+//! worth knowing about. When macOS reports no element at all, the report
+//! falls back to the app the request addressed.
 
+use objc2_app_kit::NSRunningApplication;
 use objc2_core_graphics::{CGDisplayBounds, CGMainDisplayID};
 use polarize_core::ax::AxNode;
 use polarize_core::coords::{PixelPoint, PixelSize};
@@ -58,8 +59,8 @@ impl HitTester for MacHitTester {
         }
         crate::session::ensure_session_usable()?;
 
-        // Resolved for the report only. The hit test itself addresses
-        // the system-wide element, not this app.
+        // The app the request named. Only a fallback for the report:
+        // the hit test itself addresses the system-wide element.
         let running = resolve_running_app(app)?;
         let resolved = ResolvedApp {
             name: running
@@ -85,11 +86,32 @@ impl HitTester for MacHitTester {
         // its own view under the point even when another app's window
         // covers it. That would make this tool useless as the very
         // occlusion preflight it exists to be. See PINV-32.
-        let node = AxElement::system_wide()
-            .element_at_position(point.x, point.y)
-            .map(|element| leaf_node(&element, screen_size));
-        Ok((resolved, node))
+        let found = AxElement::system_wide().element_at_position(point.x, point.y);
+        let Some(element) = found else {
+            return Ok((resolved, None));
+        };
+        // Report the app that really owns what was found. It differs
+        // from the requested app exactly when another app covers the
+        // point, and that is the fact a caller preflighting a tap needs.
+        let owner = element.pid().and_then(owning_app).unwrap_or(resolved);
+        Ok((owner, Some(leaf_node(&element, screen_size))))
     }
+}
+
+/// The app that owns `pid`, as a [`ResolvedApp`].
+///
+/// Returns `None` when the process is gone, or is not an application the
+/// window server knows about. The caller then falls back to the app the
+/// request named.
+fn owning_app(pid: i32) -> Option<ResolvedApp> {
+    let running = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
+    Some(ResolvedApp {
+        name: running
+            .localizedName()
+            .map(|name| name.to_string())
+            .unwrap_or_default(),
+        bundle_id: running.bundleIdentifier().map(|id| id.to_string()),
+    })
 }
 
 /// Reads one element's attributes into an [`AxNode`], with no children.
