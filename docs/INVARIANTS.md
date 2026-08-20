@@ -584,6 +584,56 @@ claim automated coverage they don't have.
   it on, and the caller never sees an error — only a tool call that
   never returns.
 
+### PINV-26: `set_value` checks the element before it writes
+
+- Always: `set_value::set_element_value` resolves the selector to one
+  node, then refuses in three cases. It refuses when the node's role is
+  not on the payload's accepted-role list (`TEXT_VALUE_ROLES`,
+  `NUMBER_VALUE_ROLES`, or `SELECTED_TEXT_RANGE_ROLES`). It refuses when
+  the node's `enabled` flag is `false`. It refuses a number that is not
+  finite. A refusal returns a `SetValueError` that names the element,
+  and it never calls `ValueSetter::set_value_at_path`.
+  `polarize-macos`'s `MacValueSetter` then asks the live element with
+  `AXUIElementIsAttributeSettable`, and refuses a read-only attribute
+  before it writes.
+- Because: a wrong AX write is silent and hard to read back. A string
+  written into an `AXStaticText` label, or a number written into a text
+  field, comes back as a bare `kAXErrorIllegalArgument`. That code names
+  no element, so a caller cannot tell a wrong target from a missing
+  permission or a stale path. The tree `describe` already returned
+  carries the role and the enabled flag, so the check costs no extra
+  native call. The role list cannot be complete, because any app may
+  publish a settable `AXValue` on any role. That is why the live
+  `AXUIElementIsAttributeSettable` call stays as the second gate. The
+  app itself is the only authority here. It knows about a read-only
+  field, a locked document, and a secure text field.
+- If violated: a caller writes to a label, or to a greyed-out control,
+  and reads an error code with no element in it. Or `polarize` reports
+  a successful write to an attribute the app never accepted.
+
+### PINV-27: a `set_value` success means the app accepted the write
+
+- Always: `set_value` reports `set: true` when
+  `AXUIElementSetAttributeValue` returns `kAXErrorSuccess`. The tool
+  claims nothing more than that. Three places state that limit:
+  `polarize_core::set_value`'s module docs, `SetValueResponse::set`,
+  and `ValueSetter::set_value_at_path`. Each one also names the house
+  rule. Press a toggle with `perform_action`. Write text and numbers
+  with `set_value`. Type with `keyboard` when the app must see every
+  key event.
+- Because: a native AppKit control treats an AX write like a user edit.
+  Web content usually does not. A `WKWebView`, an Electron app, and a
+  React app each accept the write into the DOM node. None of them fires
+  an `input` or a `keydown` event. The page's own JavaScript never
+  learns about the edit. A controlled React input shows the new text.
+  Then it snaps back to the value in its state. A form stays invalid,
+  and a submit button stays disabled. `polarize` cannot detect this.
+  The app really did return success. `polarize` cannot repair it either.
+- If violated: an agent reads `set: true`, believes the field holds the
+  new text, and continues. The next step fails somewhere else, and the
+  failure points at the wrong cause. The agent then retries the write
+  that can never work, instead of typing the text with `keyboard`.
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -862,3 +912,31 @@ claim automated coverage they don't have.
   prevents is a hang, which only a real subprocess can demonstrate.
   What is **not** automated is `applescript.rs`'s thin adapter over it,
   or whether `osascript` in particular leaves a pipe holder behind.
+- **PINV-26** — split. The core half is fully covered by automated
+  `cargo test -p polarize-core` (`set_value::tests`): a text write to a
+  label, a text write to a button, a number write to a text field, a
+  range write to a slider, a disabled element, and a non-finite number
+  are each refused. Each refusal test asserts the fake `ValueSetter` saw
+  no call. The happy paths assert the exact path and the exact typed
+  write that reached the fake. The native half is **not** automated
+  anywhere. Whether `AXUIElementIsAttributeSettable` really answers for
+  a live element, and whether the role lists match what real apps
+  publish, needs a real macOS session with Accessibility permission
+  granted. A human must confirm four things against a real app. First, a
+  text write into a `TextEdit` document or a Safari address field lands.
+  Second, a number write moves a real slider without a drag. Third, a
+  range write moves the caret of a real text view. Fourth, a write to a
+  field the app publishes as read-only returns the settability refusal,
+  not a bare AX error. The macOS code is type-checked against
+  `aarch64-apple-darwin`.
+- **PINV-27** — **not** automated anywhere, and it cannot be. The
+  invariant is about what a real app does after a real write, so no
+  fake can demonstrate it. `polarize-core` covers only the claim itself:
+  `SetValueResponse::set` is documented as "the app accepted the write",
+  and the module docs carry the house rule. A human on a real macOS
+  session must confirm the failure mode, so that the documentation
+  stays honest. Write text into a controlled React input. A search box
+  of a web app in Safari, or in an Electron app, is a good target.
+  Confirm three things: the text appears, the page's own handlers do not
+  run, and the value can snap back. Then confirm the `keyboard` tool
+  types the same text into the same field.

@@ -84,6 +84,9 @@ pub enum ToolKind {
     AwaitScreenIdle,
     RunAppleScript,
     ScriptDictionary,
+    /// `set_value` — writes one AX attribute of one element. See
+    /// `crate::set_value` (PINV-26).
+    SetValue,
 }
 
 /// # PINV-2: every tool call is gated on exactly one permission
@@ -108,6 +111,9 @@ pub fn required_permission(tool: ToolKind) -> PermissionKind {
         // `AXObserverCreate` needs the same trust as `AXUIElement` does.
         ToolKind::AwaitUiElement | ToolKind::AwaitScreenIdle => PermissionKind::Accessibility,
         ToolKind::RunAppleScript | ToolKind::ScriptDictionary => PermissionKind::Automation,
+        // `set_value` writes through `AXUIElementSetAttributeValue`,
+        // which needs the same trust every other AX call needs.
+        ToolKind::SetValue => PermissionKind::Accessibility,
     }
 }
 
@@ -280,6 +286,14 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Automation permission is Denied, not granted"
+        );
+    }
+
+    #[test]
+    fn set_value_requires_accessibility() {
+        assert_eq!(
+            required_permission(ToolKind::SetValue),
+            PermissionKind::Accessibility
         );
     }
 }

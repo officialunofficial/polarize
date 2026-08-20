@@ -18,5 +18,6 @@ pub mod schema;
 pub mod script;
 pub mod selector;
 pub mod session;
+pub mod set_value;
 pub mod traits;
 pub mod wait;

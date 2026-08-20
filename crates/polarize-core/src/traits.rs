@@ -219,3 +219,34 @@ pub trait AppleScriptRunner {
     /// Returns `app`'s scripting dictionary as raw `sdef` XML.
     fn app_sdef(&self, app: &AppIdentifier) -> Result<AppSdef, PolarizeError>;
 }
+
+/// Writes one accessibility attribute of one element. Implemented by
+/// `polarize-macos` over `AXUIElementSetAttributeValue`.
+///
+/// The caller resolves `path` from a tree `AccessibilityInspector::describe`
+/// returned, exactly as [`ActionPerformer`] does. See PINV-18 for why the
+/// two walks must agree.
+///
+/// [`crate::set_value`] makes every decision before this call. It picks
+/// the attribute, it checks the element, and it builds the typed value.
+/// An implementation only performs the write. It must not choose a
+/// different attribute, and it must not convert the value to another
+/// type. See PINV-26.
+pub trait ValueSetter {
+    /// Writes `write` to the element at `path`. `app` is `None` to
+    /// address the frontmost app. An empty `path` means the application
+    /// element itself.
+    ///
+    /// An implementation calls `AXUIElementIsAttributeSettable` first.
+    /// That call asks the live element, which is the only authority on
+    /// whether this app accepts the write.
+    ///
+    /// `Ok(())` means the app accepted the write. It does not mean the
+    /// app ran the handlers a real user edit runs. See PINV-27.
+    fn set_value_at_path(
+        &self,
+        app: Option<&AppIdentifier>,
+        path: &[usize],
+        write: &crate::set_value::AttributeWrite,
+    ) -> Result<(), PolarizeError>;
+}
