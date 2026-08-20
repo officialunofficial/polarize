@@ -338,6 +338,50 @@ claim automated coverage they don't have.
   `AXIdentifier` as a real, empty identifier it can select on.
 
 
+### PINV-21: an Automation refusal is a permission error, not a script error
+
+- Always: `script::parse_osascript_error` maps `osascript` error codes
+  `-1743` and `-1744` to `ScriptFailure::AutomationNotPermitted`, and
+  `script::script_failure_to_error` turns that into
+  `PolarizeError::Permission` with `PermissionKind::Automation`.
+  `script::automation_check_from_status` maps the same two codes the
+  same way when the native `AEDeterminePermissionToAutomateTarget`
+  preflight reports them. Code `-1743` means the user refused; code
+  `-1744` means the user has not been asked. Code `-600` becomes
+  `PolarizeError::AppNotFound`. Every other status leaves the run
+  allowed, and every other error code stays a script error that keeps
+  its message and its code.
+- Because: AppleScript reports "you have no Automation permission" and
+  "your script has a bug" on the same channel, one line of text on
+  stderr. A caller that cannot tell them apart retries a script forever
+  against a permission only a human can grant, in System Settings >
+  Privacy & Security > Automation. macOS grants Automation per
+  (caller, target) pair, so this refusal can appear for one app while
+  another app works. The preflight must also never block on a status it
+  does not understand: `-600` only means the target app is not running
+  yet, and AppleScript can launch it.
+- If violated: a missing Automation grant looks like a broken script,
+  the caller never learns which app needs approval, and a preflight
+  quirk silently blocks scripts that would have run.
+
+### PINV-22: a script source never travels into an error message as written
+
+- Always: every error `polarize` builds from a `run_applescript`
+  request passes the source through `script::redact_source` first. That
+  function removes the text inside every double-quoted AppleScript
+  literal, flattens the rest to one line, and cuts it to
+  `script::MAX_SOURCE_CHARS_IN_ERROR` characters. An unterminated
+  literal counts as open to the end of the source.
+- Because: a script often carries a secret. `set pw to "hunter2"` is a
+  normal thing for a caller to send, and the timeout path is exactly
+  when an error wants to quote the script back. Error strings travel
+  further than a caller expects: into MCP client logs, into
+  transcripts, and into bug reports. Truncation alone is not enough,
+  because a secret often sits in the first line.
+- If violated: a password or a token that a caller sent once sits in a
+  log file, and nobody knows it is there.
+
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -462,3 +506,43 @@ claim automated coverage they don't have.
   Accessibility permission granted. The macOS code is type-checked
   against `aarch64-apple-darwin`, and CI compiles it on a real macOS
   runner, but neither runs it.
+- **PINV-21** — the mapping half is fully covered by automated `cargo
+  test -p polarize-core` (`script::tests`): both Automation codes and
+  their different permission states, the `-600`, `-1728`, and `-128`
+  codes, an unknown code, stderr with no code at all, stderr whose last
+  parentheses hold no number, empty stderr, a code read from the last
+  line of several, and every `ScriptFailure`→`PolarizeError` arm.
+  `perform_run_applescript` is tested end to end against a fake runner
+  for the refusal case. The native half is **not** automated anywhere:
+  whether `AEDeterminePermissionToAutomateTarget` returns `-1743`,
+  `-1744`, or `0` for a real (caller, target) pair, and whether
+  `osascript` prints these codes in the shape the parser expects, needs
+  a real macOS session. A human must check three cases there: a target
+  app that has never been approved, one the user refused in System
+  Settings > Privacy & Security > Automation, and one that is approved.
+  The `polarize-macos` code is type-checked against
+  `aarch64-apple-darwin`. Nothing has confirmed that the
+  `CoreServices` framework link resolves the three `AE*` symbols at
+  link time, because `cargo check` does not link.
+- **PINV-22** — fully covered by automated `cargo test -p polarize-core`
+  (`script::tests`): a literal's contents removed, an escaped quote
+  inside a literal, an unterminated literal failing closed, a long
+  source flattened and cut, and a timeout error asserted not to contain
+  the secret the script carried. What is **not** covered: whatever
+  `osascript` itself chooses to echo of the script on stderr.
+  `polarize` passes that text through unchanged, so a script that makes
+  `osascript` quote a literal back can still leak it. Nobody has
+  surveyed which `osascript` errors quote source text.
+- **AppleScript subprocess runner** (`polarize-macos/src/applescript.rs`,
+  no invariant number) — **not** automated in this repository. The
+  process-control logic (write stdin on its own thread, read both
+  output pipes on their own threads, poll for the exit, kill at the
+  deadline) was copied out of the module and exercised as a plain Linux
+  program on 2026-08-20: a stdin round trip, a 1 MB stdin, a 900 KB
+  stdout, a killed `sleep 30` that reported `timed_out`, a child that
+  exits before reading its stdin, captured stderr with a non-zero exit,
+  and a missing program. That checks the logic, not this module. Nobody
+  has run `osascript` or `sdef` from `polarize` on real macOS. A human
+  must confirm: `osascript` reads a script from stdin and returns its
+  output, a script that blocks on a modal dialog is killed at the
+  deadline, and `sdef` prints a dictionary for a real app bundle path.

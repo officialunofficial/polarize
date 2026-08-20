@@ -84,3 +84,55 @@ pub trait WindowManager {
         target: &crate::schema::ScreenshotTarget,
     ) -> Result<crate::coords::PixelRect, PolarizeError>;
 }
+
+/// The raw result of one `osascript` run.
+///
+/// `polarize-macos` fills this in from a real subprocess.
+/// [`crate::script::perform_run_applescript`] turns it into a response
+/// or a structured error (PINV-21).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScriptOutcome {
+    pub stdout: String,
+    pub stderr: String,
+    /// `None` when a signal killed the process, as it does on timeout.
+    pub exit_code: Option<i32>,
+    /// `true` when the runner killed the process at its deadline.
+    pub timed_out: bool,
+}
+
+/// One app's scripting dictionary, as `sdef` prints it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AppSdef {
+    pub app_name: String,
+    /// The raw `sdef` XML. [`crate::script::scan_sdef`] reads the verb
+    /// names out of it.
+    pub xml: String,
+}
+
+/// Runs AppleScript source, and reads an app's scripting dictionary.
+/// Implemented by `polarize-macos` over the `osascript` and `sdef`
+/// subprocesses.
+pub trait AppleScriptRunner {
+    /// Runs `source` and returns its output, whatever the exit status.
+    /// An implementation returns `Err` only when it cannot run the
+    /// script at all — a script that runs and fails comes back as an
+    /// `Ok` outcome with a non-zero `exit_code`, so
+    /// [`crate::script::parse_osascript_error`] can classify it.
+    ///
+    /// `target_app` is the app name the caller named, if any. The
+    /// implementation uses it for the Automation permission preflight;
+    /// `source` already carries the `tell application` wrapper (see
+    /// [`crate::script::wrap_in_tell`]).
+    ///
+    /// The implementation must kill the process after `timeout_ms` and
+    /// report `timed_out: true`.
+    fn run_script(
+        &self,
+        source: &str,
+        target_app: Option<&str>,
+        timeout_ms: u64,
+    ) -> Result<ScriptOutcome, PolarizeError>;
+
+    /// Returns `app`'s scripting dictionary as raw `sdef` XML.
+    fn app_sdef(&self, app: &AppIdentifier) -> Result<AppSdef, PolarizeError>;
+}

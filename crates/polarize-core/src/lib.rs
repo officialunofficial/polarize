@@ -13,5 +13,6 @@ pub mod error;
 pub mod orchestrate;
 pub mod permission;
 pub mod schema;
+pub mod script;
 pub mod selector;
 pub mod traits;
