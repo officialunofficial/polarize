@@ -584,6 +584,50 @@ claim automated coverage they don't have.
   it on, and the caller never sees an error — only a tool call that
   never returns.
 
+### PINV-37: a Vision box is flipped into top-left space, never passed through
+
+- Always: `find_text::flip_to_top_left` converts a `VisionRect` into a
+  `NormalizedFrame`. A `VisionRect` has its origin at the **bottom**
+  left, and its `y` grows upward, because that is the space Vision
+  reports. A `NormalizedFrame` has its origin at the **top** left, and
+  its `y` grows downward, because that is the space every other
+  `polarize` response uses (PINV-8). The rule is
+  `top = 1 - (bottom + height)`. The result is clamped into `0.0..=1.0`,
+  and a non-finite component becomes `0.0`. Every `find_text` result
+  passes through this function. `polarize-macos`'s `vision` module must
+  not flip a box itself.
+- Because: both spaces normalize to `0.0..=1.0`. So a dropped flip
+  produces numbers that pass every range check `polarize` makes,
+  including `tap`'s (PINV-1). Nothing errors, and nothing looks wrong in
+  the response. The tap simply lands on the vertical mirror of the right
+  place. This is the one `find_text` bug a caller cannot see in the
+  output, which is why the conversion lives in `polarize-core` as pure
+  arithmetic instead of inside the Vision call.
+- If violated: every `find_text` result taps the mirror image of the
+  text it found. A match near the top of a window presses whatever sits
+  near the bottom, and the tool still reports success.
+
+### PINV-38: a `find_text` match is filtered, then ordered, then indexed
+
+- Always: `find_text::scan_lines` performs three steps in this order. It
+  drops every recognized line below the confidence floor
+  (`min_confidence`, or `DEFAULT_MIN_CONFIDENCE` when the request sets
+  none). It orders what is left top to bottom by the recognized line's
+  own top edge, then left to right, then by text. It keeps the lines
+  that satisfy the request's match mode. Only then does
+  `find_text::pick_match` apply the request's `index`. An empty request
+  text, or a `min_confidence` outside `0.0..=1.0`, is rejected before
+  any capture or OCR runs at all.
+- Because: Vision returns its observations in no order a caller can rely
+  on, and it reads low-confidence garbage out of textured backgrounds
+  and window shadows. `index` must name the same line on two calls
+  against the same screen, exactly as `ElementSelector::index` does for
+  the accessibility tree (PINV-15). Indexing before filtering, or
+  indexing an unordered list, moves the caller's chosen match every time
+  a faint line appears or disappears at the edge of the screen.
+- If violated: `index: 1` presses a different control on each call, and
+  the caller cannot see it happen, because both calls succeed.
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -862,3 +906,39 @@ claim automated coverage they don't have.
   prevents is a hang, which only a real subprocess can demonstrate.
   What is **not** automated is `applescript.rs`'s thin adapter over it,
   or whether `osascript` in particular leaves a pipe holder behind.
+- **PINV-37** — split. The flip itself is fully covered by automated
+  `cargo test -p polarize-core` (`find_text::tests`): a full-frame box,
+  a box on the bottom edge, a box on the top edge, all four corners in
+  one table, an x-axis-never-moves case, a box reaching outside the unit
+  square on both sides, a non-finite box, a mirrored-center case, and a
+  table asserting every flipped center is a fraction
+  `coords::fraction_to_pixel` accepts. What is **not** automated
+  anywhere is the half that decides whether the flip runs in the right
+  direction: that Vision really does report a bottom-left origin for
+  `VNRecognizedTextObservation`, and that
+  `crates/polarize-macos/src/vision.rs` copies that box through
+  unchanged. No OCR has run in this environment, not once. A human on a
+  real macOS session with Screen Recording granted must confirm it, and
+  it is the single most important `find_text` check: call `find_text`
+  for a word near the **top** of a window, then feed
+  `matched.center_x`/`matched.center_y` straight into `tap` with the
+  same `target`. The click must land on that word. A click near the
+  bottom of the window means the flip runs the wrong way, and no test
+  and no error message can show it.
+- **PINV-38** — the whole ordering rule is fully covered by automated
+  `cargo test -p polarize-core` (`find_text::tests`): a line below the
+  floor never matching, the default floor applying when the request sets
+  none, an out-of-range `min_confidence` and an empty request text both
+  rejected before the platform is called, shuffled lines coming back in
+  reading order, index `0` by default, an explicit index, an index past
+  the last match, and the no-match error naming what the OCR did read.
+  All of it runs against a fake `ScreenCapture` and a fake
+  `TextRecognizer`, so it needs no macOS session. What is **not**
+  automated is whether Vision's real observations, ordered by this rule,
+  read the way a human reads the screen. A human must confirm that
+  `index: 1` names the second match on a real screen with repeated text,
+  and that the default confidence floor does not hide real UI text.
+  `crates/polarize-macos/src/vision.rs` is type-checked against
+  `aarch64-apple-darwin` and nothing more: no `VNRecognizeTextRequest`
+  has ever run here. A human must also confirm the first call's roughly
+  27 second model compile, and that later calls return in about 100 ms.

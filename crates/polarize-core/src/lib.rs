@@ -11,6 +11,9 @@ pub mod action;
 pub mod ax;
 pub mod coords;
 pub mod error;
+/// OCR fallback for apps with a sparse accessibility tree. See
+/// PINV-37 and PINV-38.
+pub mod find_text;
 pub mod orchestrate;
 pub mod permission;
 pub mod process;

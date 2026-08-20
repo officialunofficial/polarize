@@ -219,3 +219,34 @@ pub trait AppleScriptRunner {
     /// Returns `app`'s scripting dictionary as raw `sdef` XML.
     fn app_sdef(&self, app: &AppIdentifier) -> Result<AppSdef, PolarizeError>;
 }
+
+/// Reads the text in an already-captured image. Implemented by
+/// `polarize-macos` over Vision's `VNRecognizeTextRequest`.
+///
+/// This trait takes pixels, not a capture request. It never asks for a
+/// screenshot itself. [`crate::find_text::perform_find_text`] captures
+/// through [`ScreenCapture`] first, then hands the bytes here. Two
+/// reasons make that split worth the extra step. The implementation
+/// needs no ScreenCaptureKit dependency, and no permission of its own.
+/// And every decision around the recognizer — the confidence floor, the
+/// match test, the reading order, the bottom-left to top-left flip —
+/// stays in `polarize-core`, where a fake implementation of this trait
+/// covers it under `cargo test`.
+///
+/// An implementation is slow and synchronous. It blocks for 100 ms or
+/// more per call, and for about 27 seconds on the first call after an
+/// OS update, while macOS compiles the recognition model. The server
+/// must call it through `tokio::task::spawn_blocking`.
+pub trait TextRecognizer {
+    /// Reads every line of text in `image`, which carries encoded PNG
+    /// bytes plus the pixel size those bytes decode to.
+    ///
+    /// The returned boxes stay in Vision's own normalized space: origin
+    /// bottom-left, `y` growing upward. `polarize-core` flips them
+    /// (PINV-37). An implementation must not flip them itself.
+    fn recognize_text(
+        &self,
+        image: &CapturedImage,
+        options: &crate::find_text::RecognizeOptions,
+    ) -> Result<Vec<crate::find_text::RecognizedLine>, PolarizeError>;
+}

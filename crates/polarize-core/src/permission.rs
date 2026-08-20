@@ -84,6 +84,9 @@ pub enum ToolKind {
     AwaitScreenIdle,
     RunAppleScript,
     ScriptDictionary,
+    /// `find_text` — OCR fallback over the captured screen. See
+    /// `crate::find_text` (PINV-37, PINV-38).
+    FindText,
 }
 
 /// # PINV-2: every tool call is gated on exactly one permission
@@ -108,6 +111,10 @@ pub fn required_permission(tool: ToolKind) -> PermissionKind {
         // `AXObserverCreate` needs the same trust as `AXUIElement` does.
         ToolKind::AwaitUiElement | ToolKind::AwaitScreenIdle => PermissionKind::Accessibility,
         ToolKind::RunAppleScript | ToolKind::ScriptDictionary => PermissionKind::Automation,
+        // `find_text` adds no new TCC surface. Vision itself needs no
+        // permission. Its pixels come from the same `ScreenCaptureKit`
+        // capture `screenshot` uses, so it needs the same one.
+        ToolKind::FindText => PermissionKind::ScreenRecording,
     }
 }
 
@@ -268,6 +275,18 @@ mod tests {
     #[test]
     fn automation_permission_displays_its_settings_name() {
         assert_eq!(PermissionKind::Automation.to_string(), "Automation");
+    }
+
+    #[test]
+    fn find_text_requires_screen_recording_and_adds_no_new_permission() {
+        assert_eq!(
+            required_permission(ToolKind::FindText),
+            PermissionKind::ScreenRecording
+        );
+        assert_eq!(
+            required_permission(ToolKind::FindText),
+            required_permission(ToolKind::Screenshot)
+        );
     }
 
     #[test]

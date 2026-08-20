@@ -49,4 +49,5 @@ pub mod keymap;
 pub mod observer;
 pub mod permission_bootstrap;
 pub mod session;
+pub mod vision;
 pub mod window;
