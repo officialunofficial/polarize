@@ -35,10 +35,20 @@ use polarize_core::schema::{
     DescribeRequest, DescribeResponse, KeyboardRequest, KeyboardResponse, ScreenshotRequest,
     ScreenshotResponse, TapRequest, TapResponse,
 };
+use polarize_core::script::{
+    self, RunAppleScriptRequest, RunAppleScriptResponse, ScriptDictionaryRequest,
+    ScriptDictionaryResponse,
+};
+use polarize_core::wait::{
+    self, AwaitScreenIdleRequest, AwaitScreenIdleResponse, AwaitUiElementRequest,
+    AwaitUiElementResponse, SystemClock,
+};
 use polarize_macos::accessibility::MacAccessibilityInspector;
 use polarize_macos::action::MacActionPerformer;
+use polarize_macos::applescript::MacAppleScriptRunner;
 use polarize_macos::capture::MacScreenCapture;
 use polarize_macos::input::MacInputSynthesizer;
+use polarize_macos::observer::MacUiChangeWaiter;
 use polarize_macos::window::MacWindowManager;
 use rmcp::ErrorData;
 use rmcp::ServerHandler;
@@ -58,15 +68,20 @@ pub struct PolarizeServer {
     input: MacInputSynthesizer,
     window: MacWindowManager,
     action: MacActionPerformer,
+    script: MacAppleScriptRunner,
 }
 
 /// Maps a [`PolarizeError`] to the MCP [`ErrorData`] shape a tool call
-/// result carries. `Coord`/`Selector`/`AppNotFound`/`WindowNotFound` are
-/// treated as bad input from the caller (`INVALID_PARAMS`); `Permission` and
+/// result carries. `Coord`/`Selector`/`Action`/`AppNotFound`/
+/// `WindowNotFound` are treated as bad input from the caller
+/// (`INVALID_PARAMS`) — an `Action` refusal means the caller named an
+/// element that does not offer the action, or that is disabled; `Permission` and
 /// `Platform` are treated as environment/native failures
-/// (`INTERNAL_ERROR`), and so are `ScreenLocked`/`SessionNotOnConsole`,
-/// which report the state of the host login session rather than
-/// anything the caller sent — a permission error additionally carries its
+/// (`INTERNAL_ERROR`), and so are `Wait`,
+/// `ScreenLocked`, and `SessionNotOnConsole` — a wait that expires and a
+/// blocked login session both report that the environment did not
+/// cooperate, not that the request was malformed. A permission error
+/// additionally carries its
 /// `PermissionKind`/`PermissionState` as structured `data` so a caller
 /// can act on it (e.g. "grant Accessibility access") without parsing the
 /// message string.
@@ -75,6 +90,7 @@ fn to_error_data(err: PolarizeError) -> ErrorData {
     match &err {
         PolarizeError::Coord(_)
         | PolarizeError::Selector(_)
+        | PolarizeError::Action(_)
         | PolarizeError::AppNotFound(_)
         | PolarizeError::WindowNotFound(_) => ErrorData::invalid_params(message, None),
         PolarizeError::Permission(PermissionError::NotGranted { kind, state }) => {
@@ -86,8 +102,29 @@ fn to_error_data(err: PolarizeError) -> ErrorData {
             ErrorData::internal_error(message, data)
         }
         PolarizeError::Platform(_)
+        | PolarizeError::Wait(_)
         | PolarizeError::ScreenLocked
         | PolarizeError::SessionNotOnConsole => ErrorData::internal_error(message, None),
+    }
+}
+
+/// Runs one blocking `polarize-core` call on `tokio`'s blocking pool, and
+/// maps its result into a tool response.
+///
+/// A `JoinError` here means the blocking task panicked. That is a bug in
+/// `polarize`, not a caller mistake, so it surfaces as an internal error
+/// rather than crashing the whole server and dropping the MCP session.
+async fn blocking<T, F>(work: F) -> Result<Json<T>, ErrorData>
+where
+    F: FnOnce() -> Result<T, PolarizeError> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => result.map(Json).map_err(to_error_data),
+        Err(err) => Err(ErrorData::internal_error(
+            format!("tool task failed: {err}"),
+            None,
+        )),
     }
 }
 
@@ -191,6 +228,73 @@ impl PolarizeServer {
         Parameters(request): Parameters<PerformActionRequest>,
     ) -> Result<Json<PerformActionResponse>, ErrorData> {
         action::perform_element_action(&self.inspector, &self.action, &request)
+            .map(Json)
+            .map_err(to_error_data)
+    }
+
+    /// Waits until an element appears in an app's accessibility tree, or
+    /// until the request's timeout expires. The wait wakes on an
+    /// `AXObserver` notification, and re-reads the tree every poll
+    /// interval regardless, because some trees never post one
+    /// (PINV-19).
+    #[tool(name = "await_ui_element")]
+    async fn await_ui_element(
+        &self,
+        Parameters(request): Parameters<AwaitUiElementRequest>,
+    ) -> Result<Json<AwaitUiElementResponse>, ErrorData> {
+        blocking(move || {
+            wait::perform_await_ui_element(
+                &MacAccessibilityInspector,
+                &MacUiChangeWaiter,
+                &SystemClock::new(),
+                &request,
+            )
+        })
+        .await
+    }
+
+    /// Waits until an app's accessibility tree stops changing for the
+    /// requested idle window. Use it after an action that starts an
+    /// animation or a load, when there is no single element to wait for.
+    #[tool(name = "await_screen_idle")]
+    async fn await_screen_idle(
+        &self,
+        Parameters(request): Parameters<AwaitScreenIdleRequest>,
+    ) -> Result<Json<AwaitScreenIdleResponse>, ErrorData> {
+        blocking(move || {
+            wait::perform_await_screen_idle(
+                &MacAccessibilityInspector,
+                &MacUiChangeWaiter,
+                &SystemClock::new(),
+                &request,
+            )
+        })
+        .await
+    }
+
+    /// Runs AppleScript source through `osascript`, optionally wrapped in
+    /// a `tell application` block for a named target. This reaches
+    /// scriptable apps — Finder, Mail, Safari, Music, Notes — with
+    /// semantic operations no accessibility or `CGEvent` call can express.
+    #[tool(name = "run_applescript")]
+    fn run_applescript(
+        &self,
+        Parameters(request): Parameters<RunAppleScriptRequest>,
+    ) -> Result<Json<RunAppleScriptResponse>, ErrorData> {
+        script::perform_run_applescript(&self.script, &request)
+            .map(Json)
+            .map_err(to_error_data)
+    }
+
+    /// Lists a scriptable app's own verbs and classes, read from its
+    /// `sdef` scripting dictionary. Call it before `run_applescript` to
+    /// find out what an app accepts.
+    #[tool(name = "script_dictionary")]
+    fn script_dictionary(
+        &self,
+        Parameters(request): Parameters<ScriptDictionaryRequest>,
+    ) -> Result<Json<ScriptDictionaryResponse>, ErrorData> {
+        script::perform_script_dictionary(&self.script, &request)
             .map(Json)
             .map_err(to_error_data)
     }

@@ -7,9 +7,11 @@
 
 use std::fmt;
 
+use crate::action::ActionError;
 use crate::coords::CoordError;
 use crate::permission::PermissionError;
 use crate::selector::SelectorError;
+use crate::wait::WaitError;
 
 /// Which axis a coordinate error refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -30,7 +32,8 @@ impl fmt::Display for CoordAxis {
 /// The top-level error type for all of `polarize`.
 ///
 /// `polarize-core`'s own logic only ever produces the [`Self::Coord`],
-/// [`Self::Permission`], and [`Self::Selector`] variants. The remaining variants exist for
+/// [`Self::Permission`], [`Self::Selector`], [`Self::Action`], and
+/// [`Self::Wait`] variants. The remaining variants exist for
 /// `polarize-macos` and `apps/polarize` to report failures from real
 /// native-API calls (window lookup, screen capture, AX tree walks, event
 /// posting) that `polarize-core` cannot itself experience or test.
@@ -51,6 +54,16 @@ pub enum PolarizeError {
     /// [`crate::selector`] (PINV-15).
     #[error(transparent)]
     Selector(#[from] SelectorError),
+
+    /// A `perform_action` call refused to act on the element it
+    /// resolved. See [`crate::action`] (PINV-17).
+    #[error(transparent)]
+    Action(#[from] ActionError),
+
+    /// An `await_ui_element` or `await_screen_idle` call reached its
+    /// deadline. See [`crate::wait`] (PINV-19).
+    #[error(transparent)]
+    Wait(#[from] WaitError),
 
     /// The requested app (by bundle id or name) is not running.
     #[error("app not found: {0}")]

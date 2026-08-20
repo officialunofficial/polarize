@@ -110,12 +110,6 @@ pub enum ActionError {
 /// travels as [`PolarizeError::Platform`]. Replace this impl with an
 /// `#[error(transparent)] Action(#[from] ActionError)` variant on
 /// `PolarizeError` when `error.rs` can take one.
-impl From<ActionError> for PolarizeError {
-    fn from(error: ActionError) -> Self {
-        PolarizeError::Platform(error.to_string())
-    }
-}
-
 /// A short rendering of one node, for an error message.
 fn describe_node(node: &AxNode) -> String {
     let mut parts = vec![format!("role={:?}", node.role)];
@@ -500,14 +494,16 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_travels_as_a_platform_error_for_now() {
-        // `error.rs` owns no refusal variant yet. See the `From` impl.
+    fn a_refusal_travels_as_its_own_error_variant() {
+        // A refusal is neither a caller mistake nor a platform failure.
+        // It reports what the element itself does not allow.
         let err: PolarizeError = ActionError::Disabled {
             element: "role=\"AXButton\"".to_string(),
             action: "AXPress".to_string(),
         }
         .into();
-        assert!(matches!(err, PolarizeError::Platform(_)));
+        assert!(matches!(err, PolarizeError::Action(_)), "{err}");
+        assert!(err.to_string().contains("AXPress"));
     }
 
     // ---- selector failures ---------------------------------------------

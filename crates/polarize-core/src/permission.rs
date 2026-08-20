@@ -67,7 +67,7 @@ pub struct PermissionStatus {
     pub state: PermissionState,
 }
 
-/// One of `polarize`'s four MCP tools.
+/// One of `polarize`'s MCP tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolKind {

@@ -12,26 +12,33 @@ not support plain native macOS windows. `polarize` fills that gap.
 
 ## Status
 
-All four tools are implemented and wired into a real `rmcp` stdio MCP
+All nine tools are implemented and wired into a real `rmcp` stdio MCP
 server (`apps/polarize`), backed by real macOS framework bindings
 (`crates/polarize-macos`). The workspace builds, lints, and tests
 cleanly.
 
-The server has been driven end to end over stdio on a real macOS
-session: `initialize`, `tools/list`, and a `tools/call` for each of the
-four tools all round-trip real JSON-RPC, and each tool's permission
-preflight fires correctly with no permission granted (see
-"Permissions"). This machine has no granted Screen Recording or
-Accessibility TCC authorization, so one thing stays unverified: a tool
-call actually *succeeding* against a real screen or app. A human on a
-macOS session with both permissions granted still needs to confirm a
-`screenshot` returns real pixels, `describe` returns a real AX tree, and
-`tap`/`keyboard` visibly land — see
-[`docs/INVARIANTS.md`](docs/INVARIANTS.md)'s "Testing harness" section.
+The first four tools have been driven end to end over stdio on a real
+macOS session: `initialize`, `tools/list`, and a `tools/call` for each
+all round-trip real JSON-RPC, and each tool's permission preflight fires
+correctly with no permission granted (see "Permissions"). This machine
+has no granted Screen Recording or Accessibility TCC authorization, so
+one thing stays unverified: a tool call actually *succeeding* against a
+real screen or app. A human on a macOS session with both permissions
+granted still needs to confirm a `screenshot` returns real pixels,
+`describe` returns a real AX tree, and `tap`/`keyboard` visibly land —
+see [`docs/INVARIANTS.md`](docs/INVARIANTS.md)'s "Testing harness"
+section.
+
+The five newer tools — `perform_action`, `await_ui_element`,
+`await_screen_idle`, `run_applescript`, and `script_dictionary` — have
+**not** been run on a real macOS session at all. Their pure logic is
+unit-tested. Their native halves compile and link only. Read each tool's
+enforcement-checklist entry in
+[`docs/INVARIANTS.md`](docs/INVARIANTS.md) before you trust one.
 
 ## Tools
 
-`polarize` exposes four MCP tools:
+`polarize` exposes nine MCP tools:
 
 1. **`screenshot`** — capture a window or the whole screen to PNG,
    optionally scoped by a bundle id or app name.
@@ -47,6 +54,28 @@ macOS session with both permissions granted still needs to confirm a
 4. **`keyboard`** — post synthetic key events via `CGEvent`: type a
    string, or press a named key. Naming a `target` app activates it
    first, so the input reaches that app even without prior focus.
+5. **`perform_action`** — press one element through its own
+   `AXUIElementPerformAction` action, naming the element by identifier,
+   role, subrole, or label instead of by coordinate. This reaches an
+   occluded element and an element below click-target size, neither of
+   which `tap` can hit. It refuses an action the element does not
+   publish, and refuses a disabled control, before it calls the
+   platform.
+6. **`await_ui_element`** — block until an element appears, instead of
+   polling `describe` in a loop. It wakes on an `AXObserver`
+   notification and re-reads the tree every poll interval regardless,
+   because some accessibility trees never post one.
+7. **`await_screen_idle`** — block until an app's accessibility tree
+   stops changing for a given window. Use it after an action that
+   starts an animation or a load, when there is no single element to
+   wait for.
+8. **`run_applescript`** — run AppleScript source through `osascript`,
+   optionally wrapped in a `tell application` block. This reaches
+   scriptable apps such as Finder, Mail, Safari, Music, and Notes with
+   semantic operations no accessibility or `CGEvent` call can express.
+9. **`script_dictionary`** — list a scriptable app's own verbs and
+   classes, read from its `sdef` dictionary. Call it before
+   `run_applescript` to find out what an app accepts.
 
 ## Permissions
 
@@ -54,9 +83,19 @@ macOS session with both permissions granted still needs to confirm a
 terminal, your MCP client, or a wrapper binary) needs:
 
 - **Screen Recording** — required for `screenshot`.
-- **Accessibility** — required for `describe`, `tap`, and `keyboard`.
+- **Accessibility** — required for `describe`, `tap`, `keyboard`,
+  `perform_action`, `await_ui_element`, and `await_screen_idle`.
+- **Automation** — required for `run_applescript` and
+  `script_dictionary`. macOS asks per target app, the first time a
+  script addresses one.
 
-Grant both under System Settings → Privacy & Security.
+Grant them under System Settings → Privacy & Security.
+
+Every tool that captures pixels, reads the accessibility tree, or posts
+input also checks the login session first. A locked screen reports a
+`ScreenLocked` error, and a session that lost the console to Fast User
+Switching reports a `SessionNotOnConsole` error, instead of returning a
+black screenshot or a lock-screen accessibility tree.
 
 Every tool preflights its permission before any other native call runs
 (`AXIsProcessTrusted`, `CGPreflightPostEventAccess`, or
@@ -194,7 +233,7 @@ or `cargo test` fixes this with no environment variable needed.
 cargo test --workspace
 ```
 
-This runs `polarize-core`'s full unit-test suite (59 tests covering
+This runs `polarize-core`'s full unit-test suite (205 tests covering
 coordinate math, the AX-tree model, MCP schemas, permission logic, and
 orchestration), plus `polarize-macos`'s tests for the pure sub-logic it
 factors out of its native calls (22 tests covering app-identity

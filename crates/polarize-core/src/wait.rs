@@ -162,17 +162,6 @@ pub enum WaitError {
     },
 }
 
-/// A timeout travels to the caller as a [`PolarizeError`].
-///
-/// `PolarizeError` has no `Wait` variant yet, because `error.rs` belongs
-/// to another change in flight. `Platform` carries the full message, so
-/// the caller still reads exactly what expired and after how long.
-impl From<WaitError> for PolarizeError {
-    fn from(err: WaitError) -> Self {
-        PolarizeError::Platform(err.to_string())
-    }
-}
-
 // ---- requests and responses ---------------------------------------------
 
 /// Waits for one element to appear in an app's accessibility tree.
