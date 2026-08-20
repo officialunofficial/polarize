@@ -40,3 +40,14 @@ macos-sign = false
 # artifact really came from this repo's CI, not a tampered copy. It costs
 # nothing extra to enable and needs no secrets of its own.
 github-attestations = true
+# `dist`'s own runner auto-selection picked `macos-14`/`macos-15-intel` for
+# these two targets. Both labels currently alias to the same underlying
+# `macos-26-arm64` image as the `macos-26` label, but real builds still
+# failed on them (see officialunofficial/polarize#18) while the same code
+# compiles clean under a workflow pinned directly to `macos-26`. GitHub
+# Actions runner labels can select a different default Xcode via
+# `xcode-select` even on a shared image. Pinning `macos-26` explicitly
+# tests that theory directly, instead of guessing at it.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-26"
+x86_64-apple-darwin = "macos-26"
