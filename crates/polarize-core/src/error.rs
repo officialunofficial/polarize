@@ -65,6 +65,20 @@ pub enum PolarizeError {
     /// produces this variant, since only it makes those calls.
     #[error("platform error: {0}")]
     Platform(String),
+
+    /// The login session reports a locked screen. Screen capture returns
+    /// black pixels, and the AX tree describes the lock screen, not the
+    /// target app. See [`crate::session`] (PINV-23).
+    #[error("screen is locked; unlock this Mac and call the tool again")]
+    ScreenLocked,
+
+    /// Another login session holds the console, through Fast User
+    /// Switching. Posted `CGEvent`s and `ScreenCaptureKit` frames do not
+    /// reach the user who is on screen. See [`crate::session`] (PINV-23).
+    #[error(
+        "login session is not on the console; another user holds the display through Fast User Switching"
+    )]
+    SessionNotOnConsole,
 }
 
 #[cfg(test)]
@@ -115,6 +129,24 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "platform error: CGWindowListCreateImage returned null"
+        );
+    }
+
+    #[test]
+    fn screen_locked_display_names_the_lock() {
+        let err = PolarizeError::ScreenLocked;
+        assert_eq!(
+            err.to_string(),
+            "screen is locked; unlock this Mac and call the tool again"
+        );
+    }
+
+    #[test]
+    fn session_not_on_console_display_names_fast_user_switching() {
+        let err = PolarizeError::SessionNotOnConsole;
+        assert_eq!(
+            err.to_string(),
+            "login session is not on the console; another user holds the display through Fast User Switching"
         );
     }
 

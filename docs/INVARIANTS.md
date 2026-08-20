@@ -337,6 +337,48 @@ claim automated coverage they don't have.
   that do not publish `AXEnabled`, and a caller reads an absent
   `AXIdentifier` as a real, empty identifier it can select on.
 
+### PINV-23: every tool preflights the login session, and reports the console first
+
+- Always: after its TCC permission check, and before any other native
+  call, each tool calls `polarize_macos::session::ensure_session_usable`.
+  That call reads `CGSessionCopyCurrentDictionary` and applies
+  `polarize_core::session::check_session`. `check_session` returns
+  `PolarizeError::SessionNotOnConsole` when the session does not own the
+  console, and `PolarizeError::ScreenLocked` when the session owns the
+  console but the screen is locked. When both facts hold, it reports the
+  console error, never the lock error.
+- Because: both states break the native calls without any error.
+  `ScreenCaptureKit` hands back black or lock-window pixels, the AX tree
+  describes the login window instead of the target app, and a posted
+  `CGEvent` reaches no one. The two states also need different repairs.
+  Fast User Switching raises both flags at once, because it locks the
+  session it switches away from. An unlock repairs only a session that
+  still owns the console. So the console fact is the one that tells a
+  caller what to do next.
+- If violated: a caller gets a black screenshot, a lock-screen AX tree,
+  or a click that lands nowhere, and no error explains why. A caller
+  told "screen is locked" during Fast User Switching unlocks the Mac,
+  sees no change, and has no next step.
+
+### PINV-24: an absent session key reads as a usable session, never as a blocked one
+
+- Always: `SessionState::from_flags` maps an absent console flag to
+  `on_console: true`, and an absent lock flag to `screen_locked: false`.
+  `MacSessionInspector` reports the same usable default when
+  `CGSessionCopyCurrentDictionary` returns nothing at all. The preflight
+  fails open.
+- Because: macOS adds the `"CGSSessionScreenIsLocked"` key only while
+  the screen is locked. An unlocked Mac simply has no such key, so a
+  missing key is the normal case. `CGSessionCopyCurrentDictionary` also
+  returns nothing for a process outside a GUI login session. Failing
+  closed on either would refuse every tool call on a healthy Mac. This
+  preflight improves a diagnosis; it is not a security boundary. A truly
+  unusable environment still fails at the native call, with that call's
+  own error.
+- If violated: `polarize` refuses every tool call on an unlocked Mac,
+  and one wrong key name (the two names are not symmetric — see
+  `crates/polarize-macos/src/session.rs`) turns the whole server off.
+
 
 ### PINV-17: `perform_action` checks the element before it acts
 
@@ -526,3 +568,28 @@ claim automated coverage they don't have.
   exact control respond. The macOS code is type-checked against
   `aarch64-apple-darwin`, and CI compiles it on a real macOS runner,
   but neither runs it.
+- **PINV-23** — split. The decision half is fully covered by automated
+  `cargo test -p polarize-core` (`session::tests`): each single blocked
+  fact, the both-facts-hold precedence, the usable case, and
+  `ensure_session_usable` against a fake `SessionInspector`. The
+  `error::tests` display cases cover both new error messages. The native
+  half is **not** automated anywhere. Whether
+  `CGSessionCopyCurrentDictionary` reports the flags this code expects,
+  and whether the preflight fires before the native call, needs a real
+  macOS session. A human must lock the screen and confirm `screenshot`
+  returns the `ScreenLocked` error, then switch to a second user account
+  with Fast User Switching and confirm all four tools return the
+  `SessionNotOnConsole` error. The macOS code is type-checked against
+  `aarch64-apple-darwin`.
+- **PINV-24** — split. The fail-open rule itself is fully covered by
+  automated `cargo test -p polarize-core` (`session::tests`): an absent
+  console flag, an absent lock flag, and both flags absent. What is
+  **not** automated is the key reading in
+  `crates/polarize-macos/src/session.rs`: that the literal strings
+  `"kCGSSessionOnConsoleKey"` and `"CGSSessionScreenIsLocked"` match the
+  keys macOS really publishes, and that their values really are
+  `CFBoolean`. A wrong key or a wrong value type is silent — it reads as
+  an absent key and reports a usable session. A human on a real macOS
+  session must confirm the two keys read `true` while the Mac is
+  unlocked and on the console, and that the lock key flips when the
+  screen locks.
