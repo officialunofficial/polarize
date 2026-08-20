@@ -37,6 +37,7 @@
 #![cfg(target_os = "macos")]
 
 pub mod accessibility;
+pub mod action;
 pub mod app_lookup;
 mod ax_ffi;
 pub mod capture;
