@@ -9,8 +9,10 @@
 
 pub mod action;
 pub mod ax;
+pub mod clipboard;
 pub mod coords;
 pub mod error;
+pub mod hit_test;
 pub mod orchestrate;
 pub mod permission;
 pub mod process;

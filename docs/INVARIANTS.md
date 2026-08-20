@@ -633,6 +633,65 @@ claim automated coverage they don't have.
   new text, and continues. The next step fails somewhere else, and the
   failure points at the wrong cause. The agent then retries the write
   that can never work, instead of typing the text with `keyboard`.
+### PINV-32: a hit test and a tap resolve one request to one pixel point
+
+- Always: `hit_test::perform_hit_test` reads a request's `x`/`y`
+  fraction the same way `orchestrate::perform_tap` reads it. It resolves
+  the request's target through `WindowManager::resolve_target_rect`. It
+  converts the fraction against that rect's `size` through
+  `coords::fraction_to_pixel`. It adds that rect's `origin`. Only the
+  resolved **global** display pixel point reaches `HitTester`, never the
+  raw fraction. The `pixel_x`/`pixel_y` a hit test reports equal the
+  point a tap of the same request clicks.
+- Because: a caller uses the hit test to preflight the tap. It reads the
+  element under a point, compares that element with the one it means to
+  press, and then taps the same point. The comparison is only worth
+  anything while both tools address one point. A difference between the
+  two coordinate paths raises no error at all. It just approves a click
+  on some other element. This is PINV-4's rule applied to a second tool,
+  and it is why the conversion stays in `polarize-core`: a fake
+  `WindowManager` and a fake `HitTester` prove the two paths agree
+  without a real screen.
+- If violated: a caller confirms the right element, taps, and hits
+  something else. Both tools report success.
+
+### PINV-33: a hit test reports one element, never a subtree
+
+- Always: `hit_test::perform_hit_test` clears the `children` list of the
+  `AxNode` it reports. `polarize-macos`'s `leaf_node` never reads
+  `AXChildren` either.
+- Because: macOS returns the deepest element under the point. The
+  children of that element do not cover the point, or the hit test would
+  have returned one of them. A caller asked what is here, not what this
+  contains. `describe` is the tool for a subtree, and one hit test on a
+  web view would otherwise carry thousands of nodes.
+- If violated: a preflight response grows to the size of a whole
+  `describe` response, and a caller cannot tell which node answered its
+  question.
+
+### PINV-34: a refused clipboard read is a permission error, not empty text
+
+- Always: `clipboard::classify_read` reports three outcomes apart. It
+  reports `Ok(Some(text))` whenever the pasteboard hands over a value,
+  and an empty string is such a value. It reports `Ok(None)` when the
+  pasteboard does not list the requested type. It reports
+  `PermissionError::NotGranted` with `PermissionKind::Clipboard` and
+  `PermissionState::NotDetermined` when the pasteboard lists the type
+  and still hands over no value.
+- Because: macOS 26 protects pasteboard contents. It can withhold them
+  from a programmatic read that no user paste gesture preceded.
+  `NSPasteboard` signals that refusal by returning no string, which is
+  exactly what an empty pasteboard returns. The two facts need different
+  repairs. An empty clipboard needs a copy; a refusal needs the user.
+  `polarize-macos` separates them by asking
+  `availableTypeFromArray:` first, because the type list stays readable
+  while the contents do not. The state stays `NotDetermined` for the
+  same reason PINV-11 gives: the pasteboard offers no evidence that the
+  user made an explicit choice. A write needs none of this, because
+  macOS never refuses one.
+- If violated: `clipboard_read` answers "the clipboard is empty" on a
+  Mac whose clipboard holds real text. The caller copies again, reads
+  nothing again, and never learns that only the user can repair it.
 
 ## Enforcement checklist
 
@@ -940,3 +999,35 @@ claim automated coverage they don't have.
   Confirm three things: the text appears, the page's own handlers do not
   run, and the value can snap back. Then confirm the `keyboard` tool
   types the same text into the same field.
+- **PINV-32** — the coordinate half is fully covered by automated
+  `cargo test -p polarize-core` (`hit_test::tests`). One test runs
+  `perform_hit_test` and `perform_tap` over the same request, against
+  fakes with a non-zero target origin, and asserts the point the fake
+  `HitTester` received equals the point the fake `InputSynthesizer`
+  clicked, at four fractions. Other tests cover the origin addition, the
+  target defaulting, and the rule that an out-of-range fraction never
+  reaches the platform. What is **not** automated: whether
+  `AXUIElementCopyElementAtPosition` reads the same global pixel space
+  `CGEvent` posts into on a real screen. A human on a real macOS session
+  with Accessibility permission granted must confirm that a hit test and
+  a tap of one request address the same element, on a window that does
+  not sit at the screen origin, and on a second display.
+- **PINV-33** — the `polarize-core` half is fully covered by automated
+  `cargo test -p polarize-core` (`hit_test::tests`): a fake `HitTester`
+  returns a node with two children, and the response carries none. The
+  `polarize-macos` half is compile-checked only: `leaf_node` in
+  `crates/polarize-macos/src/hit_test.rs` reads no `AXChildren`, which a
+  reader can confirm, but no test runs it.
+- **PINV-34** — the classification is fully covered by automated
+  `cargo test -p polarize-core` (`clipboard::tests`): text present, an
+  absent type, a declared type with no value, an empty string, a value
+  with no declared type, and the same three cases through
+  `perform_clipboard_read`. What is **not** automated, and cannot be:
+  that macOS really answers `availableTypeFromArray:` while it withholds
+  `stringForType:`. That is the whole premise of the rule, and only a
+  real macOS 26 session can confirm it. A human must copy text in
+  another app, call `clipboard_read` from `polarize` with no preceding
+  paste gesture, and check that the result is either the text or a
+  `Clipboard` permission error — never an empty answer. The same human
+  must confirm `clipboard_write` replaces the pasteboard contents, and
+  that a following Command+V pastes the written text.

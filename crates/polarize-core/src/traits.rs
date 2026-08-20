@@ -250,3 +250,50 @@ pub trait ValueSetter {
         write: &crate::set_value::AttributeWrite,
     ) -> Result<(), PolarizeError>;
 }
+
+/// Reports the element that sits under one point. Implemented by
+/// `polarize-macos` over `AXUIElementCopyElementAtPosition`.
+///
+/// The caller resolves the point first. [`crate::hit_test::perform_hit_test`]
+/// converts a normalized fraction to a global display pixel point, the
+/// same way [`crate::orchestrate::perform_tap`] does (PINV-32). An
+/// implementation must not re-interpret `point` as anything else.
+pub trait HitTester {
+    /// The element on top at `point`, and the app the read addressed.
+    ///
+    /// `app` is `None` when the request names a whole screen. An
+    /// implementation then picks the app itself, and reports which one
+    /// it picked.
+    ///
+    /// `Ok((app, None))` means the platform reports no element at that
+    /// point. That is a real answer, not a failure: a caller reads it as
+    /// "a tap here reaches nothing".
+    fn element_at_pixel(
+        &self,
+        app: Option<&AppIdentifier>,
+        point: PixelPoint,
+    ) -> Result<(ResolvedApp, Option<AxNode>), PolarizeError>;
+}
+
+/// Reads and writes the general pasteboard. Implemented by
+/// `polarize-macos` over `NSPasteboard`.
+///
+/// A read returns the raw report, not a decision. macOS can refuse to
+/// hand over the contents, and a refusal looks a lot like an empty
+/// pasteboard. [`crate::clipboard::classify_read`] separates the two
+/// (PINV-34), and it is pure, so real tests cover it.
+pub trait ClipboardAccess {
+    /// What the pasteboard reports for one content type.
+    fn read_clipboard(
+        &self,
+        content_type: crate::clipboard::ClipboardContentType,
+    ) -> Result<crate::clipboard::RawClipboardRead, PolarizeError>;
+
+    /// Replaces the pasteboard contents with `text`, under one content
+    /// type. macOS never refuses a write.
+    fn write_clipboard(
+        &self,
+        content_type: crate::clipboard::ClipboardContentType,
+        text: &str,
+    ) -> Result<(), PolarizeError>;
+}
