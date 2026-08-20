@@ -266,9 +266,8 @@ mod tests {
                     width: 1.0,
                     height: 1.0,
                 },
-                focusable: false,
-                interactive: false,
                 children: vec![],
+                ..AxNode::default()
             },
             formatted: "AXWindow \"Untitled\" (0.00,0.00,1.00,1.00)".to_string(),
         };

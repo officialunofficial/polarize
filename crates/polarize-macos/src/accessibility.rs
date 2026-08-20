@@ -104,7 +104,20 @@ fn build_node(element: &AxElement, screen_size: PixelSize, depth: usize) -> AxNo
     );
 
     let focusable = element.is_attribute_settable("AXFocused");
-    let interactive = element.has_actions();
+    let actions = element.action_names();
+    let interactive = !actions.is_empty();
+    // A missing `AXEnabled` means "this element does not publish an
+    // enabled state", not "this element is disabled" — see PINV-16.
+    let enabled = element.bool_attribute("AXEnabled").unwrap_or(true);
+    let non_empty = |attribute: &str| {
+        element
+            .string_attribute(attribute)
+            .filter(|value| !value.is_empty())
+    };
+    let subrole = non_empty("AXSubrole");
+    let role_description = non_empty("AXRoleDescription");
+    let identifier = non_empty("AXIdentifier");
+    let help = non_empty("AXHelp");
 
     let children = if depth >= MAX_AX_DEPTH {
         Vec::new()
@@ -122,6 +135,12 @@ fn build_node(element: &AxElement, screen_size: PixelSize, depth: usize) -> AxNo
         frame,
         focusable,
         interactive,
+        enabled,
+        subrole,
+        role_description,
+        identifier,
+        help,
+        actions,
         children,
     }
 }

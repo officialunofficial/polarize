@@ -302,6 +302,42 @@ claim automated coverage they don't have.
   `target` were dropped from the schema instead of wired up — `polarize`
   would advertise a field its `keyboard` tool never honors.
 
+### PINV-15: an element selector must name a criterion, and resolves in pre-order
+
+- Always: `selector::find_all` and `selector::find_one` reject an
+  `ElementSelector` that sets no criterion, with `SelectorError::Empty`.
+  Both return their matches in the same pre-order `ax::flatten` uses
+  (PINV-3), so `ElementSelector::index` names the same element every
+  time for the same tree.
+- Because: a selector resolves to a real press or a real wait. An empty
+  selector matches the application root, so a `perform_action` call would
+  silently press whatever sits first in the tree. An unstable match order
+  would make one `index` name a different element on each call, which is
+  worse than an error, because the caller cannot see it happen.
+- If violated: a tool acts on an element the caller never named, and the
+  same request acts on a different element on the next run.
+
+### PINV-16: an unread AX attribute degrades to "absent", never to a wrong value
+
+- Always: `accessibility::build_node` reads each enriched attribute
+  (`AXEnabled`, `AXSubrole`, `AXRoleDescription`, `AXIdentifier`,
+  `AXHelp`, and the action-name list) on its own. A read that fails, or
+  returns an empty string, yields `None` for a string attribute and an
+  empty list for the action list. A failed `AXEnabled` read yields
+  `true`, not `false`. `AxNode`'s serde defaults match, so an older
+  `describe` response still deserializes.
+- Because: most AX elements publish only some of these attributes, so a
+  failed read is the normal case, not an error (PINV-12 says one bad
+  attribute must not abort a walk). `AXEnabled` is the asymmetric one:
+  the rest of `polarize` reads `enabled: false` as "the app says this
+  control is off", and `ElementSelector::enabled_only` skips such an
+  element. Defaulting a missing read to `false` would hide every element
+  that simply does not publish the attribute.
+- If violated: `enabled_only` selectors silently match nothing on apps
+  that do not publish `AXEnabled`, and a caller reads an absent
+  `AXIdentifier` as a real, empty identifier it can select on.
+
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -410,3 +446,19 @@ claim automated coverage they don't have.
   real, running target app to the front on a live macOS session — that
   needs one, with Accessibility permission granted and a real target
   app running.
+- **PINV-15** — fully covered by automated `cargo test -p polarize-core`
+  (`selector::tests`): the empty-selector rejection (including a
+  selector that sets only `index`), pre-order match paths, `index`
+  selection and its out-of-range error, every single-field criterion,
+  combined criteria, and a round-trip from every found path back to a
+  matching node.
+- **PINV-16** — split. The serde half — defaults for every enriched
+  field, `enabled` defaulting to `true`, and an older `describe`
+  response still deserializing — is fully covered by automated `cargo
+  test -p polarize-core` (`ax::tests`). The native half is **not**
+  automated anywhere: whether a real `AXUIElementCopyAttributeValue`
+  call for `AXEnabled`/`AXSubrole`/`AXIdentifier`/`AXHelp` returns the
+  value a real app publishes needs a live macOS session with
+  Accessibility permission granted. The macOS code is type-checked
+  against `aarch64-apple-darwin`, and CI compiles it on a real macOS
+  runner, but neither runs it.

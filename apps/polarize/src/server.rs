@@ -58,8 +58,8 @@ pub struct PolarizeServer {
 }
 
 /// Maps a [`PolarizeError`] to the MCP [`ErrorData`] shape a tool call
-/// result carries. `Coord`/`AppNotFound`/`WindowNotFound` are treated as
-/// bad input from the caller (`INVALID_PARAMS`); `Permission` and
+/// result carries. `Coord`/`Selector`/`AppNotFound`/`WindowNotFound` are
+/// treated as bad input from the caller (`INVALID_PARAMS`); `Permission` and
 /// `Platform` are treated as environment/native failures
 /// (`INTERNAL_ERROR`) — a permission error additionally carries its
 /// `PermissionKind`/`PermissionState` as structured `data` so a caller
@@ -69,6 +69,7 @@ fn to_error_data(err: PolarizeError) -> ErrorData {
     let message = err.to_string();
     match &err {
         PolarizeError::Coord(_)
+        | PolarizeError::Selector(_)
         | PolarizeError::AppNotFound(_)
         | PolarizeError::WindowNotFound(_) => ErrorData::invalid_params(message, None),
         PolarizeError::Permission(PermissionError::NotGranted { kind, state }) => {

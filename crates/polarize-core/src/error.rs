@@ -9,6 +9,7 @@ use std::fmt;
 
 use crate::coords::CoordError;
 use crate::permission::PermissionError;
+use crate::selector::SelectorError;
 
 /// Which axis a coordinate error refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -28,8 +29,8 @@ impl fmt::Display for CoordAxis {
 
 /// The top-level error type for all of `polarize`.
 ///
-/// `polarize-core`'s own logic only ever produces the [`Self::Coord`] and
-/// [`Self::Permission`] variants. The remaining variants exist for
+/// `polarize-core`'s own logic only ever produces the [`Self::Coord`],
+/// [`Self::Permission`], and [`Self::Selector`] variants. The remaining variants exist for
 /// `polarize-macos` and `apps/polarize` to report failures from real
 /// native-API calls (window lookup, screen capture, AX tree walks, event
 /// posting) that `polarize-core` cannot itself experience or test.
@@ -44,6 +45,12 @@ pub enum PolarizeError {
     /// [`crate::permission`] (PINV-2).
     #[error(transparent)]
     Permission(#[from] PermissionError),
+
+    /// An element selector named no criterion, matched nothing, or
+    /// matched fewer elements than its `index` needs. See
+    /// [`crate::selector`] (PINV-15).
+    #[error(transparent)]
+    Selector(#[from] SelectorError),
 
     /// The requested app (by bundle id or name) is not running.
     #[error("app not found: {0}")]
@@ -90,6 +97,16 @@ mod tests {
         };
         let err: PolarizeError = perm_err.into();
         assert!(matches!(err, PolarizeError::Permission(_)));
+    }
+
+    #[test]
+    fn selector_error_converts_into_polarize_error_via_from() {
+        let selector_err = SelectorError::NoMatch {
+            selector: "role=\"AXButton\"".to_string(),
+        };
+        let err: PolarizeError = selector_err.into();
+        assert!(matches!(err, PolarizeError::Selector(_)));
+        assert!(err.to_string().contains("AXButton"));
     }
 
     #[test]

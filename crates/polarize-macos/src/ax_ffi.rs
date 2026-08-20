@@ -162,8 +162,7 @@ impl AxElement {
         value.downcast_ref::<CFString>().map(ToString::to_string)
     }
 
-    /// Reads a `CFBoolean`-typed attribute (e.g. `AXFocused`).
-    #[allow(dead_code)] // read via is_attribute_settable for AXFocused today; kept for direct boolean attributes
+    /// Reads a `CFBoolean`-typed attribute (e.g. `AXEnabled`).
     pub fn bool_attribute(&self, attribute: &str) -> Option<bool> {
         let value = self.copy_attribute(attribute)?;
         value.downcast_ref::<CFBoolean>().map(CFBoolean::value)
@@ -214,21 +213,45 @@ impl AxElement {
             .collect()
     }
 
+    /// The element's AX action names, e.g. `["AXPress", "AXShowMenu"]`.
+    ///
+    /// An error is reported as an empty list rather than propagated. A
+    /// caller reads this as "no action available", which is the same
+    /// conclusion it draws from a real empty list, and neither one should
+    /// abort a whole tree walk (PINV-12).
+    pub fn action_names(&self) -> Vec<String> {
+        let mut names: *const CFArray = ptr::null();
+        let err = unsafe { AXUIElementCopyActionNames(self.0, &mut names) };
+        if err != AX_ERROR_SUCCESS {
+            return Vec::new();
+        }
+        let Some(names) = NonNull::new(names.cast_mut()) else {
+            return Vec::new();
+        };
+        let names: CFRetained<CFArray> = unsafe { CFRetained::from_raw(names) };
+        (0..names.count())
+            .filter_map(|i| {
+                let borrowed = unsafe { names.value_at_index(i) };
+                if borrowed.is_null() {
+                    return None;
+                }
+                // `value_at_index` hands back a borrowed (+0) reference;
+                // retain it so `CFRetained::from_raw` owns a real +1, the
+                // same handoff `children` performs.
+                let retained = unsafe { CFRetain(borrowed) };
+                let value: CFRetained<CFType> =
+                    unsafe { CFRetained::from_raw(NonNull::new(retained.cast_mut().cast())?) };
+                value.downcast_ref::<CFString>().map(ToString::to_string)
+            })
+            .collect()
+    }
+
     /// Whether the element has at least one AX action it can perform (a
     /// button-like "this can be clicked" signal). Errors are treated as
     /// "no actions" rather than propagated — a best-effort classification,
     /// not a hard fact the caller should branch safety-critical logic on.
     pub fn has_actions(&self) -> bool {
-        let mut names: *const CFArray = ptr::null();
-        let err = unsafe { AXUIElementCopyActionNames(self.0, &mut names) };
-        if err != AX_ERROR_SUCCESS {
-            return false;
-        }
-        let Some(names) = NonNull::new(names.cast_mut()) else {
-            return false;
-        };
-        let names: CFRetained<CFArray> = unsafe { CFRetained::from_raw(names) };
-        names.count() > 0
+        !self.action_names().is_empty()
     }
 
     /// Whether `attribute` is settable on this element — used as a
