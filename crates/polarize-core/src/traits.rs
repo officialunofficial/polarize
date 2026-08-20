@@ -103,3 +103,26 @@ pub trait ActionPerformer {
         action: &str,
     ) -> Result<(), PolarizeError>;
 }
+
+/// Blocks until an app's accessibility tree reports a change.
+/// Implemented by `polarize-macos` over `AXObserver` and `CFRunLoop`.
+///
+/// This is the one part of a wait that only macOS can do. The waiting
+/// policy that calls it — the timeout, the poll interval, the match test
+/// — is pure logic in [`crate::wait`], and is unit-tested there against
+/// a fake implementation of this trait.
+pub trait UiChangeWaiter {
+    /// Blocks until `app` signals an accessibility change, or until
+    /// `budget` elapses. Returns `true` when a change arrived.
+    ///
+    /// A `false` result is not a failure. Some accessibility trees never
+    /// post a notification, so [`crate::wait`] re-reads the tree after
+    /// every wait either way (PINV-19). An implementation must not
+    /// return early with `false`: [`crate::wait`] treats one call as one
+    /// poll interval of elapsed time.
+    fn wait_for_change(
+        &self,
+        app: Option<&AppIdentifier>,
+        budget: std::time::Duration,
+    ) -> Result<bool, PolarizeError>;
+}

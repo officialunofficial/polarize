@@ -17,3 +17,4 @@ pub mod schema;
 pub mod selector;
 pub mod session;
 pub mod traits;
+pub mod wait;

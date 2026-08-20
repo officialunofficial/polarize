@@ -45,6 +45,7 @@ mod content;
 pub mod geometry;
 pub mod input;
 pub mod keymap;
+pub mod observer;
 pub mod permission_bootstrap;
 pub mod session;
 pub mod window;
