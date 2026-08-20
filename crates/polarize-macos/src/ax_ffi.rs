@@ -24,7 +24,9 @@
 //! Nothing here has been exercised against a real accessibility session —
 //! see the crate-level docs and `docs/INVARIANTS.md`.
 
-use objc2_core_foundation::{CFArray, CFBoolean, CFRetained, CFString, CFType, CGPoint, CGSize};
+use objc2_core_foundation::{
+    CFArray, CFBoolean, CFNumber, CFRetained, CFString, CFType, CGPoint, CGSize,
+};
 use std::ffi::c_void;
 use std::ptr;
 use std::ptr::NonNull;
@@ -89,8 +91,26 @@ unsafe extern "C" {
         settable: *mut bool,
     ) -> AXError;
     fn AXUIElementPerformAction(element: AXUIElementRef, action: *const CFString) -> AXError;
+    fn AXUIElementSetAttributeValue(
+        element: AXUIElementRef,
+        attribute: *const CFString,
+        value: *const CFType,
+    ) -> AXError;
+    /// The element at a point in the **global display** coordinate
+    /// space, the same space `crate::input` posts clicks into (PINV-4).
+    /// `application` must be an application element, or the system-wide
+    /// element.
+    fn AXUIElementCopyElementAtPosition(
+        application: AXUIElementRef,
+        x: f32,
+        y: f32,
+        element: *mut AXUIElementRef,
+    ) -> AXError;
     fn AXValueGetType(value: *const c_void) -> AXValueType;
     fn AXValueGetValue(value: *const c_void, the_type: AXValueType, out: *mut c_void) -> bool;
+    /// Wraps a `CGPoint`/`CGSize` in the `AXValue` box every geometric
+    /// AX attribute takes. Returns `NULL` on failure.
+    fn AXValueCreate(the_type: AXValueType, value_ptr: *const c_void) -> *const CFType;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -292,6 +312,102 @@ impl AxElement {
             ax_error_name(err)
         ))
     }
+
+    /// Reads an `AXUIElement`-typed attribute, e.g. `AXCloseButton`,
+    /// `AXFocusedUIElement`, or `AXParent`.
+    ///
+    /// The value arrives retained (+1), and the returned [`AxElement`]
+    /// takes ownership of that reference rather than retaining again.
+    pub fn element_attribute(&self, attribute: &str) -> Option<AxElement> {
+        let value = self.copy_attribute(attribute)?;
+        let raw = CFRetained::into_raw(value).as_ptr().cast_const();
+        Some(unsafe { AxElement::from_retained(raw.cast()) })
+    }
+
+    /// Reads an `AXUIElement`-array attribute, e.g. `AXWindows`.
+    pub fn element_array_attribute(&self, attribute: &str) -> Vec<AxElement> {
+        let Some(value) = self.copy_attribute(attribute) else {
+            return Vec::new();
+        };
+        let Some(array) = value.downcast_ref::<CFArray>() else {
+            return Vec::new();
+        };
+        (0..array.count())
+            .filter_map(|index| {
+                let borrowed = unsafe { array.value_at_index(index) };
+                if borrowed.is_null() {
+                    return None;
+                }
+                let retained = unsafe { CFRetain(borrowed) };
+                Some(unsafe { AxElement::from_retained(retained.cast()) })
+            })
+            .collect()
+    }
+
+    /// Writes one attribute from an already-built Core Foundation value.
+    ///
+    /// An error carries the `AXError` name as well as its number,
+    /// because the number alone is not searchable. The typed setters
+    /// below are what callers normally use.
+    pub fn set_attribute(&self, attribute: &str, value: &CFType) -> Result<(), String> {
+        let attr = CFString::from_str(attribute);
+        let err = unsafe {
+            AXUIElementSetAttributeValue(self.0, &*attr as *const CFString, value as *const CFType)
+        };
+        if err == AX_ERROR_SUCCESS {
+            return Ok(());
+        }
+        Err(format!(
+            "AXUIElementSetAttributeValue({attribute:?}) failed: {} ({err})",
+            ax_error_name(err)
+        ))
+    }
+
+    /// Writes a `CFString`-typed attribute, e.g. `AXValue` on a text
+    /// field.
+    pub fn set_string_attribute(&self, attribute: &str, value: &str) -> Result<(), String> {
+        let value = CFString::from_str(value);
+        self.set_attribute(attribute, &value)
+    }
+
+    /// Writes a `CFBoolean`-typed attribute, e.g. `AXMinimized`.
+    pub fn set_bool_attribute(&self, attribute: &str, value: bool) -> Result<(), String> {
+        self.set_attribute(attribute, CFBoolean::new(value).as_ref())
+    }
+
+    /// Writes a `CFNumber`-typed attribute, e.g. `AXValue` on a slider.
+    pub fn set_number_attribute(&self, attribute: &str, value: f64) -> Result<(), String> {
+        self.set_attribute(attribute, &CFNumber::new_f64(value))
+    }
+
+    /// Writes an `AXValue`-wrapped `CGPoint`, e.g. `AXPosition`.
+    pub fn set_point_attribute(&self, attribute: &str, value: CGPoint) -> Result<(), String> {
+        let boxed = ax_value(AX_VALUE_TYPE_CG_POINT, &value)?;
+        self.set_attribute(attribute, &boxed)
+    }
+
+    /// Writes an `AXValue`-wrapped `CGSize`, e.g. `AXSize`.
+    pub fn set_size_attribute(&self, attribute: &str, value: CGSize) -> Result<(), String> {
+        let boxed = ax_value(AX_VALUE_TYPE_CG_SIZE, &value)?;
+        self.set_attribute(attribute, &boxed)
+    }
+
+    /// The deepest element at `x`/`y`, in the **global display**
+    /// coordinate space — the space `crate::input` clicks into
+    /// (PINV-4).
+    ///
+    /// macOS hit-tests the point and returns whatever really sits on
+    /// top. An occluded element never comes back, which is what makes
+    /// this a usable `tap` preflight.
+    pub fn element_at_position(&self, x: f64, y: f64) -> Option<AxElement> {
+        let mut raw: AXUIElementRef = ptr::null();
+        let err = unsafe { AXUIElementCopyElementAtPosition(self.0, x as f32, y as f32, &mut raw) };
+        if err != AX_ERROR_SUCCESS || raw.is_null() {
+            return None;
+        }
+        // The copy already retained it.
+        Some(unsafe { AxElement::from_retained(raw) })
+    }
 }
 
 /// The `AXError.h` name of one error code, or `"kAXErrorUnknown"`.
@@ -310,6 +426,17 @@ fn ax_error_name(err: AXError) -> &'static str {
         AX_ERROR_API_DISABLED => "kAXErrorAPIDisabled",
         _ => "kAXErrorUnknown",
     }
+}
+
+/// Boxes a geometric value in the `AXValue` every AX setter takes.
+///
+/// `AXValueCreate` copies out of `value_ptr`, so the borrow does not
+/// need to outlive the call.
+fn ax_value<T>(value_type: AXValueType, value: &T) -> Result<CFRetained<CFType>, String> {
+    let raw = unsafe { AXValueCreate(value_type, ptr::from_ref(value).cast()) };
+    let raw = NonNull::new(raw.cast_mut())
+        .ok_or_else(|| format!("AXValueCreate returned null for AXValueType {value_type}"))?;
+    Ok(unsafe { CFRetained::from_raw(raw) })
 }
 
 /// Casts a copied attribute value's CF pointer to the raw pointer
