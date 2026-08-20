@@ -38,6 +38,16 @@ the same TCC reason. It needs a real Developer ID Application
 certificate to get it, not a self-signed one. See
 [`docs/RELEASING.md`](docs/RELEASING.md) for that side of it.
 
+## Release automation prerequisites
+
+`.github/workflows/release-plz.yml` needs two repo secrets before it can
+run: `RELEASE_PLZ_APP_ID` and `RELEASE_PLZ_APP_PRIVATE_KEY`. Both belong
+to the org's `offuno-release-plz` GitHub App. That App also needs its
+own access to this repo, granted separately under the org's
+installation settings. See [`docs/RELEASING.md`](docs/RELEASING.md) for
+what these unlock, and why a plain `GITHUB_TOKEN` can't substitute for
+them.
+
 ## `polarize-macos` needs manual verification
 
 `cargo test --workspace` exercises `polarize-core` in full, plus the

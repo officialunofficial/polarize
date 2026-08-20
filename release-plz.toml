@@ -1,0 +1,63 @@
+# Release automation for polarize.
+#
+# release-plz opens a Release PR (manual trigger — see
+# .github/workflows/release-plz.yml) that bumps the lockstep version from
+# Conventional Commits, regenerates CHANGELOG.md, and updates Cargo.lock.
+# Merging that PR tags vX.Y.Z and cuts a GitHub Release. That tag is what
+# dist's own release workflow (.github/workflows/release.yml) builds and
+# publishes the binary from — see docs/RELEASING.md.
+#
+# None of polarize's three crates publish to crates.io. Each crate's own
+# Cargo.toml already sets `publish = false`. `dist` distributes the built
+# `polarize` binary through GitHub Releases, npm, and Homebrew instead.
+
+[workspace]
+# Deny-by-default, matching every crate's own `publish = false`.
+publish = false
+# Tagging and releasing happen on ONE package only (`polarize`, below), so a
+# release produces a single `v{{version}}` tag instead of one tag per crate.
+# A per-crate tag would also match dist's release.yml trigger pattern and
+# fire a redundant, conflicting release run for the same version.
+git_tag_enable = false
+git_release_enable = false
+changelog_update = false
+
+[[package]]
+# The one package that tags, releases, and writes the changelog for all
+# three crates. It never publishes (`publish = false`, workspace default) —
+# dist distributes the binary, not crates.io.
+name = "polarize"
+version_group = "polarize"
+# None of these three crates are ever on crates.io. Decide "is this version
+# already released?" from git tags instead of a registry that has nothing
+# to answer with.
+git_only = true
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_enable = true
+git_release_name = "v{{ version }}"
+changelog_update = true
+
+[[package]]
+name = "polarize-core"
+version_group = "polarize"
+
+[[package]]
+name = "polarize-macos"
+version_group = "polarize"
+
+[changelog]
+protect_breaking_commits = true
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactor" },
+  { message = "^docs?", group = "Documentation" },
+  { message = "^revert", group = "Reverts" },
+  { message = "^chore", skip = true },
+  { message = "^style", skip = true },
+  { message = "^test", skip = true },
+  { message = "^ci", skip = true },
+  { message = "^build", skip = true },
+]

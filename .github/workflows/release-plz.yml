@@ -1,0 +1,95 @@
+# Release automation — release-plz. MANUAL trigger for the Release PR.
+#
+#  - release-plz-pr (open/update the Release PR — the next version,
+#    regenerated CHANGELOG.md, updated Cargo.lock) runs ONLY on a manual
+#    `workflow_dispatch`. Run it from the Actions tab when you want to cut
+#    a release; it gathers everything merged since the last tag into one PR.
+#  - release-plz-release (tag vX.Y.Z + cut the GitHub Release) runs on push
+#    to main, so merging that Release PR auto-tags it. The tag fires
+#    .github/workflows/release.yml (dist) to build and publish the binary.
+#
+# TOKEN: both jobs mint a GitHub App installation token at runtime with
+# actions/create-github-app-token, from two repo secrets — RELEASE_PLZ_APP_ID
+# and RELEASE_PLZ_APP_PRIVATE_KEY. A tag created with the default
+# GITHUB_TOKEN does NOT trigger other workflows, so dist's release.yml would
+# never fire on the release tag; the App token does. See docs/RELEASING.md.
+#
+# RUNNER: macos-latest, not ubuntu. `polarize-macos` links real macOS
+# frameworks (ScreenCaptureKit, AppKit, ...) — same reason ci.yml and dist's
+# release.yml both run on macOS. release-plz still needs to resolve this
+# workspace's Cargo metadata, which needs a toolchain that can see it.
+
+name: release-plz
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release-plz-release:
+    name: release-plz release
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: mint GitHub App token
+        uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+
+      - name: run release-plz release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  release-plz-pr:
+    name: release-plz PR
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: mint GitHub App token
+        uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+
+      - name: run release-plz release-pr
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
