@@ -108,6 +108,12 @@ pub enum ToolKind {
     /// `find_text` — OCR fallback over the captured screen. See
     /// `crate::find_text` (PINV-37, PINV-38).
     FindText,
+    /// `describe_notifications` — reads every notification banner on
+    /// screen. See `crate::notifications` (PINV-35).
+    DescribeNotifications,
+    /// `dismiss_notification` — closes one banner. See
+    /// `crate::notifications` (PINV-35).
+    DismissNotification,
 }
 
 /// # PINV-2: every tool call is gated on exactly one permission
@@ -149,6 +155,18 @@ pub fn required_permission(tool: ToolKind) -> PermissionKind {
         // permission. Its pixels come from the same `ScreenCaptureKit`
         // capture `screenshot` uses, so it needs the same one.
         ToolKind::FindText => PermissionKind::ScreenRecording,
+        // Both notification tools read the notification centre's
+        // accessibility tree, and one of them presses a control in it.
+        // See PINV-35.
+        //
+        // The two workspace tools (PINV-36) have no `ToolKind` here on
+        // purpose. `frontmost_app` and `await_workspace_event` need no
+        // TCC permission at all, and this table maps every tool to
+        // exactly one. Naming a permission they do not need would be a
+        // false entry in a table an auditor reads.
+        ToolKind::DescribeNotifications | ToolKind::DismissNotification => {
+            PermissionKind::Accessibility
+        }
     }
 }
 
@@ -547,5 +565,17 @@ mod workspace_tool_tests {
     fn a_workspace_tool_serializes_in_snake_case() {
         let json = serde_json::to_string(&WorkspaceTool::ListDisplays).unwrap();
         assert_eq!(json, r#""list_displays""#);
+    }
+
+    #[test]
+    fn both_notification_tools_need_accessibility() {
+        assert_eq!(
+            required_permission(ToolKind::DescribeNotifications),
+            PermissionKind::Accessibility
+        );
+        assert_eq!(
+            required_permission(ToolKind::DismissNotification),
+            PermissionKind::Accessibility
+        );
     }
 }

@@ -16,6 +16,7 @@ pub mod error;
 /// PINV-37 and PINV-38.
 pub mod find_text;
 pub mod hit_test;
+pub mod notifications;
 pub mod orchestrate;
 pub mod permission;
 pub mod process;
@@ -28,3 +29,4 @@ pub mod traits;
 pub mod wait;
 pub mod window_control;
 pub mod workspace;
+pub mod workspace_events;
