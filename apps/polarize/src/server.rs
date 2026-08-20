@@ -56,7 +56,17 @@
 //! queries belong in `polarize-macos`, not in this thin server.
 
 use polarize_core::action::{self, PerformActionRequest, PerformActionResponse};
+use polarize_core::clipboard::{
+    self, ClipboardReadRequest, ClipboardReadResponse, ClipboardWriteRequest,
+    ClipboardWriteResponse,
+};
 use polarize_core::error::PolarizeError;
+use polarize_core::find_text::{self, FindTextRequest, FindTextResponse};
+use polarize_core::hit_test::{self, HitTestRequest, HitTestResponse};
+use polarize_core::notifications::{
+    DescribeNotificationsRequest, DescribeNotificationsResponse, DismissNotificationRequest,
+    DismissNotificationResponse,
+};
 use polarize_core::orchestrate;
 use polarize_core::permission::PermissionError;
 use polarize_core::schema::{
@@ -67,17 +77,36 @@ use polarize_core::script::{
     self, RunAppleScriptRequest, RunAppleScriptResponse, ScriptDictionaryRequest,
     ScriptDictionaryResponse,
 };
+use polarize_core::set_value::{self, SetValueRequest, SetValueResponse};
 use polarize_core::wait::{
     self, AwaitScreenIdleRequest, AwaitScreenIdleResponse, AwaitUiElementRequest,
     AwaitUiElementResponse, SystemClock,
+};
+use polarize_core::window_control::{
+    self, SetWindowFrameRequest, SetWindowFrameResponse, WindowActionRequest, WindowActionResponse,
+};
+use polarize_core::workspace::{
+    self, AppLaunchRequest, AppLaunchResponse, AppQuitRequest, AppQuitResponse,
+    ListDisplaysRequest, ListDisplaysResponse, ListWindowsRequest, ListWindowsResponse,
+};
+use polarize_core::workspace_events::{
+    self, AwaitWorkspaceEventRequest, AwaitWorkspaceEventResponse, FrontmostAppResponse,
 };
 use polarize_macos::accessibility::MacAccessibilityInspector;
 use polarize_macos::action::MacActionPerformer;
 use polarize_macos::applescript::MacAppleScriptRunner;
 use polarize_macos::capture::MacScreenCapture;
+use polarize_macos::clipboard::MacClipboard;
+use polarize_macos::hit_test::MacHitTester;
 use polarize_macos::input::MacInputSynthesizer;
+use polarize_macos::notifications::MacNotificationCenter;
 use polarize_macos::observer::MacUiChangeWaiter;
+use polarize_macos::set_value::MacValueSetter;
+use polarize_macos::vision::MacTextRecognizer;
 use polarize_macos::window::MacWindowManager;
+use polarize_macos::window_control::MacWindowController;
+use polarize_macos::workspace::MacWorkspace;
+use polarize_macos::workspace_events::{MacWorkspaceInspector, MacWorkspaceNotificationWaiter};
 use rmcp::ErrorData;
 use rmcp::ServerHandler;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -98,6 +127,9 @@ pub struct PolarizeServer {
     capture: MacScreenCapture,
     input: MacInputSynthesizer,
     window: MacWindowManager,
+    clipboard: MacClipboard,
+    workspace: MacWorkspace,
+    workspace_inspector: MacWorkspaceInspector,
 }
 
 /// Maps a [`PolarizeError`] to the MCP [`ErrorData`] shape a tool call
@@ -325,6 +357,210 @@ impl PolarizeServer {
         Parameters(request): Parameters<ScriptDictionaryRequest>,
     ) -> Result<Json<ScriptDictionaryResponse>, ErrorData> {
         blocking(move || script::perform_script_dictionary(&MacAppleScriptRunner, &request)).await
+    }
+
+    /// Writes one accessibility attribute of one element directly:
+    /// text, a number, or a selected-text range. This avoids the focus
+    /// race and the keyboard-layout dependence of simulated typing. Read
+    /// PINV-27 first: web content often accepts the write into the DOM
+    /// without firing `input` or `keydown`, so a controlled component
+    /// can update and then snap back.
+    #[tool(name = "set_value")]
+    async fn set_value(
+        &self,
+        Parameters(request): Parameters<SetValueRequest>,
+    ) -> Result<Json<SetValueResponse>, ErrorData> {
+        blocking(move || {
+            set_value::set_element_value(&MacAccessibilityInspector, &MacValueSetter, &request)
+        })
+        .await
+    }
+
+    /// Reports the element that really sits under a point, asking the
+    /// system-wide accessibility element so another app's window counts
+    /// as occlusion. It resolves the same fraction `tap` resolves, so a
+    /// caller can preflight a click with it (PINV-32).
+    #[tool(name = "hit_test_at_point")]
+    async fn hit_test_at_point(
+        &self,
+        Parameters(request): Parameters<HitTestRequest>,
+    ) -> Result<Json<HitTestResponse>, ErrorData> {
+        blocking(move || hit_test::perform_hit_test(&MacWindowManager, &MacHitTester, &request))
+            .await
+    }
+
+    /// Reads the general pasteboard. A refused read reports a permission
+    /// error rather than empty text, because macOS can withhold the
+    /// contents from a programmatic read (PINV-34).
+    #[tool(name = "clipboard_read")]
+    fn clipboard_read(
+        &self,
+        Parameters(request): Parameters<ClipboardReadRequest>,
+    ) -> Result<Json<ClipboardReadResponse>, ErrorData> {
+        clipboard::perform_clipboard_read(&self.clipboard, &request)
+            .map(Json)
+            .map_err(to_error_data)
+    }
+
+    /// Replaces the pasteboard contents. macOS never refuses a write, so
+    /// this tool needs no permission.
+    #[tool(name = "clipboard_write")]
+    fn clipboard_write(
+        &self,
+        Parameters(request): Parameters<ClipboardWriteRequest>,
+    ) -> Result<Json<ClipboardWriteResponse>, ErrorData> {
+        clipboard::perform_clipboard_write(&self.clipboard, &request)
+            .map(Json)
+            .map_err(to_error_data)
+    }
+
+    /// Moves and resizes one window. The response reports the frame the
+    /// window really ended up with, re-read after the write, plus
+    /// whether it matched the request — apps clamp their own minimum and
+    /// maximum size (PINV-29).
+    #[tool(name = "set_window_frame")]
+    async fn set_window_frame(
+        &self,
+        Parameters(request): Parameters<SetWindowFrameRequest>,
+    ) -> Result<Json<SetWindowFrameResponse>, ErrorData> {
+        blocking(move || {
+            window_control::perform_set_window_frame(
+                &MacWindowManager,
+                &MacWindowController,
+                &request,
+            )
+        })
+        .await
+    }
+
+    /// Minimizes, restores, focuses, closes, or full-screens one window.
+    /// A full-screen action against a window that publishes no
+    /// `AXFullScreen` is refused rather than silently ignored.
+    #[tool(name = "window_action")]
+    async fn window_action(
+        &self,
+        Parameters(request): Parameters<WindowActionRequest>,
+    ) -> Result<Json<WindowActionResponse>, ErrorData> {
+        blocking(move || {
+            window_control::perform_window_action(&MacWindowManager, &MacWindowController, &request)
+        })
+        .await
+    }
+
+    /// Lists an app's windows, merging the accessibility window list
+    /// with the window server's for durable window ids and an
+    /// on-screen flag. A window only one source knows about still
+    /// appears, with the other source's fields absent rather than false
+    /// (PINV-30).
+    #[tool(name = "list_windows")]
+    async fn list_windows(
+        &self,
+        Parameters(request): Parameters<ListWindowsRequest>,
+    ) -> Result<Json<ListWindowsResponse>, ErrorData> {
+        blocking(move || workspace::perform_list_windows(&MacWorkspace, &request)).await
+    }
+
+    /// Starts an app, or reports it was already running.
+    #[tool(name = "app_launch")]
+    async fn app_launch(
+        &self,
+        Parameters(request): Parameters<AppLaunchRequest>,
+    ) -> Result<Json<AppLaunchResponse>, ErrorData> {
+        blocking(move || {
+            workspace::perform_app_launch(&MacWorkspace, &SystemClock::new(), &request)
+        })
+        .await
+    }
+
+    /// Asks an app to exit, politely by default. A caller must ask for
+    /// `force` explicitly, because a forced quit discards unsaved work
+    /// (PINV-31). The response reports whether the app really exited.
+    #[tool(name = "app_quit")]
+    async fn app_quit(
+        &self,
+        Parameters(request): Parameters<AppQuitRequest>,
+    ) -> Result<Json<AppQuitResponse>, ErrorData> {
+        blocking(move || workspace::perform_app_quit(&MacWorkspace, &SystemClock::new(), &request))
+            .await
+    }
+
+    /// Reports every active display, with bounds in the same global
+    /// pixel space `screenshot` and `tap` use.
+    #[tool(name = "list_displays")]
+    fn list_displays(
+        &self,
+        Parameters(request): Parameters<ListDisplaysRequest>,
+    ) -> Result<Json<ListDisplaysResponse>, ErrorData> {
+        workspace::perform_list_displays(&self.workspace, &request)
+            .map(Json)
+            .map_err(to_error_data)
+    }
+
+    /// Finds on-screen text with Vision OCR, for apps whose
+    /// accessibility tree is sparse, missing, or wrong. Each match
+    /// carries a normalized frame a caller can hand straight to `tap`.
+    ///
+    /// The first call after an OS update takes roughly 27 seconds, while
+    /// macOS compiles the recognition model. Later calls take about
+    /// 100 ms.
+    #[tool(name = "find_text")]
+    async fn find_text(
+        &self,
+        Parameters(request): Parameters<FindTextRequest>,
+    ) -> Result<Json<FindTextResponse>, ErrorData> {
+        blocking(move || {
+            find_text::perform_find_text(&MacScreenCapture, &MacTextRecognizer, &request)
+        })
+        .await
+    }
+
+    /// Reads every notification banner on screen: its app, title, body,
+    /// and frame. Banners are found by structure, not by subrole string,
+    /// because those shift between macOS releases (PINV-35).
+    #[tool(name = "describe_notifications")]
+    async fn describe_notifications(
+        &self,
+        Parameters(request): Parameters<DescribeNotificationsRequest>,
+    ) -> Result<Json<DescribeNotificationsResponse>, ErrorData> {
+        blocking(move || MacNotificationCenter::default().describe(&request)).await
+    }
+
+    /// Closes one notification banner, then re-reads to report whether
+    /// it really went away.
+    #[tool(name = "dismiss_notification")]
+    async fn dismiss_notification(
+        &self,
+        Parameters(request): Parameters<DismissNotificationRequest>,
+    ) -> Result<Json<DismissNotificationResponse>, ErrorData> {
+        blocking(move || MacNotificationCenter::default().dismiss(&request)).await
+    }
+
+    /// Reports the app that holds focus right now.
+    #[tool(name = "frontmost_app")]
+    fn frontmost_app(&self) -> Result<Json<FrontmostAppResponse>, ErrorData> {
+        workspace_events::perform_frontmost_app(&self.workspace_inspector)
+            .map(Json)
+            .map_err(to_error_data)
+    }
+
+    /// Waits for an app switch, a wake, or a session change. It watches
+    /// the real `NSWorkspace` notifications and a polled snapshot diff
+    /// at the same time, and names which channel saw the event
+    /// (PINV-36).
+    #[tool(name = "await_workspace_event")]
+    async fn await_workspace_event(
+        &self,
+        Parameters(request): Parameters<AwaitWorkspaceEventRequest>,
+    ) -> Result<Json<AwaitWorkspaceEventResponse>, ErrorData> {
+        blocking(move || {
+            workspace_events::perform_await_workspace_event(
+                &MacWorkspaceInspector,
+                &MacWorkspaceNotificationWaiter,
+                &SystemClock::new(),
+                &request,
+            )
+        })
+        .await
     }
 }
 
