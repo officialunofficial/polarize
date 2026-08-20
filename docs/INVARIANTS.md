@@ -776,6 +776,49 @@ claim automated coverage they don't have.
   a faint line appears or disappears at the edge of the screen.
 - If violated: `index: 1` presses a different control on each call, and
   the caller cannot see it happen, because both calls succeed.
+### PINV-30: the window join matches on one app, then title, then frame, and never invents a match
+
+- Always: `workspace::merge_window_lists` pairs an accessibility window
+  with a window-server window only when both report the same
+  `owner_pid`. Within one app it makes three passes in order: same title
+  and same frame, then same title, then same frame. Each window-server
+  window is claimed at most once. A window that no pass pairs stays in
+  the result on its own, marked `AccessibilityOnly` or
+  `WindowServerOnly`, with the fields the missing list would have
+  supplied left as `None`.
+- Because: the two lists disagree by design. A window can be missing
+  from the accessibility half because the app publishes nothing for it,
+  and missing from the window-server half because it sits on another
+  Space. A caller must still see both. Neither key alone is unique
+  either: a document app happily shows several windows titled
+  "Untitled", and macOS hides `kCGWindowName` from a process without
+  Screen Recording permission, which leaves title matching with nothing
+  to work on. Dropping an unpaired window would silently hide real
+  windows. Pairing on title alone would hand a caller the wrong
+  `window_id` for the `screenshot` or `tap` call that follows.
+- If violated: `list_windows` reports a durable `window_id` that belongs
+  to a different window, or drops the very window the caller was looking
+  for and reports success.
+
+### PINV-31: `app_quit` asks politely unless the caller asks to force
+
+- Always: `workspace::perform_app_quit` calls
+  `AppLifecycle::request_terminate` with `force: false` unless the
+  request sets `force: true`. An absent `force` field is `false`. The
+  call never escalates to a force on its own, not after a timeout and
+  not after a refused request. It reports `exited` from what the
+  platform observed, never from the fact that it asked.
+- Because: `terminate()` sends a quit Apple Event, so the app runs its
+  own quit path. It can save open documents, and it can put up a "save
+  changes?" dialog and stay running. `forceTerminate()` is `SIGKILL`
+  with extra steps: unsaved work is gone, with no dialog and no undo. An
+  automation tool that escalates by itself destroys a user's work on a
+  schedule the user never agreed to. Reporting "quit" while the app
+  still shows a save dialog is just as bad, because the caller moves on
+  and the app is still there.
+- If violated: an `app_quit` call silently discards unsaved documents,
+  or a caller believes an app exited while a modal dialog holds it open,
+  and every step that follows acts on the wrong app state.
 
 ## Enforcement checklist
 
@@ -1200,3 +1243,68 @@ claim automated coverage they don't have.
   `aarch64-apple-darwin` and nothing more: no `VNRecognizeTextRequest`
   has ever run here. A human must also confirm the first call's roughly
   27 second model compile, and that later calls return in about 100 ms.
+
+- **PINV-30** — fully covered by automated `cargo test -p polarize-core`
+  (`workspace::tests`): a window both lists report, a window only the
+  accessibility tree reports, a window only the window server reports,
+  two empty lists, two windows of different apps that share a title, two
+  windows of one app that share a title and are listed in opposite
+  orders, a title match when the frames differ, a frame match when the
+  titles differ, three accessibility windows against two identical
+  window-server windows (which proves each one is claimed at most once),
+  a sub-pixel frame difference, a frame difference wider than the
+  tolerance, an empty title read as an absent title, and the output
+  order. The join is pure logic over two in-memory lists, so it needs no
+  macOS session at all. What is **not** automated is the reading that
+  feeds it: whether `kAXWindowsAttribute` and
+  `CGWindowListCopyWindowInfo` really report the same window's frame in
+  the same coordinate space, within the one-pixel tolerance
+  `FRAME_TOLERANCE_PX` allows. A human on a real macOS session must
+  confirm that, and must check the case the tolerance exists for: run
+  `list_windows` against an app with two windows of the same title and
+  confirm each `window_id` belongs to the window the record describes.
+- **PINV-31** — the decision half is fully covered by automated `cargo
+  test -p polarize-core` (`workspace::tests`): the default polite
+  request, a forced request only when asked, no escalation after a
+  timeout, an app that exits, an app that does not, an app that is not
+  running, the exact budget sequence for a 250 ms timeout, a zero
+  timeout that still checks once, a clamped timeout, and a refused
+  request. The native half is **not** automated anywhere. Whether
+  `NSRunningApplication::terminate()` really lets an app save its
+  documents, whether `forceTerminate()` really kills it, and whether
+  `isTerminated()` flips when it exits, all need a real macOS session. A
+  human must check three cases against a real app: quit an app with no
+  unsaved work and confirm `exited: true`; quit an app holding an
+  unsaved document and confirm the save dialog appears, the app stays
+  running, and the response reports `exited: false` rather than success;
+  then repeat with `force: true` and confirm the app dies with no
+  dialog.
+- **Workspace tool permissions** (`polarize-core/src/permission.rs`,
+  `workspace_tool_permission`, no invariant number) — the mapping is
+  fully covered by automated `cargo test -p polarize-core`
+  (`permission::workspace_tool_tests`): `list_windows` needs
+  Accessibility, the other three need nothing, a permission-free tool
+  passes even when every permission is denied, and `list_windows` is not
+  satisfied by a granted Screen Recording status. What is **not**
+  automated is the native side: that `MacWorkspace::open_app`,
+  `request_terminate`, `sleep_until_exit`, `window_server_windows`, and
+  `displays` really do work with no TCC grant at all, and that
+  `MacWorkspace::accessibility_windows` really refuses without
+  Accessibility. A human must confirm both halves on a real macOS
+  session, with Accessibility revoked and then granted.
+- **Workspace native bindings** (`polarize-macos/src/workspace.rs`, no
+  invariant number) — **not** automated anywhere. The module
+  type-checks and lints clean against `aarch64-apple-darwin`, and
+  nothing more. A human on a real macOS session must confirm: the
+  `kCGWindow*` dictionary keys read the values this code expects, and
+  `CGRectMakeWithDictionaryRepresentation` unpacks `kCGWindowBounds`;
+  `kCGWindowIsOnscreen` really flips when a window moves to another
+  Space, and reads as absent rather than `false` there;
+  `launchApplication:` opens an app named only by display name, and
+  `openApplicationAtURL:configuration:completionHandler:` with a `None`
+  handler opens one named by bundle id; and
+  `CGDisplayModeGetPixelWidth`/`CGDisplayModeGetWidth` give `2.0` on a
+  Retina display and `1.0` on a standard one. The `list_displays`
+  frames must be checked against a `screenshot` of the same display, on
+  a two-monitor setup, because that is the whole point of reporting
+  them.

@@ -55,3 +55,4 @@ pub mod set_value;
 pub mod vision;
 pub mod window;
 pub mod window_control;
+pub mod workspace;

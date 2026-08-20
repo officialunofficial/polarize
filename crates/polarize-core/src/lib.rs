@@ -27,3 +27,4 @@ pub mod set_value;
 pub mod traits;
 pub mod wait;
 pub mod window_control;
+pub mod workspace;
