@@ -12,7 +12,7 @@ not support plain native macOS windows. `polarize` fills that gap.
 
 ## Status
 
-All nine tools are implemented and wired into a real `rmcp` stdio MCP
+All 24 tools are implemented and wired into a real `rmcp` stdio MCP
 server (`apps/polarize`), backed by real macOS framework bindings
 (`crates/polarize-macos`). The workspace builds, lints, and tests
 cleanly.
@@ -29,16 +29,14 @@ granted still needs to confirm a `screenshot` returns real pixels,
 see [`docs/INVARIANTS.md`](docs/INVARIANTS.md)'s "Testing harness"
 section.
 
-The five newer tools — `perform_action`, `await_ui_element`,
-`await_screen_idle`, `run_applescript`, and `script_dictionary` — have
-**not** been run on a real macOS session at all. Their pure logic is
-unit-tested. Their native halves compile and link only. Read each tool's
-enforcement-checklist entry in
+The other 20 tools have **not** been run on a real macOS session at all.
+Their pure logic is unit-tested, and their native halves compile and
+link only. Read each tool's enforcement-checklist entry in
 [`docs/INVARIANTS.md`](docs/INVARIANTS.md) before you trust one.
 
 ## Tools
 
-`polarize` exposes nine MCP tools:
+`polarize` exposes 24 MCP tools, in six families:
 
 1. **`screenshot`** — capture a window or the whole screen to PNG,
    optionally scoped by a bundle id or app name.
@@ -76,18 +74,61 @@ enforcement-checklist entry in
 9. **`script_dictionary`** — list a scriptable app's own verbs and
    classes, read from its `sdef` dictionary. Call it before
    `run_applescript` to find out what an app accepts.
+10. **`set_value`** — write one accessibility attribute directly: text, a
+    number, or a selected-text range. This avoids the focus race and the
+    keyboard-layout dependence of simulated typing. Read PINV-27 first:
+    web content often takes the write without firing `input` or
+    `keydown`, so a controlled component can update and then snap back.
+11. **`hit_test_at_point`** — report the element that really sits under a
+    point. It asks the system-wide accessibility element, so another
+    app's window counts as occlusion. It resolves the same fraction
+    `tap` resolves, so it preflights a click.
+12. **`set_window_frame`** — move and resize one window. The response
+    reports the frame the window really got, re-read after the write.
+    Apps clamp their own minimum and maximum size.
+13. **`window_action`** — minimize, restore, focus, close, or full-screen
+    one window.
+14. **`list_windows`** — list an app's windows, merging the accessibility
+    list with the window server's for durable window ids and an
+    on-screen flag.
+15. **`app_launch`** — start an app, or report it was already running.
+16. **`app_quit`** — ask an app to exit. It asks politely unless the
+    caller asks to force, because a forced quit discards unsaved work.
+17. **`list_displays`** — report every active display, in the same pixel
+    space `screenshot` and `tap` use.
+18. **`find_text`** — find on-screen text with Vision OCR, for apps whose
+    accessibility tree is sparse, missing, or wrong. Each match carries a
+    frame a caller can hand straight to `tap`. The first call after an OS
+    update takes about 27 seconds, while macOS compiles the model.
+19. **`clipboard_read`** — read the pasteboard. A refused read reports a
+    permission error, never empty text.
+20. **`clipboard_write`** — replace the pasteboard contents.
+21. **`describe_notifications`** — read every notification banner on
+    screen: its app, title, body, and frame.
+22. **`dismiss_notification`** — close one banner, then re-read to report
+    whether it really went away.
+23. **`frontmost_app`** — report the app that holds focus now.
+24. **`await_workspace_event`** — wait for an app switch, a wake, or a
+    session change.
 
 ## Permissions
 
 `polarize` drives the real macOS UI. Whatever process runs it (your
 terminal, your MCP client, or a wrapper binary) needs:
 
-- **Screen Recording** — required for `screenshot`.
+- **Screen Recording** — required for `screenshot` and `find_text`.
 - **Accessibility** — required for `describe`, `tap`, `keyboard`,
-  `perform_action`, `await_ui_element`, and `await_screen_idle`.
+  `perform_action`, `await_ui_element`, `await_screen_idle`,
+  `set_value`, `hit_test_at_point`, `set_window_frame`, `window_action`,
+  `list_windows`, `describe_notifications`, and `dismiss_notification`.
 - **Automation** — required for `run_applescript` and
   `script_dictionary`. macOS asks per target app, the first time a
   script addresses one.
+
+`app_launch`, `app_quit`, `list_displays`, `frontmost_app`,
+`await_workspace_event`, and `clipboard_write` need no grant at all.
+`clipboard_read` can be refused by macOS, and reports that as a
+permission error rather than as empty text.
 
 Grant them under System Settings → Privacy & Security.
 
@@ -233,7 +274,7 @@ or `cargo test` fixes this with no environment variable needed.
 cargo test --workspace
 ```
 
-This runs `polarize-core`'s full unit-test suite (224 tests covering
+This runs `polarize-core`'s full unit-test suite (546 tests covering
 coordinate math, the AX-tree model, MCP schemas, permission logic, and
 orchestration), plus `polarize-macos`'s tests for the pure sub-logic it
 factors out of its native calls (22 tests covering app-identity

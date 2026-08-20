@@ -18,7 +18,7 @@ the order they were added, not by severity or crate.
 logic: coordinate normalization, the accessibility-tree data model, MCP
 tool schemas, error types, the permission-state enum, and the trait
 definitions `polarize-macos` implements. Every invariant that lives in
-it has real `cargo test` coverage (224 tests as of this writing).
+it has real `cargo test` coverage (546 tests as of this writing).
 
 `polarize-macos` implements those traits with real native calls
 (`ScreenCaptureKit`, `AXUIElement`, `CGEvent`, AppKit). These **cannot**
@@ -641,6 +641,90 @@ claim automated coverage they don't have.
   new text, and continues. The next step fails somewhere else, and the
   failure points at the wrong cause. The agent then retries the write
   that can never work, instead of typing the text with `keyboard`.
+### PINV-28: a window tool checks its target before it writes
+
+- Always: `window_control::select_window` resolves a request to exactly
+  one window, or it returns a `WindowControlError`. A `window_title`
+  that matches no window, a `window_title` that matches several windows
+  with no `window_index`, an out-of-range `window_index`, and an app
+  with no windows are all refusals. `window_control::plan_action_writes`
+  adds one more: it refuses a full-screen action against a window whose
+  `full_screen` is `None`, which means the window publishes no
+  `AXFullScreen` attribute. No refusal ever reaches
+  `WindowController::apply_window_write`.
+- Because: these writes are destructive, and the caller cannot undo
+  them. A `close` throws away unsaved work. A move loses the window's
+  old frame, which nothing recorded. So guessing which of two equally
+  titled windows the caller meant is worse than refusing. `AXFullScreen`
+  needs its own check for a different reason. The attribute is
+  undocumented. A window that does not publish it still accepts the
+  write, and then does nothing. To an agent that cannot see the screen,
+  that is indistinguishable from success.
+- If violated: `window_action` closes the wrong document window, or it
+  reports a window went full screen while nothing on screen changed.
+
+### PINV-29: a window tool reports the frame it re-read, never the frame it requested
+
+- Always: `window_control::perform_set_window_frame` and
+  `window_control::perform_window_action` call
+  `WindowController::list_windows` again after their last write. Every
+  geometric and boolean field of the response comes from that second
+  read. `set_window_frame` reports the requested frame in its own
+  separate fields, and compares the two into `applied_exactly`.
+- Because: an app is free to ignore a write. Every AppKit window has a
+  minimum size, many have a maximum, and a document window can refuse a
+  move that would put its title bar under the menu bar.
+  `AXUIElementSetAttributeValue` returns `kAXErrorSuccess` in all of
+  those cases. The app took the message, then applied its own policy. A
+  tool that echoed the request back would report a 200-pixel-wide window
+  that is really 480 pixels wide. An agent cannot see the screen, so
+  nothing catches that.
+- If violated: an agent lays out three windows, believes the layout
+  succeeded, and every later coordinate it computes from that belief is
+  wrong.
+### PINV-30: the window join matches on one app, then title, then frame, and never invents a match
+
+- Always: `workspace::merge_window_lists` pairs an accessibility window
+  with a window-server window only when both report the same
+  `owner_pid`. Within one app it makes three passes in order: same title
+  and same frame, then same title, then same frame. Each window-server
+  window is claimed at most once. A window that no pass pairs stays in
+  the result on its own, marked `AccessibilityOnly` or
+  `WindowServerOnly`, with the fields the missing list would have
+  supplied left as `None`.
+- Because: the two lists disagree by design. A window can be missing
+  from the accessibility half because the app publishes nothing for it,
+  and missing from the window-server half because it sits on another
+  Space. A caller must still see both. Neither key alone is unique
+  either: a document app happily shows several windows titled
+  "Untitled", and macOS hides `kCGWindowName` from a process without
+  Screen Recording permission, which leaves title matching with nothing
+  to work on. Dropping an unpaired window would silently hide real
+  windows. Pairing on title alone would hand a caller the wrong
+  `window_id` for the `screenshot` or `tap` call that follows.
+- If violated: `list_windows` reports a durable `window_id` that belongs
+  to a different window, or drops the very window the caller was looking
+  for and reports success.
+
+### PINV-31: `app_quit` asks politely unless the caller asks to force
+
+- Always: `workspace::perform_app_quit` calls
+  `AppLifecycle::request_terminate` with `force: false` unless the
+  request sets `force: true`. An absent `force` field is `false`. The
+  call never escalates to a force on its own, not after a timeout and
+  not after a refused request. It reports `exited` from what the
+  platform observed, never from the fact that it asked.
+- Because: `terminate()` sends a quit Apple Event, so the app runs its
+  own quit path. It can save open documents, and it can put up a "save
+  changes?" dialog and stay running. `forceTerminate()` is `SIGKILL`
+  with extra steps: unsaved work is gone, with no dialog and no undo. An
+  automation tool that escalates by itself destroys a user's work on a
+  schedule the user never agreed to. Reporting "quit" while the app
+  still shows a save dialog is just as bad, because the caller moves on
+  and the app is still there.
+- If violated: an `app_quit` call silently discards unsaved documents,
+  or a caller believes an app exited while a modal dialog holds it open,
+  and every step that follows acts on the wrong app state.
 ### PINV-32: a hit test and a tap resolve one request to one pixel point
 
 - Always: `hit_test::perform_hit_test` reads a request's `x`/`y`
@@ -707,133 +791,6 @@ claim automated coverage they don't have.
 - If violated: `clipboard_read` answers "the clipboard is empty" on a
   Mac whose clipboard holds real text. The caller copies again, reads
   nothing again, and never learns that only the user can repair it.
-### PINV-28: a window tool checks its target before it writes
-
-- Always: `window_control::select_window` resolves a request to exactly
-  one window, or it returns a `WindowControlError`. A `window_title`
-  that matches no window, a `window_title` that matches several windows
-  with no `window_index`, an out-of-range `window_index`, and an app
-  with no windows are all refusals. `window_control::plan_action_writes`
-  adds one more: it refuses a full-screen action against a window whose
-  `full_screen` is `None`, which means the window publishes no
-  `AXFullScreen` attribute. No refusal ever reaches
-  `WindowController::apply_window_write`.
-- Because: these writes are destructive, and the caller cannot undo
-  them. A `close` throws away unsaved work. A move loses the window's
-  old frame, which nothing recorded. So guessing which of two equally
-  titled windows the caller meant is worse than refusing. `AXFullScreen`
-  needs its own check for a different reason. The attribute is
-  undocumented. A window that does not publish it still accepts the
-  write, and then does nothing. To an agent that cannot see the screen,
-  that is indistinguishable from success.
-- If violated: `window_action` closes the wrong document window, or it
-  reports a window went full screen while nothing on screen changed.
-
-### PINV-29: a window tool reports the frame it re-read, never the frame it requested
-
-- Always: `window_control::perform_set_window_frame` and
-  `window_control::perform_window_action` call
-  `WindowController::list_windows` again after their last write. Every
-  geometric and boolean field of the response comes from that second
-  read. `set_window_frame` reports the requested frame in its own
-  separate fields, and compares the two into `applied_exactly`.
-- Because: an app is free to ignore a write. Every AppKit window has a
-  minimum size, many have a maximum, and a document window can refuse a
-  move that would put its title bar under the menu bar.
-  `AXUIElementSetAttributeValue` returns `kAXErrorSuccess` in all of
-  those cases. The app took the message, then applied its own policy. A
-  tool that echoed the request back would report a 200-pixel-wide window
-  that is really 480 pixels wide. An agent cannot see the screen, so
-  nothing catches that.
-- If violated: an agent lays out three windows, believes the layout
-  succeeded, and every later coordinate it computes from that belief is
-  wrong.
-### PINV-37: a Vision box is flipped into top-left space, never passed through
-
-- Always: `find_text::flip_to_top_left` converts a `VisionRect` into a
-  `NormalizedFrame`. A `VisionRect` has its origin at the **bottom**
-  left, and its `y` grows upward, because that is the space Vision
-  reports. A `NormalizedFrame` has its origin at the **top** left, and
-  its `y` grows downward, because that is the space every other
-  `polarize` response uses (PINV-8). The rule is
-  `top = 1 - (bottom + height)`. The result is clamped into `0.0..=1.0`,
-  and a non-finite component becomes `0.0`. Every `find_text` result
-  passes through this function. `polarize-macos`'s `vision` module must
-  not flip a box itself.
-- Because: both spaces normalize to `0.0..=1.0`. So a dropped flip
-  produces numbers that pass every range check `polarize` makes,
-  including `tap`'s (PINV-1). Nothing errors, and nothing looks wrong in
-  the response. The tap simply lands on the vertical mirror of the right
-  place. This is the one `find_text` bug a caller cannot see in the
-  output, which is why the conversion lives in `polarize-core` as pure
-  arithmetic instead of inside the Vision call.
-- If violated: every `find_text` result taps the mirror image of the
-  text it found. A match near the top of a window presses whatever sits
-  near the bottom, and the tool still reports success.
-
-### PINV-38: a `find_text` match is filtered, then ordered, then indexed
-
-- Always: `find_text::scan_lines` performs three steps in this order. It
-  drops every recognized line below the confidence floor
-  (`min_confidence`, or `DEFAULT_MIN_CONFIDENCE` when the request sets
-  none). It orders what is left top to bottom by the recognized line's
-  own top edge, then left to right, then by text. It keeps the lines
-  that satisfy the request's match mode. Only then does
-  `find_text::pick_match` apply the request's `index`. An empty request
-  text, or a `min_confidence` outside `0.0..=1.0`, is rejected before
-  any capture or OCR runs at all.
-- Because: Vision returns its observations in no order a caller can rely
-  on, and it reads low-confidence garbage out of textured backgrounds
-  and window shadows. `index` must name the same line on two calls
-  against the same screen, exactly as `ElementSelector::index` does for
-  the accessibility tree (PINV-15). Indexing before filtering, or
-  indexing an unordered list, moves the caller's chosen match every time
-  a faint line appears or disappears at the edge of the screen.
-- If violated: `index: 1` presses a different control on each call, and
-  the caller cannot see it happen, because both calls succeed.
-### PINV-30: the window join matches on one app, then title, then frame, and never invents a match
-
-- Always: `workspace::merge_window_lists` pairs an accessibility window
-  with a window-server window only when both report the same
-  `owner_pid`. Within one app it makes three passes in order: same title
-  and same frame, then same title, then same frame. Each window-server
-  window is claimed at most once. A window that no pass pairs stays in
-  the result on its own, marked `AccessibilityOnly` or
-  `WindowServerOnly`, with the fields the missing list would have
-  supplied left as `None`.
-- Because: the two lists disagree by design. A window can be missing
-  from the accessibility half because the app publishes nothing for it,
-  and missing from the window-server half because it sits on another
-  Space. A caller must still see both. Neither key alone is unique
-  either: a document app happily shows several windows titled
-  "Untitled", and macOS hides `kCGWindowName` from a process without
-  Screen Recording permission, which leaves title matching with nothing
-  to work on. Dropping an unpaired window would silently hide real
-  windows. Pairing on title alone would hand a caller the wrong
-  `window_id` for the `screenshot` or `tap` call that follows.
-- If violated: `list_windows` reports a durable `window_id` that belongs
-  to a different window, or drops the very window the caller was looking
-  for and reports success.
-
-### PINV-31: `app_quit` asks politely unless the caller asks to force
-
-- Always: `workspace::perform_app_quit` calls
-  `AppLifecycle::request_terminate` with `force: false` unless the
-  request sets `force: true`. An absent `force` field is `false`. The
-  call never escalates to a force on its own, not after a timeout and
-  not after a refused request. It reports `exited` from what the
-  platform observed, never from the fact that it asked.
-- Because: `terminate()` sends a quit Apple Event, so the app runs its
-  own quit path. It can save open documents, and it can put up a "save
-  changes?" dialog and stay running. `forceTerminate()` is `SIGKILL`
-  with extra steps: unsaved work is gone, with no dialog and no undo. An
-  automation tool that escalates by itself destroys a user's work on a
-  schedule the user never agreed to. Reporting "quit" while the app
-  still shows a save dialog is just as bad, because the caller moves on
-  and the app is still there.
-- If violated: an `app_quit` call silently discards unsaved documents,
-  or a caller believes an app exited while a modal dialog holds it open,
-  and every step that follows acts on the wrong app state.
 ### PINV-35: a notification banner is found by structure, and a dismiss is proved by a re-read
 
 - Always: `notifications::extract_banners` identifies a banner from the
@@ -914,6 +871,49 @@ claim automated coverage they don't have.
   report a Fast User Switch. This is the same reasoning PINV-23's
   exclusion note gives for the two AppleScript tools.
 
+### PINV-37: a Vision box is flipped into top-left space, never passed through
+
+- Always: `find_text::flip_to_top_left` converts a `VisionRect` into a
+  `NormalizedFrame`. A `VisionRect` has its origin at the **bottom**
+  left, and its `y` grows upward, because that is the space Vision
+  reports. A `NormalizedFrame` has its origin at the **top** left, and
+  its `y` grows downward, because that is the space every other
+  `polarize` response uses (PINV-8). The rule is
+  `top = 1 - (bottom + height)`. The result is clamped into `0.0..=1.0`,
+  and a non-finite component becomes `0.0`. Every `find_text` result
+  passes through this function. `polarize-macos`'s `vision` module must
+  not flip a box itself.
+- Because: both spaces normalize to `0.0..=1.0`. So a dropped flip
+  produces numbers that pass every range check `polarize` makes,
+  including `tap`'s (PINV-1). Nothing errors, and nothing looks wrong in
+  the response. The tap simply lands on the vertical mirror of the right
+  place. This is the one `find_text` bug a caller cannot see in the
+  output, which is why the conversion lives in `polarize-core` as pure
+  arithmetic instead of inside the Vision call.
+- If violated: every `find_text` result taps the mirror image of the
+  text it found. A match near the top of a window presses whatever sits
+  near the bottom, and the tool still reports success.
+
+### PINV-38: a `find_text` match is filtered, then ordered, then indexed
+
+- Always: `find_text::scan_lines` performs three steps in this order. It
+  drops every recognized line below the confidence floor
+  (`min_confidence`, or `DEFAULT_MIN_CONFIDENCE` when the request sets
+  none). It orders what is left top to bottom by the recognized line's
+  own top edge, then left to right, then by text. It keeps the lines
+  that satisfy the request's match mode. Only then does
+  `find_text::pick_match` apply the request's `index`. An empty request
+  text, or a `min_confidence` outside `0.0..=1.0`, is rejected before
+  any capture or OCR runs at all.
+- Because: Vision returns its observations in no order a caller can rely
+  on, and it reads low-confidence garbage out of textured backgrounds
+  and window shadows. `index` must name the same line on two calls
+  against the same screen, exactly as `ElementSelector::index` does for
+  the accessibility tree (PINV-15). Indexing before filtering, or
+  indexing an unordered list, moves the caller's chosen match every time
+  a faint line appears or disappears at the edge of the screen.
+- If violated: `index: 1` presses a different control on each call, and
+  the caller cannot see it happen, because both calls succeed.
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -1220,38 +1220,6 @@ claim automated coverage they don't have.
   Confirm three things: the text appears, the page's own handlers do not
   run, and the value can snap back. Then confirm the `keyboard` tool
   types the same text into the same field.
-- **PINV-32** — the coordinate half is fully covered by automated
-  `cargo test -p polarize-core` (`hit_test::tests`). One test runs
-  `perform_hit_test` and `perform_tap` over the same request, against
-  fakes with a non-zero target origin, and asserts the point the fake
-  `HitTester` received equals the point the fake `InputSynthesizer`
-  clicked, at four fractions. Other tests cover the origin addition, the
-  target defaulting, and the rule that an out-of-range fraction never
-  reaches the platform. What is **not** automated: whether
-  `AXUIElementCopyElementAtPosition` reads the same global pixel space
-  `CGEvent` posts into on a real screen. A human on a real macOS session
-  with Accessibility permission granted must confirm that a hit test and
-  a tap of one request address the same element, on a window that does
-  not sit at the screen origin, and on a second display.
-- **PINV-33** — the `polarize-core` half is fully covered by automated
-  `cargo test -p polarize-core` (`hit_test::tests`): a fake `HitTester`
-  returns a node with two children, and the response carries none. The
-  `polarize-macos` half is compile-checked only: `leaf_node` in
-  `crates/polarize-macos/src/hit_test.rs` reads no `AXChildren`, which a
-  reader can confirm, but no test runs it.
-- **PINV-34** — the classification is fully covered by automated
-  `cargo test -p polarize-core` (`clipboard::tests`): text present, an
-  absent type, a declared type with no value, an empty string, a value
-  with no declared type, and the same three cases through
-  `perform_clipboard_read`. What is **not** automated, and cannot be:
-  that macOS really answers `availableTypeFromArray:` while it withholds
-  `stringForType:`. That is the whole premise of the rule, and only a
-  real macOS 26 session can confirm it. A human must copy text in
-  another app, call `clipboard_read` from `polarize` with no preceding
-  paste gesture, and check that the result is either the text or a
-  `Clipboard` permission error — never an empty answer. The same human
-  must confirm `clipboard_write` replaces the pasteboard contents, and
-  that a following Command+V pastes the written text.
 - **PINV-28** — the decision half is fully covered by automated `cargo
   test -p polarize-core` (`window_control::tests`): the frontmost-window
   default, an index with no title, a title that names one window, a
@@ -1301,43 +1269,6 @@ claim automated coverage they don't have.
   not. The macOS code is type-checked against `aarch64-apple-darwin`
   (`cargo clippy --target aarch64-apple-darwin -D warnings`, clean), but
   nothing runs it.
-- **PINV-37** — split. The flip itself is fully covered by automated
-  `cargo test -p polarize-core` (`find_text::tests`): a full-frame box,
-  a box on the bottom edge, a box on the top edge, all four corners in
-  one table, an x-axis-never-moves case, a box reaching outside the unit
-  square on both sides, a non-finite box, a mirrored-center case, and a
-  table asserting every flipped center is a fraction
-  `coords::fraction_to_pixel` accepts. What is **not** automated
-  anywhere is the half that decides whether the flip runs in the right
-  direction: that Vision really does report a bottom-left origin for
-  `VNRecognizedTextObservation`, and that
-  `crates/polarize-macos/src/vision.rs` copies that box through
-  unchanged. No OCR has run in this environment, not once. A human on a
-  real macOS session with Screen Recording granted must confirm it, and
-  it is the single most important `find_text` check: call `find_text`
-  for a word near the **top** of a window, then feed
-  `matched.center_x`/`matched.center_y` straight into `tap` with the
-  same `target`. The click must land on that word. A click near the
-  bottom of the window means the flip runs the wrong way, and no test
-  and no error message can show it.
-- **PINV-38** — the whole ordering rule is fully covered by automated
-  `cargo test -p polarize-core` (`find_text::tests`): a line below the
-  floor never matching, the default floor applying when the request sets
-  none, an out-of-range `min_confidence` and an empty request text both
-  rejected before the platform is called, shuffled lines coming back in
-  reading order, index `0` by default, an explicit index, an index past
-  the last match, and the no-match error naming what the OCR did read.
-  All of it runs against a fake `ScreenCapture` and a fake
-  `TextRecognizer`, so it needs no macOS session. What is **not**
-  automated is whether Vision's real observations, ordered by this rule,
-  read the way a human reads the screen. A human must confirm that
-  `index: 1` names the second match on a real screen with repeated text,
-  and that the default confidence floor does not hide real UI text.
-  `crates/polarize-macos/src/vision.rs` is type-checked against
-  `aarch64-apple-darwin` and nothing more: no `VNRecognizeTextRequest`
-  has ever run here. A human must also confirm the first call's roughly
-  27 second model compile, and that later calls return in about 100 ms.
-
 - **PINV-30** — fully covered by automated `cargo test -p polarize-core`
   (`workspace::tests`): a window both lists report, a window only the
   accessibility tree reports, a window only the window server reports,
@@ -1402,6 +1333,38 @@ claim automated coverage they don't have.
   frames must be checked against a `screenshot` of the same display, on
   a two-monitor setup, because that is the whole point of reporting
   them.
+- **PINV-32** — the coordinate half is fully covered by automated
+  `cargo test -p polarize-core` (`hit_test::tests`). One test runs
+  `perform_hit_test` and `perform_tap` over the same request, against
+  fakes with a non-zero target origin, and asserts the point the fake
+  `HitTester` received equals the point the fake `InputSynthesizer`
+  clicked, at four fractions. Other tests cover the origin addition, the
+  target defaulting, and the rule that an out-of-range fraction never
+  reaches the platform. What is **not** automated: whether
+  `AXUIElementCopyElementAtPosition` reads the same global pixel space
+  `CGEvent` posts into on a real screen. A human on a real macOS session
+  with Accessibility permission granted must confirm that a hit test and
+  a tap of one request address the same element, on a window that does
+  not sit at the screen origin, and on a second display.
+- **PINV-33** — the `polarize-core` half is fully covered by automated
+  `cargo test -p polarize-core` (`hit_test::tests`): a fake `HitTester`
+  returns a node with two children, and the response carries none. The
+  `polarize-macos` half is compile-checked only: `leaf_node` in
+  `crates/polarize-macos/src/hit_test.rs` reads no `AXChildren`, which a
+  reader can confirm, but no test runs it.
+- **PINV-34** — the classification is fully covered by automated
+  `cargo test -p polarize-core` (`clipboard::tests`): text present, an
+  absent type, a declared type with no value, an empty string, a value
+  with no declared type, and the same three cases through
+  `perform_clipboard_read`. What is **not** automated, and cannot be:
+  that macOS really answers `availableTypeFromArray:` while it withholds
+  `stringForType:`. That is the whole premise of the rule, and only a
+  real macOS 26 session can confirm it. A human must copy text in
+  another app, call `clipboard_read` from `polarize` with no preceding
+  paste gesture, and check that the result is either the text or a
+  `Clipboard` permission error — never an empty answer. The same human
+  must confirm `clipboard_write` replaces the pasteboard contents, and
+  that a following Command+V pastes the written text.
 - **PINV-35** — split, and the untestable half is the tree shapes
   themselves. The extraction rules are fully covered by automated `cargo
   test -p polarize-core` (`notifications::tests`, 37 tests): today's
@@ -1483,3 +1446,40 @@ claim automated coverage they don't have.
   type-check cannot prove the selector name in `sel!` matches the method
   the macro defined, nor that `addObserver:selector:name:object:`
   accepts it. Both are runtime facts.
+
+- **PINV-37** — split. The flip itself is fully covered by automated
+  `cargo test -p polarize-core` (`find_text::tests`): a full-frame box,
+  a box on the bottom edge, a box on the top edge, all four corners in
+  one table, an x-axis-never-moves case, a box reaching outside the unit
+  square on both sides, a non-finite box, a mirrored-center case, and a
+  table asserting every flipped center is a fraction
+  `coords::fraction_to_pixel` accepts. What is **not** automated
+  anywhere is the half that decides whether the flip runs in the right
+  direction: that Vision really does report a bottom-left origin for
+  `VNRecognizedTextObservation`, and that
+  `crates/polarize-macos/src/vision.rs` copies that box through
+  unchanged. No OCR has run in this environment, not once. A human on a
+  real macOS session with Screen Recording granted must confirm it, and
+  it is the single most important `find_text` check: call `find_text`
+  for a word near the **top** of a window, then feed
+  `matched.center_x`/`matched.center_y` straight into `tap` with the
+  same `target`. The click must land on that word. A click near the
+  bottom of the window means the flip runs the wrong way, and no test
+  and no error message can show it.
+- **PINV-38** — the whole ordering rule is fully covered by automated
+  `cargo test -p polarize-core` (`find_text::tests`): a line below the
+  floor never matching, the default floor applying when the request sets
+  none, an out-of-range `min_confidence` and an empty request text both
+  rejected before the platform is called, shuffled lines coming back in
+  reading order, index `0` by default, an explicit index, an index past
+  the last match, and the no-match error naming what the OCR did read.
+  All of it runs against a fake `ScreenCapture` and a fake
+  `TextRecognizer`, so it needs no macOS session. What is **not**
+  automated is whether Vision's real observations, ordered by this rule,
+  read the way a human reads the screen. A human must confirm that
+  `index: 1` names the second match on a real screen with repeated text,
+  and that the default confidence floor does not hide real UI text.
+  `crates/polarize-macos/src/vision.rs` is type-checked against
+  `aarch64-apple-darwin` and nothing more: no `VNRecognizeTextRequest`
+  has ever run here. A human must also confirm the first call's roughly
+  27 second model compile, and that later calls return in about 100 ms.
