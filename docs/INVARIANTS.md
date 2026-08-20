@@ -651,7 +651,7 @@ claim automated coverage they don't have.
   adds one more: it refuses a full-screen action against a window whose
   `full_screen` is `None`, which means the window publishes no
   `AXFullScreen` attribute. No refusal ever reaches
-  `WindowController::apply_window_write`.
+  `WindowController::apply_window_writes`.
 - Because: these writes are destructive, and the caller cannot undo
   them. A `close` throws away unsaved work. A move loses the window's
   old frame, which nothing recorded. So guessing which of two equally

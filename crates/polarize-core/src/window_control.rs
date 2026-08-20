@@ -334,7 +334,7 @@ fn available_titles(windows: &[WindowInfo]) -> String {
 ///   out-of-range `window_index`, and an app with no windows are all
 ///   refusals. A full-screen request against a window that publishes no
 ///   `AXFullScreen` is a refusal too, in [`plan_action_writes`]. No
-///   refusal ever reaches [`WindowController::apply_window_write`].
+///   refusal ever reaches [`WindowController::apply_window_writes`].
 /// - Because: these writes are destructive and they are not reversible
 ///   by the caller. `close` throws away unsaved work. A move loses the
 ///   window's old frame, which nothing recorded. Guessing which of two
