@@ -276,7 +276,7 @@ where
     let mut polls: u32 = 0;
 
     loop {
-        let (app_name, root) = inspector.describe(app)?;
+        let (resolved, root) = inspector.describe(app)?;
         polls = polls.saturating_add(1);
 
         match selector::find_one(&root, &request.selector) {
@@ -285,7 +285,7 @@ where
                     .expect("find_one resolves a path into the tree it searched")
                     .clone();
                 return Ok(AwaitUiElementResponse {
-                    app_name,
+                    app_name: resolved.name,
                     path,
                     node,
                     waited_ms: clock.now_ms().saturating_sub(start),
@@ -309,7 +309,13 @@ where
             }
             .into());
         }
-        waiter.wait_for_change(app, next_slice(now, deadline, budget.poll_interval_ms))?;
+        wait_one_slice(
+            waiter,
+            clock,
+            app,
+            next_slice(now, deadline, budget.poll_interval_ms),
+            now,
+        )?;
     }
 }
 
@@ -318,6 +324,44 @@ where
 /// design — see PINV-19.
 fn next_slice(now_ms: u64, deadline_ms: u64, poll_interval_ms: u64) -> Duration {
     Duration::from_millis(deadline_ms.saturating_sub(now_ms).min(poll_interval_ms))
+}
+
+/// Waits one slice, and decides what a waiter failure means.
+///
+/// PINV-19 makes polling the fallback, not the notification. So a waiter
+/// that fails *after* honouring its budget must not end the wait: an app
+/// whose `AXObserver` cannot be created is exactly the app polling
+/// exists for. The next tree read still happens, on schedule, and the
+/// deadline still holds.
+///
+/// A waiter that fails *without* consuming any of its budget is a
+/// different fault. Polling on through it would spin, because nothing
+/// advances the clock between reads. `before_ms` is the clock reading
+/// from before the call, so this function can tell the two apart. The
+/// no-progress case ends the wait and reports the waiter's own error.
+///
+/// A degraded failure is dropped rather than reported. The caller asked
+/// to wait for a UI state, and the wait still delivers it or times out
+/// trying; a notification channel that could not be opened is not a
+/// result the caller can act on.
+fn wait_one_slice<W, C>(
+    waiter: &W,
+    clock: &C,
+    app: Option<&AppIdentifier>,
+    budget: Duration,
+    before_ms: u64,
+) -> Result<(), PolarizeError>
+where
+    W: UiChangeWaiter,
+    C: Clock,
+{
+    match waiter.wait_for_change(app, budget) {
+        Ok(_signalled) => Ok(()),
+        // Time passed, so the next read is real progress: degrade to
+        // polling.
+        Err(_) if clock.now_ms() > before_ms => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 /// Waits until an app's accessibility tree holds still.
@@ -342,7 +386,7 @@ where
     let start = clock.now_ms();
     let deadline = start.saturating_add(budget.timeout_ms);
 
-    let (app_name, mut previous) = inspector.describe(app)?;
+    let (resolved, mut previous) = inspector.describe(app)?;
     let mut polls: u32 = 1;
     let mut unchanged_since = clock.now_ms();
 
@@ -352,7 +396,7 @@ where
         // idle on the very millisecond of its deadline succeeded.
         if now.saturating_sub(unchanged_since) >= idle_ms {
             return Ok(AwaitScreenIdleResponse {
-                app_name,
+                app_name: resolved.name,
                 idle_ms,
                 waited_ms: now.saturating_sub(start),
                 polls,
@@ -367,7 +411,13 @@ where
             .into());
         }
 
-        waiter.wait_for_change(app, next_slice(now, deadline, budget.poll_interval_ms))?;
+        wait_one_slice(
+            waiter,
+            clock,
+            app,
+            next_slice(now, deadline, budget.poll_interval_ms),
+            now,
+        )?;
 
         let (_, current) = inspector.describe(app)?;
         polls = polls.saturating_add(1);
@@ -381,6 +431,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::ResolvedApp;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
@@ -438,7 +489,10 @@ mod tests {
     }
 
     impl AccessibilityInspector for FakeInspector {
-        fn describe(&self, app: Option<&AppIdentifier>) -> Result<(String, AxNode), PolarizeError> {
+        fn describe(
+            &self,
+            app: Option<&AppIdentifier>,
+        ) -> Result<(ResolvedApp, AxNode), PolarizeError> {
             let index = self.calls.get();
             self.calls.set(index + 1);
             self.seen_apps.borrow_mut().push(app.cloned());
@@ -451,7 +505,13 @@ mod tests {
                 .or_else(|| self.trees.last())
                 .expect("FakeInspector needs at least one tree")
                 .clone();
-            Ok((self.app_name.clone(), tree))
+            Ok((
+                ResolvedApp {
+                    name: self.app_name.clone(),
+                    bundle_id: None,
+                },
+                tree,
+            ))
         }
     }
 
@@ -462,8 +522,13 @@ mod tests {
         NeverSignals,
         /// Reports a change after `ms`, if the budget allows it.
         SignalsAfter(u64),
-        /// Fails, to prove the error reaches the caller.
+        /// Fails without consuming any of its budget. A wait that kept
+        /// polling through this would spin without ever advancing.
         Fails,
+        /// Consumes the whole budget, then fails. This is the app whose
+        /// `AXObserver` cannot be created: the platform layer still
+        /// honours the budget, so polling can carry the wait.
+        FailsAfterBudget,
     }
 
     struct FakeWaiter {
@@ -508,6 +573,10 @@ mod tests {
                     Ok(ms <= budget_ms)
                 }
                 WaiterMode::Fails => Err(PolarizeError::Platform("observer failed".to_string())),
+                WaiterMode::FailsAfterBudget => {
+                    self.clock.advance(budget_ms);
+                    Err(PolarizeError::Platform("observer failed".to_string()))
+                }
             }
         }
     }
@@ -818,7 +887,9 @@ mod tests {
     }
 
     #[test]
-    fn await_ui_element_reports_a_waiter_failure() {
+    fn await_ui_element_reports_a_waiter_that_fails_without_consuming_time() {
+        // The waiter burns none of its budget, so polling on cannot make
+        // progress. Report the failure instead of spinning. See PINV-19.
         let (clock, waiter) = setup(WaiterMode::Fails);
         let inspector = FakeInspector::new(vec![empty_window()]);
 
@@ -826,6 +897,68 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("observer failed"));
+        // One read before the wait, one after the failed wait. Not a spin.
+        assert!(inspector.call_count() <= 2, "{}", inspector.call_count());
+    }
+
+    #[test]
+    fn await_ui_element_polls_on_through_a_waiter_that_fails_after_its_budget() {
+        // PINV-19's whole point: an app whose `AXObserver` cannot be
+        // created must still be waited on, by polling alone.
+        let (clock, waiter) = setup(WaiterMode::FailsAfterBudget);
+        let inspector = FakeInspector::new(vec![
+            empty_window(),
+            empty_window(),
+            window_with_save_button(),
+        ]);
+
+        let response =
+            perform_await_ui_element(&inspector, &waiter, &*clock, &element_request(None)).unwrap();
+
+        assert_eq!(response.polls, 3);
+        assert_eq!(response.path, vec![0]);
+        assert!(!waiter.budgets().is_empty(), "the waiter was still asked");
+    }
+
+    #[test]
+    fn a_waiter_that_fails_after_its_budget_still_times_out_on_the_deadline() {
+        // Degrading to polling must not extend the wait past its
+        // deadline. See PINV-19.
+        let (clock, waiter) = setup(WaiterMode::FailsAfterBudget);
+        let inspector = FakeInspector::new(vec![empty_window()]);
+
+        let err =
+            perform_await_ui_element(&inspector, &waiter, &*clock, &element_request(Some(600)))
+                .unwrap_err();
+
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert_eq!(waiter.budgets(), vec![250, 250, 100]);
+    }
+
+    #[test]
+    fn await_screen_idle_polls_on_through_a_waiter_that_fails_after_its_budget() {
+        let (clock, waiter) = setup(WaiterMode::FailsAfterBudget);
+        let inspector = FakeInspector::new(vec![empty_window()]);
+
+        let response =
+            perform_await_screen_idle(&inspector, &waiter, &*clock, &idle_request(Some(500), None))
+                .unwrap();
+
+        assert!(response.polls >= 2, "{}", response.polls);
+        assert_eq!(response.idle_ms, 500);
+    }
+
+    #[test]
+    fn await_screen_idle_reports_a_waiter_that_fails_without_consuming_time() {
+        let (clock, waiter) = setup(WaiterMode::Fails);
+        let inspector = FakeInspector::new(vec![empty_window()]);
+
+        let err =
+            perform_await_screen_idle(&inspector, &waiter, &*clock, &idle_request(None, None))
+                .unwrap_err();
+
+        assert!(err.to_string().contains("observer failed"));
+        assert!(inspector.call_count() <= 2, "{}", inspector.call_count());
     }
 
     // ---- await_screen_idle -----------------------------------------

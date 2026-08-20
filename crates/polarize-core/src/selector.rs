@@ -55,13 +55,18 @@ pub struct ElementSelector {
 
 impl ElementSelector {
     /// Whether the caller set no criteria at all. See PINV-15.
+    ///
+    /// `enabled_only` and `index` do not count. Neither one names an
+    /// element: `enabled_only` narrows a set of matches, and `index`
+    /// picks one out of it. A selector carrying only those two describes
+    /// no element at all, so it must fail the guard rather than resolve
+    /// to the application root.
     pub fn is_empty(&self) -> bool {
         self.identifier.is_none()
             && self.role.is_none()
             && self.subrole.is_none()
             && self.label.is_none()
             && self.label_contains.is_none()
-            && !self.enabled_only
     }
 
     /// A short, human-readable rendering, for an error message.
@@ -294,6 +299,54 @@ mod tests {
         };
         assert!(selector.is_empty());
         assert_eq!(find_one(&tree(), &selector), Err(SelectorError::Empty));
+    }
+
+    #[test]
+    fn an_enabled_only_selector_is_still_empty() {
+        // `enabled_only` filters matches; it names no element, exactly
+        // like `index`. Counting it as a criterion let
+        // `{"enabled_only": true}` through the PINV-15 guard and
+        // resolved it to the application root.
+        let selector = ElementSelector {
+            enabled_only: true,
+            ..ElementSelector::default()
+        };
+        assert!(selector.is_empty());
+        assert_eq!(find_all(&tree(), &selector), Err(SelectorError::Empty));
+        assert_eq!(find_one(&tree(), &selector), Err(SelectorError::Empty));
+    }
+
+    #[test]
+    fn every_filter_together_is_still_empty() {
+        let selector = ElementSelector {
+            enabled_only: true,
+            index: Some(0),
+            ..ElementSelector::default()
+        };
+        assert!(selector.is_empty());
+        assert_eq!(find_one(&tree(), &selector), Err(SelectorError::Empty));
+    }
+
+    #[test]
+    fn enabled_only_still_filters_once_a_real_criterion_is_named() {
+        // The guard must not disable the filter itself.
+        let selector = ElementSelector {
+            role: Some("AXButton".to_string()),
+            enabled_only: true,
+            ..ElementSelector::default()
+        };
+        assert!(!selector.is_empty());
+        let with_filter = find_all(&tree(), &selector).unwrap();
+
+        let without = ElementSelector {
+            role: Some("AXButton".to_string()),
+            ..ElementSelector::default()
+        };
+        let no_filter = find_all(&tree(), &without).unwrap();
+        assert!(
+            with_filter.len() < no_filter.len(),
+            "the tree needs a disabled AXButton for this test to mean anything"
+        );
     }
 
     #[test]

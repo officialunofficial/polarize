@@ -83,10 +83,11 @@ pub fn perform_describe<A>(
 where
     A: AccessibilityInspector,
 {
-    let (app_name, root) = inspector.describe(request.app.as_ref())?;
+    let (resolved, root) = inspector.describe(request.app.as_ref())?;
     let formatted = crate::ax::format_tree(&root);
     Ok(DescribeResponse {
-        app_name,
+        app_name: resolved.name,
+        bundle_id: resolved.bundle_id,
         root,
         formatted,
     })
@@ -226,6 +227,7 @@ mod tests {
 
     struct FakeAccessibilityInspector {
         app_name: String,
+        bundle_id: Option<String>,
         root: AxNode,
     }
 
@@ -233,8 +235,14 @@ mod tests {
         fn describe(
             &self,
             _app: Option<&AppIdentifier>,
-        ) -> Result<(String, AxNode), PolarizeError> {
-            Ok((self.app_name.clone(), self.root.clone()))
+        ) -> Result<(crate::traits::ResolvedApp, AxNode), PolarizeError> {
+            Ok((
+                crate::traits::ResolvedApp {
+                    name: self.app_name.clone(),
+                    bundle_id: self.bundle_id.clone(),
+                },
+                self.root.clone(),
+            ))
         }
     }
 
@@ -436,6 +444,7 @@ mod tests {
     fn perform_describe_passes_app_through_and_shapes_response() {
         let inspector = FakeAccessibilityInspector {
             app_name: "TextEdit".to_string(),
+            bundle_id: Some("com.apple.TextEdit".to_string()),
             root: leaf_tree(),
         };
         let request = DescribeRequest { app: None };
@@ -443,6 +452,7 @@ mod tests {
         let response = perform_describe(&inspector, &request).unwrap();
 
         assert_eq!(response.app_name, "TextEdit");
+        assert_eq!(response.bundle_id.as_deref(), Some("com.apple.TextEdit"));
         assert_eq!(response.root, leaf_tree());
     }
 
@@ -451,6 +461,7 @@ mod tests {
         let root = leaf_tree();
         let inspector = FakeAccessibilityInspector {
             app_name: "TextEdit".to_string(),
+            bundle_id: None,
             root: root.clone(),
         };
         let request = DescribeRequest { app: None };

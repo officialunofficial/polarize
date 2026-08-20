@@ -39,12 +39,53 @@ pub trait ScreenCapture {
     ) -> Result<CapturedImage, PolarizeError>;
 }
 
+/// The app an [`AccessibilityInspector::describe`] call actually read.
+///
+/// A request may name no app at all, or name one only by display name.
+/// This reports what the platform resolved that to, so a follow-up call
+/// can address the same app instead of resolving "frontmost" a second
+/// time. See PINV-18.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ResolvedApp {
+    /// The localized display name, e.g. `"TextEdit"`. Empty when the
+    /// platform published none.
+    pub name: String,
+    /// The bundle id, e.g. `"com.apple.TextEdit"`. `None` for a raw
+    /// binary, or an app bundle that declares no identifier.
+    pub bundle_id: Option<String>,
+}
+
+impl ResolvedApp {
+    /// The most precise identifier that addresses this app again.
+    ///
+    /// A bundle id wins, because it is unique and stable. A display name
+    /// is the fallback, and it is only a good one: two processes can
+    /// publish the same localized name, and `polarize-macos` resolves
+    /// that to whichever the platform lists first. `None` means the
+    /// platform published neither, so a caller has nothing better than
+    /// "the frontmost app" to go on.
+    pub fn identifier(&self) -> Option<AppIdentifier> {
+        match (&self.bundle_id, self.name.is_empty()) {
+            (Some(bundle_id), _) => Some(AppIdentifier {
+                bundle_id: Some(bundle_id.clone()),
+                app_name: None,
+            }),
+            (None, false) => Some(AppIdentifier {
+                bundle_id: None,
+                app_name: Some(self.name.clone()),
+            }),
+            (None, true) => None,
+        }
+    }
+}
+
 /// Walks the accessibility tree of an app. Implemented by
 /// `polarize-macos` over `AXUIElement` (objc2-accessibility).
 pub trait AccessibilityInspector {
-    /// Returns the resolved app's display name and its accessibility
-    /// tree root. `app` is `None` to inspect the frontmost app.
-    fn describe(&self, app: Option<&AppIdentifier>) -> Result<(String, AxNode), PolarizeError>;
+    /// Returns the app the call resolved to, and its accessibility tree
+    /// root. `app` is `None` to inspect the frontmost app.
+    fn describe(&self, app: Option<&AppIdentifier>)
+    -> Result<(ResolvedApp, AxNode), PolarizeError>;
 }
 
 /// Posts synthetic mouse and keyboard input. Implemented by

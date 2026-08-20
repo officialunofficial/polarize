@@ -13,6 +13,7 @@ pub mod coords;
 pub mod error;
 pub mod orchestrate;
 pub mod permission;
+pub mod process;
 pub mod schema;
 pub mod script;
 pub mod selector;

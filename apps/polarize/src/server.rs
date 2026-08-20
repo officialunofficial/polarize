@@ -19,9 +19,12 @@
 //! - `perform_action` walks a whole accessibility tree, then makes a
 //!   synchronous `AXUIElementPerformAction` call that some apps answer
 //!   slowly.
+//! - `describe` walks that same tree. It reads eleven attributes per
+//!   node, each a separate `AXUIElementCopyAttributeValue` round-trip to
+//!   the target app, so a large app costs seconds.
 //!
-//! `screenshot`, `describe`, `tap`, and `keyboard` stay synchronous.
-//! Each returns in milliseconds.
+//! `screenshot`, `tap`, and `keyboard` stay synchronous. Each returns in
+//! milliseconds.
 //!
 //! The `polarize-macos` types are all zero-sized unit structs, so a
 //! `blocking` closure constructs fresh ones rather than borrowing `self`
@@ -93,7 +96,6 @@ use std::sync::Arc;
 #[derive(Debug, Default)]
 pub struct PolarizeServer {
     capture: MacScreenCapture,
-    inspector: MacAccessibilityInspector,
     input: MacInputSynthesizer,
     window: MacWindowManager,
 }
@@ -203,13 +205,11 @@ impl PolarizeServer {
     /// a named) app, returning each element's role, label, normalized
     /// `[0, 1]` frame, and focusable/interactive flags.
     #[tool(name = "describe")]
-    fn describe(
+    async fn describe(
         &self,
         Parameters(request): Parameters<DescribeRequest>,
     ) -> Result<Json<DescribeResponse>, ErrorData> {
-        orchestrate::perform_describe(&self.inspector, &request)
-            .map(Json)
-            .map_err(to_error_data)
+        blocking(move || orchestrate::perform_describe(&MacAccessibilityInspector, &request)).await
     }
 
     /// Posts a synthetic mouse click at a normalized `[0.0, 1.0]`

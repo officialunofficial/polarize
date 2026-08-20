@@ -233,7 +233,7 @@ or `cargo test` fixes this with no environment variable needed.
 cargo test --workspace
 ```
 
-This runs `polarize-core`'s full unit-test suite (205 tests covering
+This runs `polarize-core`'s full unit-test suite (224 tests covering
 coordinate math, the AX-tree model, MCP schemas, permission logic, and
 orchestration), plus `polarize-macos`'s tests for the pure sub-logic it
 factors out of its native calls (22 tests covering app-identity

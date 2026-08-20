@@ -18,7 +18,7 @@ the order they were added, not by severity or crate.
 logic: coordinate normalization, the accessibility-tree data model, MCP
 tool schemas, error types, the permission-state enum, and the trait
 definitions `polarize-macos` implements. Every invariant that lives in
-it has real `cargo test` coverage (205 tests as of this writing).
+it has real `cargo test` coverage (224 tests as of this writing).
 
 `polarize-macos` implements those traits with real native calls
 (`ScreenCaptureKit`, `AXUIElement`, `CGEvent`, AppKit). These **cannot**
@@ -306,12 +306,20 @@ claim automated coverage they don't have.
 
 - Always: `selector::find_all` and `selector::find_one` reject an
   `ElementSelector` that sets no criterion, with `SelectorError::Empty`.
-  Both return their matches in the same pre-order `ax::flatten` uses
+  A criterion is one of `identifier`, `role`, `subrole`, `label`, or
+  `label_contains` — a field that names an element. `enabled_only` and
+  `index` are filters, not criteria: one narrows a set of matches and the
+  other picks one out of it, so neither counts toward the guard. Both
+  functions return their matches in the same pre-order `ax::flatten` uses
   (PINV-3), so `ElementSelector::index` names the same element every
   time for the same tree.
 - Because: a selector resolves to a real press or a real wait. An empty
   selector matches the application root, so a `perform_action` call would
-  silently press whatever sits first in the tree. An unstable match order
+  silently press whatever sits first in the tree, and an
+  `await_ui_element` call would report instant success without waiting
+  for anything. Counting a filter as a criterion reopens exactly that
+  hole through a field that reads like a real one: `{"enabled_only":
+  true}` names no element, and every application root is enabled. An unstable match order
   would make one `index` name a different element on each call, which is
   worse than an error, because the caller cannot see it happen.
 - If violated: a tool acts on an element the caller never named, and the
@@ -376,12 +384,17 @@ claim automated coverage they don't have.
   out-of-range index as an error rather than acting on the parent.
   Both walks also address one app, never "whatever is frontmost now",
   twice: a request that names no app has `action::resolved_target`
-  substitute the app name `describe` resolved, so a focus change
-  between the walks cannot send the press into a second app at the
-  same path.
+  substitute what `describe` resolved, so a focus change between the
+  walks cannot send the press into a second app at the same path. The
+  substitute is the resolved bundle id when the app publishes one, and
+  its localized name only when it does not. A bundle id is unique; a
+  localized name is not, and `window::resolve_running_app` matches the
+  first process carrying it in whatever order `NSWorkspace` lists them.
 - If violated: `perform_action` presses a different element than the
   one its own response names, and no error reports the difference. Drop
   the app substitution, and it presses that element in a different app.
+  Substitute a localized name where a bundle id was available, and two
+  processes sharing one name reopen the same hole, silently.
 
 ### PINV-19: a wait checks at least once, and never waits past its deadline
 
@@ -391,8 +404,12 @@ claim automated coverage they don't have.
   Between two reads they wait for at most
   `min(poll_interval_ms, milliseconds left to the deadline)`. A
   `UiChangeWaiter` that reports no change neither ends the wait early
-  nor extends it. A `SelectorError::Empty` fails at once, without
-  waiting.
+  nor extends it. A `UiChangeWaiter` that *fails* after consuming its
+  budget does not end the wait either: `wait::wait_one_slice` reads the
+  clock before and after the call, and degrades to polling whenever time
+  really passed. A waiter that fails without consuming any of its budget
+  does end the wait, because polling on through it would spin. A
+  `SelectorError::Empty` fails at once, without waiting.
 - Because: this is the hybrid design the tools depend on. `polarize-macos`
   wakes a wait on an accessibility notification, but some trees never
   post one. A web view inside a native window is the usual case: its
@@ -402,10 +419,19 @@ claim automated coverage they don't have.
   the deadline test matters because `timeout_ms: 0` is a legal "is it
   there right now" request. An empty selector matches the application
   root, so retrying it would spend the whole timeout on a request that
-  is already wrong (PINV-15).
+  is already wrong (PINV-15). Degrading on a waiter failure matters for
+  the same reason polling exists: `AXObserverCreate` fails, and an app
+  refuses every notification, on exactly the apps that never post one.
+  Aborting there would turn the fallback path into the failure path. The
+  clock reading is what makes that safe — it separates "the notification
+  channel is unavailable, and a poll interval has passed" from "the
+  waiter returned instantly", which no amount of retrying can advance.
 - If violated: `await_ui_element` blocks for its full timeout against
   any app whose accessibility tree under-reports, or a zero timeout
-  returns a timeout error without ever looking at the tree.
+  returns a timeout error without ever looking at the tree, or a wait
+  against an app with no usable observer fails at the first poll
+  boundary instead of polling, or a waiter that fails instantly spins
+  the CPU until the deadline.
 
 ### PINV-20: one thread owns a whole `AXObserver` lifecycle
 
@@ -417,7 +443,8 @@ claim automated coverage they don't have.
   crosses back. Registration is best-effort: the wait fails only when
   every one of `AXCreated`, `AXLayoutChanged`, and `AXValueChanged` is
   refused. The call returns `false` only after its budget really
-  elapsed.
+  elapsed, and it returns an error only after its budget really elapsed
+  too.
 - Because: an `AXObserverRef` and a `CFRunLoopRef` belong to the thread
   that made them, and neither is `Send`. `apps/polarize` is an async
   `rmcp` server, so no Tokio worker thread runs a `CFRunLoop` at all.
@@ -426,11 +453,16 @@ claim automated coverage they don't have.
   Partial registration matters because many apps support only some
   notifications, and failing on the first refusal would break the tool
   on them. Returning early with `false` would make `wait`'s poll
-  fallback re-walk the whole tree as fast as the CPU allows.
+  fallback re-walk the whole tree as fast as the CPU allows. Sleeping
+  out the budget on failure matters for the same reason: `polarize-core`
+  reads its clock to decide whether a waiter failure is a missed
+  notification or a fault, and a failure with no time elapsed reads as a
+  fault (PINV-19).
 - If violated: undefined behavior from using a Core Foundation handle on
   the wrong thread, a leaked run-loop source per tool call, a busy loop
   that pins a core, or an `await` tool that refuses to run against
-  common apps.
+  common apps. Return an error early, and `polarize-core` reads it as a
+  fault and ends the wait rather than polling through it.
 
 ### PINV-21: an Automation refusal is a permission error, not a script error
 
@@ -530,6 +562,27 @@ claim automated coverage they don't have.
   and one wrong key name (the two names are not symmetric — see
   `crates/polarize-macos/src/session.rs`) turns the whole server off.
 
+
+### PINV-25: a command's deadline bounds the call, not just the child
+
+- Always: `process::run_with_deadline` returns within roughly
+  `timeout + reader_grace`. It kills the child at `timeout`. It then
+  waits at most `reader_grace` for the stdout and stderr reader threads,
+  and takes whatever they collected either way, reporting
+  `CommandOutcome::output_truncated` when it abandoned one.
+  `polarize_macos::applescript` folds that flag into `timed_out`.
+- Because: killing a child does not close its pipes. Any process still
+  holding the write end keeps them open, and `read_to_end` returns only
+  once the last writer closes. `osascript` is exactly that case: the
+  scripts it runs start helpers, and a target app can inherit the
+  descriptor. Joining a reader thread unconditionally would then block
+  with no bound at all, long past the deadline the caller set. The
+  readers append into a shared buffer instead of returning one, so the
+  output that did arrive survives a reader this code abandons.
+- If violated: `run_applescript` hangs far past its two-minute clamp,
+  pinning the `tokio` blocking thread `apps/polarize/src/server.rs` put
+  it on, and the caller never sees an error — only a tool call that
+  never returns.
 
 ## Enforcement checklist
 
@@ -640,6 +693,10 @@ claim automated coverage they don't have.
   needs one, with Accessibility permission granted and a real target
   app running.
 - **PINV-15** — fully covered by automated `cargo test -p polarize-core`
+  (`selector::tests`), including which fields count toward the guard: an
+  `index`-only selector, an `enabled_only`-only selector, and a selector
+  carrying both filters and no criterion are each rejected, while
+  `enabled_only` still filters normally once a real criterion is named.
   (`selector::tests`): the empty-selector rejection (including a
   selector that sets only `index`), pre-order match paths, `index`
   selection and its out-of-range error, every single-field criterion,
@@ -668,8 +725,14 @@ claim automated coverage they don't have.
   The app-substitution rule is fully covered by automated `cargo test -p
   polarize-core` (`action::tests`): a request naming no app reaches the
   performer as the name `describe` resolved, a request naming an app
-  keeps the caller's own identifier including its bundle id, and an
-  empty resolved name falls back to the frontmost app.
+  keeps the caller's own identifier including its bundle id, a resolved
+  app publishing a bundle id reaches the performer as that bundle id
+  rather than as a name, a resolved app without one falls back to its
+  name, and an app publishing neither falls back to the frontmost app.
+  What `polarize-macos` actually reads into `ResolvedApp` —
+  `NSRunningApplication::bundleIdentifier` — is **not** automated; a
+  human must confirm a real `describe` response carries the target app's
+  real bundle id.
   The `polarize-core` half is covered by automated `cargo test -p
   polarize-core`: `selector::tests` proves every found path reads back
   to a matching node, and `action::tests` proves the recording fake
@@ -685,6 +748,13 @@ claim automated coverage they don't have.
   `aarch64-apple-darwin`, and CI compiles it on a real macOS runner,
   but neither runs it.
 - **PINV-19** — fully covered by automated `cargo test -p polarize-core`
+  (`wait::tests`), including the waiter-failure rules: a waiter that
+  fails after consuming its budget is polled through to a real match and
+  still times out on its own deadline, and a waiter that fails without
+  consuming any budget ends the wait after a bounded number of tree
+  reads. Both `await` tools are covered. The `polarize-macos` half of
+  the degrade rule — that `observer.rs` really sleeps out its budget
+  before reporting a failure — is **not** automated; see PINV-20.
   (`wait::tests`, 31 tests). A fake `AccessibilityInspector` returns a
   different tree on each call, a fake `UiChangeWaiter` records every
   budget it is handed, and a fake `Clock` advances only when the fake
@@ -782,3 +852,13 @@ claim automated coverage they don't have.
   session must confirm the two keys read `true` while the Mac is
   unlocked and on the console, and that the lock key flips when the
   screen locks.
+- **PINV-25** — fully covered by automated `cargo test -p polarize-core`
+  (`process::tests`), with real subprocesses. The deciding case starts a
+  backgrounded subshell that inherits stdout and outlives the kill; the
+  test asserts the call returns inside the grace, reports
+  `output_truncated`, and still returns the output written before the
+  kill. This is why `process` lives in `polarize-core` and not in
+  `polarize-macos`: the module holds no macOS API, and the failure it
+  prevents is a hang, which only a real subprocess can demonstrate.
+  What is **not** automated is `applescript.rs`'s thin adapter over it,
+  or whether `osascript` in particular leaves a pipe holder behind.

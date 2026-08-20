@@ -206,20 +206,34 @@ impl UiChangeWaiter for MacUiChangeWaiter {
         // `Send`, so only its pid crosses to the observer thread.
         let pid = resolve_running_app(app)?.processIdentifier();
 
-        let handle = std::thread::Builder::new()
+        let started = Instant::now();
+        let outcome = std::thread::Builder::new()
             .name("polarize-ax-observer".to_string())
             .spawn(move || observe_for_change(pid, budget))
             .map_err(|err| {
                 PolarizeError::Platform(format!("could not start the observer thread: {err}"))
-            })?;
+            })
+            .and_then(|handle| match handle.join() {
+                Ok(Ok(changed)) => Ok(changed),
+                Ok(Err(message)) => Err(PolarizeError::Platform(message)),
+                Err(_) => Err(PolarizeError::Platform(
+                    "the observer thread panicked".to_string(),
+                )),
+            });
 
-        match handle.join() {
-            Ok(Ok(changed)) => Ok(changed),
-            Ok(Err(message)) => Err(PolarizeError::Platform(message)),
-            Err(_) => Err(PolarizeError::Platform(
-                "the observer thread panicked".to_string(),
-            )),
+        // Honour the budget even when the observer could not be built.
+        // `AXObserverCreate` fails, and an app refuses every
+        // notification, in exactly the cases polling exists to cover.
+        // Returning early would hand `polarize_core::wait` a failure
+        // with no time elapsed, which it must treat as a fault rather
+        // than as one poll interval. See PINV-19 and PINV-20.
+        if outcome.is_err() {
+            let remaining = budget.saturating_sub(started.elapsed());
+            if !remaining.is_zero() {
+                std::thread::sleep(remaining);
+            }
         }
+        outcome
     }
 }
 

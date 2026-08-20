@@ -40,7 +40,7 @@ use crate::ax::AxNode;
 use crate::error::PolarizeError;
 use crate::schema::AppIdentifier;
 use crate::selector::{self, ElementPath, ElementSelector};
-use crate::traits::{AccessibilityInspector, ActionPerformer};
+use crate::traits::{AccessibilityInspector, ActionPerformer, ResolvedApp};
 
 /// The action [`perform_element_action`] uses when a request names
 /// none. `AXPress` is the action a button, a menu item, and a checkbox
@@ -145,7 +145,7 @@ where
     A: AccessibilityInspector,
     P: ActionPerformer,
 {
-    let (app_name, root) = inspector.describe(request.app.as_ref())?;
+    let (resolved, root) = inspector.describe(request.app.as_ref())?;
     let path = selector::find_one(&root, &request.selector)?;
     let node = selector::node_at_path(&root, &path)
         .ok_or_else(|| ActionError::PathNotResolved { path: path.clone() })?;
@@ -174,12 +174,12 @@ where
     // a different app, at the same index path, while the response still
     // named the original element. Naming the resolved app closes that
     // window. See PINV-18.
-    let target = resolved_target(request.app.as_ref(), &app_name);
+    let target = resolved_target(request.app.as_ref(), &resolved);
     performer.perform_action_at_path(target.as_ref(), &path, action)?;
 
     Ok(PerformActionResponse {
         performed: true,
-        app_name,
+        app_name: resolved.name,
         action: action.to_string(),
         path,
         role: node.role.clone(),
@@ -189,19 +189,21 @@ where
 
 /// The app identifier the action should address.
 ///
-/// A request that named an app keeps that identifier, because it may
-/// carry a bundle id, which matches more precisely than a name does. A
-/// request that named none falls back to the localized name `describe`
-/// resolved, so both calls address one app rather than "whatever is
-/// frontmost now", twice.
-fn resolved_target(requested: Option<&AppIdentifier>, app_name: &str) -> Option<AppIdentifier> {
+/// A request that named an app keeps that identifier. The caller chose
+/// it, and it may carry a bundle id already.
+///
+/// A request that named none falls back to what `describe` resolved —
+/// its bundle id first, its display name second (see
+/// [`ResolvedApp::identifier`]). Both calls then address one app,
+/// rather than resolving "whatever is frontmost now" twice, which is
+/// the race PINV-18 closes.
+fn resolved_target(
+    requested: Option<&AppIdentifier>,
+    resolved: &ResolvedApp,
+) -> Option<AppIdentifier> {
     match requested {
         Some(app) => Some(app.clone()),
-        None if app_name.is_empty() => None,
-        None => Some(AppIdentifier {
-            bundle_id: None,
-            app_name: Some(app_name.to_string()),
-        }),
+        None => resolved.identifier(),
     }
 }
 
@@ -214,6 +216,7 @@ mod tests {
 
     struct FakeInspector {
         root: AxNode,
+        bundle_id: Option<String>,
         seen: RefCell<Vec<Option<AppIdentifier>>>,
     }
 
@@ -221,15 +224,30 @@ mod tests {
         fn new(root: AxNode) -> Self {
             Self {
                 root,
+                bundle_id: None,
                 seen: RefCell::new(Vec::new()),
             }
+        }
+
+        fn with_bundle_id(mut self, bundle_id: &str) -> Self {
+            self.bundle_id = Some(bundle_id.to_string());
+            self
         }
     }
 
     impl AccessibilityInspector for FakeInspector {
-        fn describe(&self, app: Option<&AppIdentifier>) -> Result<(String, AxNode), PolarizeError> {
+        fn describe(
+            &self,
+            app: Option<&AppIdentifier>,
+        ) -> Result<(ResolvedApp, AxNode), PolarizeError> {
             self.seen.borrow_mut().push(app.cloned());
-            Ok(("TestApp".to_string(), self.root.clone()))
+            Ok((
+                ResolvedApp {
+                    name: "TestApp".to_string(),
+                    bundle_id: self.bundle_id.clone(),
+                },
+                self.root.clone(),
+            ))
         }
     }
 
@@ -577,13 +595,55 @@ mod tests {
     }
 
     #[test]
+    fn a_request_naming_no_app_prefers_the_resolved_bundle_id() {
+        // A localized name matches whichever process
+        // `resolve_running_app` happens to find first, and two processes
+        // can share one. A bundle id is exact. See PINV-18.
+        let inspector = FakeInspector::new(tree()).with_bundle_id("com.apple.TextEdit");
+        let performer = RecordingPerformer::default();
+
+        perform_element_action(&inspector, &performer, &request(by_label("Save"))).unwrap();
+
+        assert_eq!(
+            performer.calls.borrow()[0].0,
+            Some(AppIdentifier {
+                bundle_id: Some("com.apple.TextEdit".to_string()),
+                app_name: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_resolved_app_without_a_bundle_id_falls_back_to_its_name() {
+        // A raw binary, or an app bundle with no identifier, has no
+        // bundle id. The name is still better than "frontmost".
+        let resolved = ResolvedApp {
+            name: "TestApp".to_string(),
+            bundle_id: None,
+        };
+        assert_eq!(
+            resolved.identifier(),
+            Some(AppIdentifier {
+                bundle_id: None,
+                app_name: Some("TestApp".to_string()),
+            })
+        );
+    }
+
+    #[test]
     fn an_empty_resolved_app_name_falls_back_to_frontmost() {
         // `NSRunningApplication::localizedName` can be absent, and
         // `describe` reports that as an empty string. An empty name
         // would match no app at all, so address the frontmost instead.
-        assert_eq!(resolved_target(None, ""), None);
+        assert_eq!(resolved_target(None, &ResolvedApp::default()), None);
         assert_eq!(
-            resolved_target(None, "Finder"),
+            resolved_target(
+                None,
+                &ResolvedApp {
+                    name: "Finder".to_string(),
+                    bundle_id: None,
+                }
+            ),
             Some(AppIdentifier {
                 bundle_id: None,
                 app_name: Some("Finder".to_string()),
@@ -662,7 +722,7 @@ mod tests {
             fn describe(
                 &self,
                 _app: Option<&AppIdentifier>,
-            ) -> Result<(String, AxNode), PolarizeError> {
+            ) -> Result<(ResolvedApp, AxNode), PolarizeError> {
                 Err(PolarizeError::AppNotFound("com.example.Nope".to_string()))
             }
         }

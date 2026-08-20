@@ -15,7 +15,7 @@ use polarize_core::coords::{PixelPoint, PixelSize};
 use polarize_core::error::PolarizeError;
 use polarize_core::permission::{PermissionError, PermissionKind, PermissionState};
 use polarize_core::schema::AppIdentifier;
-use polarize_core::traits::AccessibilityInspector;
+use polarize_core::traits::{AccessibilityInspector, ResolvedApp};
 
 use crate::ax_ffi::{self, AxElement};
 use crate::geometry::safe_normalize_frame;
@@ -36,7 +36,10 @@ const MAX_AX_DEPTH: usize = 64;
 pub struct MacAccessibilityInspector;
 
 impl AccessibilityInspector for MacAccessibilityInspector {
-    fn describe(&self, app: Option<&AppIdentifier>) -> Result<(String, AxNode), PolarizeError> {
+    fn describe(
+        &self,
+        app: Option<&AppIdentifier>,
+    ) -> Result<(ResolvedApp, AxNode), PolarizeError> {
         // `AXIsProcessTrusted` collapses "never asked" and "explicitly
         // denied" into the same `false` — `NotDetermined` is the more
         // conservative of the two to report when we cannot distinguish
@@ -53,10 +56,13 @@ impl AccessibilityInspector for MacAccessibilityInspector {
 
         let running = resolve_running_app(app)?;
         let pid = running.processIdentifier();
-        let app_name = running
-            .localizedName()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
+        let resolved = ResolvedApp {
+            name: running
+                .localizedName()
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+            bundle_id: running.bundleIdentifier().map(|s| s.to_string()),
+        };
 
         let element = AxElement::for_application(pid);
         // See `window.rs`'s "known limitation" doc comment: normalizing
@@ -70,7 +76,7 @@ impl AccessibilityInspector for MacAccessibilityInspector {
         };
 
         let root = build_node(&element, screen_size, 0);
-        Ok((app_name, root))
+        Ok((resolved, root))
     }
 }
 

@@ -32,21 +32,15 @@
 //! harness" section of `docs/INVARIANTS.md`.
 
 use std::ffi::c_void;
-use std::io::{Read, Write};
-use std::process::{Command, Stdio};
 use std::ptr;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use polarize_core::error::PolarizeError;
 use polarize_core::permission::{PermissionError, PermissionKind};
+use polarize_core::process;
 use polarize_core::schema::AppIdentifier;
 use polarize_core::script::{AutomationCheck, automation_check_from_status};
 use polarize_core::traits::{AppSdef, AppleScriptRunner, ScriptOutcome};
-
-/// How often the runner asks whether the child process has exited. A
-/// run can overshoot its deadline by up to this much.
-const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// How long `sdef` may take. It reads one bundle and prints XML, so it
 /// needs far less time than a script that drives an app.
@@ -136,95 +130,30 @@ pub fn automation_check(bundle_id: &str) -> AutomationCheck {
     automation_check_from_status(status)
 }
 
-/// Runs one child process under a deadline.
+/// Runs one command through [`polarize_core::process`], and shapes its
+/// result into the trait's [`ScriptOutcome`].
 ///
-/// The child's stdout and stderr each get their own reader thread, so
-/// neither pipe can fill up and deadlock the run. `stdin_data`, when
-/// present, goes out on a third thread for the same reason. The main
-/// thread polls for the exit, and kills the child once the deadline
-/// passes.
-fn run_command(
+/// The deadline logic lives in `polarize-core` because it is pure
+/// `std::process` with no macOS API in it, and because the hang it
+/// prevents needs a real subprocess to demonstrate — which
+/// `polarize-macos` cannot do in CI. See PINV-25.
+///
+/// Truncated output folds into `timed_out`. A reader this runner had to
+/// abandon means some process outlived the deadline holding the pipe,
+/// which is the same fact the caller acts on.
+fn run(
     program: &str,
     args: &[&str],
     stdin_data: Option<&str>,
     timeout_ms: u64,
 ) -> Result<ScriptOutcome, PolarizeError> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(if stdin_data.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| PolarizeError::Platform(format!("cannot start {program}: {error}")))?;
-
-    if let Some(data) = stdin_data {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| PolarizeError::Platform(format!("{program} has no stdin pipe")))?;
-        let owned = data.to_string();
-        // Dropping `stdin` at the end of the closure closes the pipe,
-        // which is what tells `osascript` the script is complete. A
-        // write to a child that already exited fails, and that failure
-        // is not interesting: the exit status reports it.
-        thread::spawn(move || {
-            let _ = stdin.write_all(owned.as_bytes());
-        });
-    }
-
-    let mut stdout_pipe = child
-        .stdout
-        .take()
-        .ok_or_else(|| PolarizeError::Platform(format!("{program} has no stdout pipe")))?;
-    let mut stderr_pipe = child
-        .stderr
-        .take()
-        .ok_or_else(|| PolarizeError::Platform(format!("{program} has no stderr pipe")))?;
-    let stdout_reader = thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = stdout_pipe.read_to_end(&mut buffer);
-        buffer
-    });
-    let stderr_reader = thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = stderr_pipe.read_to_end(&mut buffer);
-        buffer
-    });
-
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let mut timed_out = false;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    timed_out = true;
-                    break None;
-                }
-                thread::sleep(POLL_INTERVAL);
-            }
-            Err(error) => {
-                let _ = child.kill();
-                return Err(PolarizeError::Platform(format!(
-                    "cannot wait for {program}: {error}"
-                )));
-            }
-        }
-    };
-
-    let stdout = stdout_reader.join().unwrap_or_default();
-    let stderr = stderr_reader.join().unwrap_or_default();
+    let outcome = process::run(program, args, stdin_data, Duration::from_millis(timeout_ms))
+        .map_err(PolarizeError::Platform)?;
     Ok(ScriptOutcome {
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
-        exit_code: status.and_then(|status| status.code()),
-        timed_out,
+        stdout: outcome.stdout,
+        stderr: outcome.stderr,
+        exit_code: outcome.exit_code,
+        timed_out: outcome.timed_out || outcome.output_truncated,
     })
 }
 
@@ -280,7 +209,7 @@ impl AppleScriptRunner for MacAppleScriptRunner {
         }
         // With no file argument and no `-e`, `osascript` reads the whole
         // script from stdin.
-        run_command("osascript", &[], Some(source), timeout_ms)
+        run("osascript", &[], Some(source), timeout_ms)
     }
 
     fn app_sdef(&self, app: &AppIdentifier) -> Result<AppSdef, PolarizeError> {
@@ -299,7 +228,7 @@ impl AppleScriptRunner for MacAppleScriptRunner {
             })?
             .to_string();
 
-        let outcome = run_command("sdef", &[bundle_path.as_str()], None, SDEF_TIMEOUT_MS)?;
+        let outcome = run("sdef", &[bundle_path.as_str()], None, SDEF_TIMEOUT_MS)?;
         if outcome.timed_out {
             return Err(PolarizeError::Platform(format!(
                 "sdef timed out after {SDEF_TIMEOUT_MS} ms for {app_name}"
