@@ -64,7 +64,9 @@ pub struct PolarizeServer {
 /// result carries. `Coord`/`Selector`/`AppNotFound`/`WindowNotFound` are
 /// treated as bad input from the caller (`INVALID_PARAMS`); `Permission` and
 /// `Platform` are treated as environment/native failures
-/// (`INTERNAL_ERROR`) — a permission error additionally carries its
+/// (`INTERNAL_ERROR`), and so are `ScreenLocked`/`SessionNotOnConsole`,
+/// which report the state of the host login session rather than
+/// anything the caller sent — a permission error additionally carries its
 /// `PermissionKind`/`PermissionState` as structured `data` so a caller
 /// can act on it (e.g. "grant Accessibility access") without parsing the
 /// message string.
@@ -83,7 +85,9 @@ fn to_error_data(err: PolarizeError) -> ErrorData {
             .ok();
             ErrorData::internal_error(message, data)
         }
-        PolarizeError::Platform(_) => ErrorData::internal_error(message, None),
+        PolarizeError::Platform(_)
+        | PolarizeError::ScreenLocked
+        | PolarizeError::SessionNotOnConsole => ErrorData::internal_error(message, None),
     }
 }
 
