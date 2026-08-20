@@ -84,6 +84,12 @@ pub enum ToolKind {
     AwaitScreenIdle,
     RunAppleScript,
     ScriptDictionary,
+    /// `set_window_frame` — moves and resizes one window. See
+    /// `crate::window_control` (PINV-28, PINV-29).
+    SetWindowFrame,
+    /// `window_action` — minimizes, restores, focuses, closes, or
+    /// full-screens one window. See `crate::window_control`.
+    WindowAction,
 }
 
 /// # PINV-2: every tool call is gated on exactly one permission
@@ -108,6 +114,8 @@ pub fn required_permission(tool: ToolKind) -> PermissionKind {
         // `AXObserverCreate` needs the same trust as `AXUIElement` does.
         ToolKind::AwaitUiElement | ToolKind::AwaitScreenIdle => PermissionKind::Accessibility,
         ToolKind::RunAppleScript | ToolKind::ScriptDictionary => PermissionKind::Automation,
+        // Both window tools read and write `AXUIElement` attributes.
+        ToolKind::SetWindowFrame | ToolKind::WindowAction => PermissionKind::Accessibility,
     }
 }
 
@@ -280,6 +288,17 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Automation permission is Denied, not granted"
+        );
+    }
+    #[test]
+    fn both_window_tools_need_accessibility() {
+        assert_eq!(
+            required_permission(ToolKind::SetWindowFrame),
+            PermissionKind::Accessibility
+        );
+        assert_eq!(
+            required_permission(ToolKind::WindowAction),
+            PermissionKind::Accessibility
         );
     }
 }

@@ -50,3 +50,4 @@ pub mod observer;
 pub mod permission_bootstrap;
 pub mod session;
 pub mod window;
+pub mod window_control;

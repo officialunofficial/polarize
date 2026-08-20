@@ -584,6 +584,48 @@ claim automated coverage they don't have.
   it on, and the caller never sees an error — only a tool call that
   never returns.
 
+### PINV-28: a window tool checks its target before it writes
+
+- Always: `window_control::select_window` resolves a request to exactly
+  one window, or it returns a `WindowControlError`. A `window_title`
+  that matches no window, a `window_title` that matches several windows
+  with no `window_index`, an out-of-range `window_index`, and an app
+  with no windows are all refusals. `window_control::plan_action_writes`
+  adds one more: it refuses a full-screen action against a window whose
+  `full_screen` is `None`, which means the window publishes no
+  `AXFullScreen` attribute. No refusal ever reaches
+  `WindowController::apply_window_write`.
+- Because: these writes are destructive, and the caller cannot undo
+  them. A `close` throws away unsaved work. A move loses the window's
+  old frame, which nothing recorded. So guessing which of two equally
+  titled windows the caller meant is worse than refusing. `AXFullScreen`
+  needs its own check for a different reason. The attribute is
+  undocumented. A window that does not publish it still accepts the
+  write, and then does nothing. To an agent that cannot see the screen,
+  that is indistinguishable from success.
+- If violated: `window_action` closes the wrong document window, or it
+  reports a window went full screen while nothing on screen changed.
+
+### PINV-29: a window tool reports the frame it re-read, never the frame it requested
+
+- Always: `window_control::perform_set_window_frame` and
+  `window_control::perform_window_action` call
+  `WindowController::list_windows` again after their last write. Every
+  geometric and boolean field of the response comes from that second
+  read. `set_window_frame` reports the requested frame in its own
+  separate fields, and compares the two into `applied_exactly`.
+- Because: an app is free to ignore a write. Every AppKit window has a
+  minimum size, many have a maximum, and a document window can refuse a
+  move that would put its title bar under the menu bar.
+  `AXUIElementSetAttributeValue` returns `kAXErrorSuccess` in all of
+  those cases. The app took the message, then applied its own policy. A
+  tool that echoed the request back would report a 200-pixel-wide window
+  that is really 480 pixels wide. An agent cannot see the screen, so
+  nothing catches that.
+- If violated: an agent lays out three windows, believes the layout
+  succeeded, and every later coordinate it computes from that belief is
+  wrong.
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -862,3 +904,52 @@ claim automated coverage they don't have.
   prevents is a hang, which only a real subprocess can demonstrate.
   What is **not** automated is `applescript.rs`'s thin adapter over it,
   or whether `osascript` in particular leaves a pipe holder behind.
+- **PINV-28** — the decision half is fully covered by automated `cargo
+  test -p polarize-core` (`window_control::tests`): the frontmost-window
+  default, an index with no title, a title that names one window, a
+  title that matches nothing (asserting the message lists the real
+  titles, `<untitled>` included), a title that matches two windows,
+  an index that disambiguates those two, an index past the matching
+  windows, an index past the whole list, an app with no windows, a
+  prefix that must not match, an untitled window addressed by index,
+  both full-screen actions refused on a window that publishes no
+  `AXFullScreen`, and — for the refusal cases — proof that the recording
+  fake `WindowController` was never written to. What is **not**
+  automated: whether a real app's `AXWindows` list is really published
+  front to back, so index `0` is really the frontmost window; and
+  whether a real AppKit window really publishes `AXFullScreen`, which is
+  an undocumented attribute with no Apple guarantee behind it. A human
+  on a real macOS session with Accessibility permission granted must
+  confirm both. Open two windows of one app, and check that a
+  `window_action` with no `window_title` acts on the front one. Then run
+  a full-screen action against a normal document window, against a
+  utility panel, and against a window with no full-screen button, and
+  confirm the last two return the refusal rather than a silent success.
+- **PINV-29** — the orchestration half is fully covered by automated
+  `cargo test -p polarize-core` (`window_control::tests`) against a fake
+  `WindowController` that returns a *different* window list on its
+  second read, so an echoed request cannot pass: a clamped width
+  reported as the real 480 pixels with `applied_exactly: false`, a
+  frame the app honored reported as `true`, a sub-pixel rounding
+  difference still counted as exact, a `window_action` whose write the
+  app ignored, a `close` that removed the window reported as no window,
+  a `close` the app refused still reporting the window, a re-read that
+  follows a reordered `AXWindows` list by title rather than by index,
+  and a count of exactly two `list_windows` calls per tool call. The
+  half this invariant depends on but cannot verify is **not** automated
+  anywhere: whether `polarize-macos`'s real
+  `AXUIElementSetAttributeValue` calls for `AXPosition`, `AXSize`,
+  `AXMinimized`, `AXMain`, and `AXFullScreen` move a real window, and
+  whether a real re-read reports the app's clamping. A human on a real
+  macOS session with Accessibility permission granted must confirm:
+  `set_window_frame` with `{"size":{"width":0.1,"height":0.1}}` against
+  an app with a large minimum window size returns `applied_exactly:
+  false` and the app's real minimum size; `AXRaise` brings a background
+  window forward; `AXPress` on `AXCloseButton` closes a document window,
+  and reports the window as still open when a "save changes?" sheet
+  appears. Nobody has checked whether the position-size-position write
+  order in `window_control::plan_frame_writes` really defeats a given
+  app's clamping — the order is asserted by a unit test, its effect is
+  not. The macOS code is type-checked against `aarch64-apple-darwin`
+  (`cargo clippy --target aarch64-apple-darwin -D warnings`, clean), but
+  nothing runs it.

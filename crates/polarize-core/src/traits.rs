@@ -219,3 +219,79 @@ pub trait AppleScriptRunner {
     /// Returns `app`'s scripting dictionary as raw `sdef` XML.
     fn app_sdef(&self, app: &AppIdentifier) -> Result<AppSdef, PolarizeError>;
 }
+
+/// One window of an app, as [`WindowController::list_windows`] read it.
+///
+/// Every field is a fresh read. `polarize-core` never caches one of
+/// these across a write; see PINV-29.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowInfo {
+    /// The window's `AXTitle`. `None` when it publishes none, or when
+    /// the title is empty.
+    pub title: Option<String>,
+    /// The window's frame, in the global display coordinate space.
+    pub rect: crate::coords::PixelRect,
+    /// `AXMinimized`: the window is in the Dock.
+    pub minimized: bool,
+    /// `AXMain`: this is the app's main window.
+    pub main: bool,
+    /// `AXFocused`: this window takes keyboard input.
+    pub focused: bool,
+    /// `AXFullScreen`. `None` when the window publishes no such
+    /// attribute. That attribute is undocumented, so `None` is a normal
+    /// result — see [`crate::window_control`] and PINV-28.
+    pub full_screen: Option<bool>,
+}
+
+/// One write against one window.
+///
+/// [`crate::window_control`] decides which writes a tool call needs, and
+/// in which order. An implementation only carries them out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WindowWrite {
+    /// Writes `AXPosition`, in the global display coordinate space.
+    SetPosition(PixelPoint),
+    /// Writes `AXSize`.
+    SetSize(crate::coords::PixelSize),
+    /// Writes `AXMinimized`.
+    SetMinimized(bool),
+    /// Writes `AXMain`.
+    SetMain(bool),
+    /// Writes `AXFullScreen`. An implementation must fail when the
+    /// window publishes no such attribute, rather than report success.
+    SetFullScreen(bool),
+    /// Performs `AXRaise`.
+    Raise,
+    /// Presses the window's `AXCloseButton`.
+    Close,
+}
+
+/// Reads and writes an app's windows. Implemented by `polarize-macos`
+/// over `AXUIElement`'s `AXWindows` list.
+///
+/// The trait holds two calls only. Everything else a window tool does —
+/// which window a request names, which writes it needs, in which order,
+/// and what the response reports — is pure logic in
+/// [`crate::window_control`], and is unit-tested there against a fake.
+pub trait WindowController {
+    /// Lists `app`'s windows, in `AXWindows` order, which macOS
+    /// publishes front to back. `app` is `None` to address the frontmost
+    /// app. Also returns the app the call resolved to, so a follow-up
+    /// call can address that same app (PINV-18).
+    fn list_windows(
+        &self,
+        app: Option<&AppIdentifier>,
+    ) -> Result<(ResolvedApp, Vec<WindowInfo>), PolarizeError>;
+
+    /// Applies one write to the window at `index` in that same list.
+    ///
+    /// An index that names no window is an error, not a silent stop. The
+    /// app opened or closed a window between the two calls, so writing
+    /// to another window would move something the caller never named.
+    fn apply_window_write(
+        &self,
+        app: Option<&AppIdentifier>,
+        index: usize,
+        write: &WindowWrite,
+    ) -> Result<(), PolarizeError>;
+}
