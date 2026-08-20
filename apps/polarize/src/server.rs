@@ -27,6 +27,7 @@
 //! status list satisfies a tool's requirement (PINV-2). Native TCC
 //! queries belong in `polarize-macos`, not in this thin server.
 
+use polarize_core::action::{self, PerformActionRequest, PerformActionResponse};
 use polarize_core::error::PolarizeError;
 use polarize_core::orchestrate;
 use polarize_core::permission::PermissionError;
@@ -35,6 +36,7 @@ use polarize_core::schema::{
     ScreenshotResponse, TapRequest, TapResponse,
 };
 use polarize_macos::accessibility::MacAccessibilityInspector;
+use polarize_macos::action::MacActionPerformer;
 use polarize_macos::capture::MacScreenCapture;
 use polarize_macos::input::MacInputSynthesizer;
 use polarize_macos::window::MacWindowManager;
@@ -46,15 +48,16 @@ use rmcp::{tool, tool_handler, tool_router};
 use std::sync::Arc;
 
 /// The `polarize` MCP server. Each field is a real `polarize-macos`
-/// implementation of one `polarize-core` trait; all four are
-/// zero-sized (`#[derive(Default)]` unit structs), so constructing this
-/// server has no runtime cost of its own.
+/// implementation of one `polarize-core` trait; every one is zero-sized
+/// (`#[derive(Default)]` unit structs), so constructing this server has
+/// no runtime cost of its own.
 #[derive(Debug, Default)]
 pub struct PolarizeServer {
     capture: MacScreenCapture,
     inspector: MacAccessibilityInspector,
     input: MacInputSynthesizer,
     window: MacWindowManager,
+    action: MacActionPerformer,
 }
 
 /// Maps a [`PolarizeError`] to the MCP [`ErrorData`] shape a tool call
@@ -166,6 +169,24 @@ impl PolarizeServer {
         Parameters(request): Parameters<KeyboardRequest>,
     ) -> Result<Json<KeyboardResponse>, ErrorData> {
         orchestrate::perform_keyboard(&self.window, &self.input, &request)
+            .map(Json)
+            .map_err(to_error_data)
+    }
+
+    /// Presses one element through its own accessibility action, rather
+    /// than by posting a click at a coordinate. The request names the
+    /// element by identifier, role, subrole, or label — see
+    /// [`polarize_core::selector`]. An occluded element, an element
+    /// below click-target size, and an element the caller cannot
+    /// locate on screen all still work. The tool refuses an action the
+    /// element does not publish, and refuses a disabled element, before
+    /// it calls the platform (PINV-17).
+    #[tool(name = "perform_action")]
+    fn perform_action(
+        &self,
+        Parameters(request): Parameters<PerformActionRequest>,
+    ) -> Result<Json<PerformActionResponse>, ErrorData> {
+        action::perform_element_action(&self.inspector, &self.action, &request)
             .map(Json)
             .map_err(to_error_data)
     }
