@@ -1,0 +1,321 @@
+//! [`AppleScriptRunner`] over the `osascript` and `sdef` subprocesses,
+//! plus the Automation permission preflight.
+//!
+//! ## Why a subprocess, and not `NSAppleScript`
+//!
+//! `objc2-foundation` exposes `NSAppleScript`, so a native binding is
+//! possible. `polarize` runs `osascript` in a child process instead.
+//! AppleScript can hang forever on a modal dialog, and it leaks memory
+//! in the process that hosts it. A child process contains both: the
+//! runner kills it at its deadline, and the kernel reclaims everything
+//! it held. `polarize` speaks MCP over stdio, so one blocked script
+//! inside the server process would stall every later tool call.
+//!
+//! ## What the source travels on
+//!
+//! The script goes to `osascript` on stdin, not through `-e`. A long or
+//! quote-heavy script through `-e` is a quoting hazard, and a shell-free
+//! `Command` still has to build one argument out of it.
+//!
+//! ## Errors never carry the script
+//!
+//! No error this module builds holds the script source as written; it
+//! passes through [`polarize_core::script::redact_source`] first. A
+//! script often carries a password. See PINV-22.
+//!
+//! ## What is verified here
+//!
+//! Nothing in this module runs in CI. It is compile-checked only, on
+//! `aarch64-apple-darwin`. The pure halves it depends on — the error
+//! mapping, the `sdef` scan, the timeout clamp, and the redaction — all
+//! live in `polarize-core` and have real unit tests. See the "Testing
+//! harness" section of `docs/INVARIANTS.md`.
+
+use std::ffi::c_void;
+use std::io::{Read, Write};
+use std::process::{Command, Stdio};
+use std::ptr;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use polarize_core::error::PolarizeError;
+use polarize_core::permission::{PermissionError, PermissionKind};
+use polarize_core::schema::AppIdentifier;
+use polarize_core::script::{AutomationCheck, automation_check_from_status};
+use polarize_core::traits::{AppSdef, AppleScriptRunner, ScriptOutcome};
+
+/// How often the runner asks whether the child process has exited. A
+/// run can overshoot its deadline by up to this much.
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// How long `sdef` may take. It reads one bundle and prints XML, so it
+/// needs far less time than a script that drives an app.
+const SDEF_TIMEOUT_MS: u64 = 10_000;
+
+/// Builds the four-character code Apple Events uses as a type tag.
+const fn four_cc(code: &[u8; 4]) -> u32 {
+    ((code[0] as u32) << 24) | ((code[1] as u32) << 16) | ((code[2] as u32) << 8) | (code[3] as u32)
+}
+
+/// `typeApplicationBundleID` — an address descriptor that names an app
+/// by its bundle id.
+const TYPE_APPLICATION_BUNDLE_ID: u32 = four_cc(b"bund");
+
+/// `typeWildCard` — "any event class" and "any event id".
+const TYPE_WILD_CARD: u32 = four_cc(b"****");
+
+/// Carbon's `AEDesc`. `polarize` only ever passes one back to the
+/// Apple Event Manager, so the fields stay opaque here.
+#[repr(C)]
+struct AEDesc {
+    descriptor_type: u32,
+    data_handle: *mut c_void,
+}
+
+#[link(name = "CoreServices", kind = "framework")]
+unsafe extern "C" {
+    /// Builds an `AEDesc` from raw bytes. Returns `noErr` (0) on
+    /// success.
+    fn AECreateDesc(
+        type_code: u32,
+        data_ptr: *const c_void,
+        data_size: isize,
+        result: *mut AEDesc,
+    ) -> i16;
+
+    /// Frees an `AEDesc` built by [`AECreateDesc`].
+    fn AEDisposeDesc(desc: *mut AEDesc) -> i16;
+
+    /// Asks whether this process may send Apple Events to `target`.
+    /// `ask_user_if_needed` is a `Boolean`, so it is one byte.
+    fn AEDeterminePermissionToAutomateTarget(
+        target: *const AEDesc,
+        event_class: u32,
+        event_id: u32,
+        ask_user_if_needed: u8,
+    ) -> i32;
+}
+
+/// Asks macOS whether this process may automate the app with this
+/// bundle id.
+///
+/// The call never prompts: `ask_user_if_needed` is `0`. A "not asked
+/// yet" state therefore comes back as its own status code, which
+/// [`automation_check_from_status`] maps to
+/// [`polarize_core::permission::PermissionState::NotDetermined`]. A
+/// descriptor that fails to build leaves the answer
+/// [`AutomationCheck::Inconclusive`], so a broken preflight never
+/// blocks a script that would otherwise run. See PINV-21.
+pub fn automation_check(bundle_id: &str) -> AutomationCheck {
+    let bytes = bundle_id.as_bytes();
+    let mut descriptor = AEDesc {
+        descriptor_type: 0,
+        data_handle: ptr::null_mut(),
+    };
+    // SAFETY: `bytes` outlives the call, and `AECreateDesc` copies the
+    // bytes it is given. `descriptor` is a live, writable `AEDesc`.
+    let created = unsafe {
+        AECreateDesc(
+            TYPE_APPLICATION_BUNDLE_ID,
+            bytes.as_ptr().cast::<c_void>(),
+            bytes.len() as isize,
+            &mut descriptor,
+        )
+    };
+    if created != 0 {
+        return AutomationCheck::Inconclusive;
+    }
+    // SAFETY: `descriptor` holds a descriptor `AECreateDesc` just built,
+    // and the call only reads it.
+    let status = unsafe {
+        AEDeterminePermissionToAutomateTarget(&descriptor, TYPE_WILD_CARD, TYPE_WILD_CARD, 0)
+    };
+    // SAFETY: the descriptor is still live, and nothing uses it after
+    // this point.
+    unsafe { AEDisposeDesc(&mut descriptor) };
+    automation_check_from_status(status)
+}
+
+/// Runs one child process under a deadline.
+///
+/// The child's stdout and stderr each get their own reader thread, so
+/// neither pipe can fill up and deadlock the run. `stdin_data`, when
+/// present, goes out on a third thread for the same reason. The main
+/// thread polls for the exit, and kills the child once the deadline
+/// passes.
+fn run_command(
+    program: &str,
+    args: &[&str],
+    stdin_data: Option<&str>,
+    timeout_ms: u64,
+) -> Result<ScriptOutcome, PolarizeError> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(if stdin_data.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| PolarizeError::Platform(format!("cannot start {program}: {error}")))?;
+
+    if let Some(data) = stdin_data {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| PolarizeError::Platform(format!("{program} has no stdin pipe")))?;
+        let owned = data.to_string();
+        // Dropping `stdin` at the end of the closure closes the pipe,
+        // which is what tells `osascript` the script is complete. A
+        // write to a child that already exited fails, and that failure
+        // is not interesting: the exit status reports it.
+        thread::spawn(move || {
+            let _ = stdin.write_all(owned.as_bytes());
+        });
+    }
+
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| PolarizeError::Platform(format!("{program} has no stdout pipe")))?;
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| PolarizeError::Platform(format!("{program} has no stderr pipe")))?;
+    let stdout_reader = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buffer);
+        buffer
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buffer);
+        buffer
+    });
+
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out = true;
+                    break None;
+                }
+                thread::sleep(POLL_INTERVAL);
+            }
+            Err(error) => {
+                let _ = child.kill();
+                return Err(PolarizeError::Platform(format!(
+                    "cannot wait for {program}: {error}"
+                )));
+            }
+        }
+    };
+
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    Ok(ScriptOutcome {
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        exit_code: status.and_then(|status| status.code()),
+        timed_out,
+    })
+}
+
+/// `AppleScriptRunner` implementation over `osascript` and `sdef`.
+#[derive(Debug, Default)]
+pub struct MacAppleScriptRunner;
+
+impl MacAppleScriptRunner {
+    /// Refuses the run when macOS already says this process may not
+    /// automate `target_app`.
+    ///
+    /// The check needs the target's bundle id, so it first resolves the
+    /// name against the running apps. An app that is not running gets
+    /// no preflight: AppleScript may launch it, and the Apple Event
+    /// Manager reports only "no such process" until it does. The
+    /// `osascript` error mapping (PINV-21) still catches a refusal in
+    /// that case, one step later.
+    fn preflight_automation(&self, target_app: &str) -> Result<(), PolarizeError> {
+        // The caller may name the app either way, so try both fields.
+        // `find_matching_app_index` prefers the bundle id and falls back
+        // to the name (PINV-5).
+        let identifier = AppIdentifier {
+            bundle_id: Some(target_app.to_string()),
+            app_name: Some(target_app.to_string()),
+        };
+        let Ok(running) = crate::window::resolve_running_app(Some(&identifier)) else {
+            return Ok(());
+        };
+        let Some(bundle_id) = running.bundleIdentifier() else {
+            return Ok(());
+        };
+        match automation_check(&bundle_id.to_string()) {
+            AutomationCheck::Refused(state) => {
+                Err(PolarizeError::Permission(PermissionError::NotGranted {
+                    kind: PermissionKind::Automation,
+                    state,
+                }))
+            }
+            AutomationCheck::Permitted | AutomationCheck::Inconclusive => Ok(()),
+        }
+    }
+}
+
+impl AppleScriptRunner for MacAppleScriptRunner {
+    fn run_script(
+        &self,
+        source: &str,
+        target_app: Option<&str>,
+        timeout_ms: u64,
+    ) -> Result<ScriptOutcome, PolarizeError> {
+        if let Some(app) = target_app {
+            self.preflight_automation(app)?;
+        }
+        // With no file argument and no `-e`, `osascript` reads the whole
+        // script from stdin.
+        run_command("osascript", &[], Some(source), timeout_ms)
+    }
+
+    fn app_sdef(&self, app: &AppIdentifier) -> Result<AppSdef, PolarizeError> {
+        let running = crate::window::resolve_running_app(Some(app))?;
+        let app_name = running
+            .localizedName()
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| "unnamed app".to_string());
+        let bundle_url = running.bundleURL().ok_or_else(|| {
+            PolarizeError::Platform(format!("{app_name} reports no bundle location"))
+        })?;
+        let bundle_path = bundle_url
+            .path()
+            .ok_or_else(|| {
+                PolarizeError::Platform(format!("{app_name} has a bundle location with no path"))
+            })?
+            .to_string();
+
+        let outcome = run_command("sdef", &[bundle_path.as_str()], None, SDEF_TIMEOUT_MS)?;
+        if outcome.timed_out {
+            return Err(PolarizeError::Platform(format!(
+                "sdef timed out after {SDEF_TIMEOUT_MS} ms for {app_name}"
+            )));
+        }
+        if outcome.exit_code != Some(0) {
+            let message = outcome.stderr.trim();
+            // `sdef` exits non-zero when an app publishes no scripting
+            // dictionary at all, which is the common case.
+            return Err(PolarizeError::Platform(format!(
+                "sdef found no scripting dictionary for {app_name}: {message}"
+            )));
+        }
+        Ok(AppSdef {
+            app_name,
+            xml: outcome.stdout,
+        })
+    }
+}

@@ -43,6 +43,11 @@ pub enum PermissionKind {
     /// Accessibility — required to walk the `AXUIElement` tree and to
     /// post synthetic `CGEvent`s that other apps receive.
     Accessibility,
+    /// Automation — required to send Apple Events to another app, which
+    /// is what every `run_applescript` call does. macOS grants this per
+    /// (caller, target) pair, not once for the whole system. See
+    /// PINV-21.
+    Automation,
 }
 
 impl fmt::Display for PermissionKind {
@@ -50,6 +55,7 @@ impl fmt::Display for PermissionKind {
         match self {
             PermissionKind::ScreenRecording => write!(f, "Screen Recording"),
             PermissionKind::Accessibility => write!(f, "Accessibility"),
+            PermissionKind::Automation => write!(f, "Automation"),
         }
     }
 }
@@ -76,6 +82,8 @@ pub enum ToolKind {
     AwaitUiElement,
     /// `await_screen_idle` — see [`crate::wait`].
     AwaitScreenIdle,
+    RunAppleScript,
+    ScriptDictionary,
 }
 
 /// # PINV-2: every tool call is gated on exactly one permission
@@ -99,6 +107,7 @@ pub fn required_permission(tool: ToolKind) -> PermissionKind {
         // Both `await` tools read the accessibility tree, and
         // `AXObserverCreate` needs the same trust as `AXUIElement` does.
         ToolKind::AwaitUiElement | ToolKind::AwaitScreenIdle => PermissionKind::Accessibility,
+        ToolKind::RunAppleScript | ToolKind::ScriptDictionary => PermissionKind::Automation,
     }
 }
 
@@ -241,6 +250,36 @@ mod tests {
         assert_eq!(
             required_permission(ToolKind::AwaitScreenIdle),
             PermissionKind::Accessibility
+        );
+    }
+
+    #[test]
+    fn applescript_tools_require_automation() {
+        assert_eq!(
+            required_permission(ToolKind::RunAppleScript),
+            PermissionKind::Automation
+        );
+        assert_eq!(
+            required_permission(ToolKind::ScriptDictionary),
+            PermissionKind::Automation
+        );
+    }
+
+    #[test]
+    fn automation_permission_displays_its_settings_name() {
+        assert_eq!(PermissionKind::Automation.to_string(), "Automation");
+    }
+
+    #[test]
+    fn check_permission_reports_automation_by_name() {
+        let statuses = [PermissionStatus {
+            kind: PermissionKind::Automation,
+            state: PermissionState::Denied,
+        }];
+        let err = check_permission(ToolKind::RunAppleScript, &statuses).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Automation permission is Denied, not granted"
         );
     }
 }
