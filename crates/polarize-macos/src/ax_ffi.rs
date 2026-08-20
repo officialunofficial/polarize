@@ -25,7 +25,7 @@
 //! see the crate-level docs and `docs/INVARIANTS.md`.
 
 use objc2_core_foundation::{
-    CFArray, CFBoolean, CFNumber, CFRetained, CFString, CFType, CGPoint, CGSize,
+    CFArray, CFBoolean, CFNumber, CFRange, CFRetained, CFString, CFType, CGPoint, CGSize,
 };
 use std::ffi::c_void;
 use std::ptr;
@@ -63,6 +63,7 @@ const AX_ERROR_API_DISABLED: AXError = -25211;
 pub type AXValueType = u32;
 pub const AX_VALUE_TYPE_CG_POINT: AXValueType = 1;
 pub const AX_VALUE_TYPE_CG_SIZE: AXValueType = 2;
+pub const AX_VALUE_TYPE_CF_RANGE: AXValueType = 4;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
@@ -165,6 +166,17 @@ impl AxElement {
     /// constructor failing.
     pub fn for_application(pid: i32) -> Self {
         Self(unsafe { AXUIElementCreateApplication(pid) })
+    }
+
+    /// The system-wide accessibility element.
+    ///
+    /// A hit test needs this one. `AXUIElementCopyElementAtPosition`
+    /// searches only inside the element it is called on, so an
+    /// application element reports nothing about another app's window
+    /// covering the point. Only the system-wide element hit-tests
+    /// across applications. See PINV-32.
+    pub fn system_wide() -> Self {
+        Self(unsafe { AXUIElementCreateSystemWide() })
     }
 
     /// Wraps an already-retained (+1) `AXUIElementRef`, e.g. one read out
@@ -392,6 +404,20 @@ impl AxElement {
         self.set_attribute(attribute, &boxed)
     }
 
+    /// Writes an `AXValue`-wrapped `CFRange`, e.g.
+    /// `AXSelectedTextRange`. `location` and `length` count UTF-16 code
+    /// units, which is what the AX API means by a text index.
+    pub fn set_range_attribute(
+        &self,
+        attribute: &str,
+        location: isize,
+        length: isize,
+    ) -> Result<(), String> {
+        let range = CFRange { location, length };
+        let boxed = ax_value(AX_VALUE_TYPE_CF_RANGE, &range)?;
+        self.set_attribute(attribute, &boxed)
+    }
+
     /// The deepest element at `x`/`y`, in the **global display**
     /// coordinate space — the space `crate::input` clicks into
     /// (PINV-4).
@@ -426,6 +452,30 @@ fn ax_error_name(err: AXError) -> &'static str {
         AX_ERROR_API_DISABLED => "kAXErrorAPIDisabled",
         _ => "kAXErrorUnknown",
     }
+}
+
+/// Walks `path` down an element's children, one index per step.
+///
+/// `polarize-core` resolves an index path against the tree `describe`
+/// returned; this follows the same indices down the live hierarchy. The
+/// two must agree — that is PINV-18, and it is why an out-of-range index
+/// is an error rather than a stop at the parent. The app changed its
+/// interface between the two walks, so acting on the parent would press
+/// something the caller never named.
+pub fn walk_path(root: AxElement, path: &[usize]) -> Result<AxElement, String> {
+    let mut current = root;
+    for (step, &index) in path.iter().enumerate() {
+        let children = current.children();
+        let count = children.len();
+        current = children.into_iter().nth(index).ok_or_else(|| {
+            format!(
+                "the element path {path:?} left the tree at step {step}: \
+                 index {index} of {count} children. The app changed its \
+                 interface. Run `describe` again."
+            )
+        })?;
+    }
+    Ok(current)
 }
 
 /// Boxes a geometric value in the `AXValue` every AX setter takes.

@@ -660,8 +660,15 @@ claim automated coverage they don't have.
   and it is why the conversion stays in `polarize-core`: a fake
   `WindowManager` and a fake `HitTester` prove the two paths agree
   without a real screen.
+- Always, second: the hit test asks the **system-wide** accessibility
+  element, never an application element.
+  `AXUIElementCopyElementAtPosition` searches only inside the element it
+  is called on. Asked on an app, it reports that app's own view under
+  the point even when another app's window covers it — which is exactly
+  the case this tool exists to detect.
 - If violated: a caller confirms the right element, taps, and hits
-  something else. Both tools report success.
+  something else. Both tools report success. Scope the hit test to one
+  app, and it approves every occluded click it was added to prevent.
 
 ### PINV-33: a hit test reports one element, never a subtree
 

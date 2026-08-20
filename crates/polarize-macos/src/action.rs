@@ -53,34 +53,10 @@ impl ActionPerformer for MacActionPerformer {
 
         let running = resolve_running_app(app)?;
         let pid = running.processIdentifier();
-        let element = walk_path(AxElement::for_application(pid), path)?;
+        let element = ax_ffi::walk_path(AxElement::for_application(pid), path)
+            .map_err(PolarizeError::Platform)?;
         element
             .perform_action(action)
             .map_err(PolarizeError::Platform)
     }
-}
-
-/// Walks `path` down from `root`, one `AXChildren` index at a time.
-///
-/// This mirrors `polarize_core::selector::node_at_path`, which walks the
-/// same indices over the in-memory tree. See PINV-18.
-///
-/// An index that no longer names a child is an error, not a silent stop.
-/// The tree changed between the two walks, so acting on the parent
-/// element instead would press something the caller never named.
-fn walk_path(root: AxElement, path: &[usize]) -> Result<AxElement, PolarizeError> {
-    let mut element = root;
-    for (depth, &index) in path.iter().enumerate() {
-        let children = element.children();
-        let count = children.len();
-        element = children.into_iter().nth(index).ok_or_else(|| {
-            PolarizeError::Platform(format!(
-                "element path {path:?} does not resolve: the element at depth {depth} \
-                 has {count} child element(s), so index {index} is out of range. \
-                 The app's interface probably changed after `describe` ran; \
-                 call `describe` again."
-            ))
-        })?;
-    }
-    Ok(element)
 }

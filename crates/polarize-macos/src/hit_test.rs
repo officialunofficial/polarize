@@ -58,8 +58,9 @@ impl HitTester for MacHitTester {
         }
         crate::session::ensure_session_usable()?;
 
+        // Resolved for the report only. The hit test itself addresses
+        // the system-wide element, not this app.
         let running = resolve_running_app(app)?;
-        let pid = running.processIdentifier();
         let resolved = ResolvedApp {
             name: running
                 .localizedName()
@@ -78,8 +79,13 @@ impl HitTester for MacHitTester {
             height: bounds.size.height,
         };
 
-        let application = AxElement::for_application(pid);
-        let node = application
+        // Hit-test from the system-wide element, never from the app's.
+        // `AXUIElementCopyElementAtPosition` searches only inside the
+        // element it is called on, so an application element reports
+        // its own view under the point even when another app's window
+        // covers it. That would make this tool useless as the very
+        // occlusion preflight it exists to be. See PINV-32.
+        let node = AxElement::system_wide()
             .element_at_position(point.x, point.y)
             .map(|element| leaf_node(&element, screen_size));
         Ok((resolved, node))
