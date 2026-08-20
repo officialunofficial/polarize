@@ -84,3 +84,22 @@ pub trait WindowManager {
         target: &crate::schema::ScreenshotTarget,
     ) -> Result<crate::coords::PixelRect, PolarizeError>;
 }
+
+/// Performs one accessibility action on one element. Implemented by
+/// `polarize-macos` over `AXUIElementPerformAction`.
+///
+/// The caller resolves `path` from a tree `AccessibilityInspector::describe`
+/// returned. An implementation walks the same child indices down a live
+/// `AXUIElement` hierarchy. See PINV-18 for why the two walks must agree,
+/// and `crate::action` for the race between them.
+pub trait ActionPerformer {
+    /// Performs `action`, e.g. `"AXPress"`, on the element at `path`.
+    /// `app` is `None` to address the frontmost app. An empty `path`
+    /// means the application element itself.
+    fn perform_action_at_path(
+        &self,
+        app: Option<&AppIdentifier>,
+        path: &[usize],
+        action: &str,
+    ) -> Result<(), PolarizeError>;
+}

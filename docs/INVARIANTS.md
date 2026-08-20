@@ -338,6 +338,46 @@ claim automated coverage they don't have.
   `AXIdentifier` as a real, empty identifier it can select on.
 
 
+### PINV-17: `perform_action` checks the element before it acts
+
+- Always: `action::perform_element_action` resolves the selector to one
+  node, then refuses in two cases. It refuses when the node's `actions`
+  list does not hold the chosen action. It refuses when the node's
+  `enabled` flag is `false`. A refusal returns an `ActionError` and
+  never calls `ActionPerformer::perform_action_at_path`.
+- Because: `AXUIElementPerformAction` is synchronous and has no timeout
+  of its own. An app can block the caller for the full AX timeout on an
+  action the element does not handle. A greyed-out control is the
+  common case: it still publishes `AXPress`, it still answers, and it
+  still does nothing. Both cases look like a hang, or like a silent
+  success, to an agent that cannot see the screen. The tree `describe`
+  already returned carries both facts, so the check costs no extra
+  native call.
+- If violated: a `perform_action` call blocks the whole stdio MCP
+  server until the AX timeout expires. Or it reports `performed: true`
+  for a control the app never let the user press.
+
+### PINV-18: one index path names one element in both walks
+
+- Always: the child indices `selector::find_one` resolves against a
+  `describe` tree are the same indices `action::walk_path` follows down
+  the live `AXUIElement` hierarchy in `polarize-macos`. Both walks read
+  the children of a node in the order the app publishes them, and both
+  count from `0`. `accessibility::build_node` builds each `AxNode`'s
+  `children` from `AxElement::children()` in that same order.
+- Because: an `ElementPath` is the only thing that crosses from
+  `polarize-core` to `polarize-macos`. `polarize` holds no live
+  `AXUIElement` between the two walks, so nothing else identifies the
+  element. If either side reordered, filtered, or skipped a child, the
+  path would still resolve, and it would resolve to the wrong element.
+  A wrong press is silent: the tool reports the element it *resolved*
+  in core, not the element the platform actually pressed. Note the
+  known limitation this invariant does not remove: the app can change
+  its interface between the two walks. `walk_path` reports an
+  out-of-range index as an error rather than acting on the parent.
+- If violated: `perform_action` presses a different element than the
+  one its own response names, and no error reports the difference.
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -462,3 +502,27 @@ claim automated coverage they don't have.
   Accessibility permission granted. The macOS code is type-checked
   against `aarch64-apple-darwin`, and CI compiles it on a real macOS
   runner, but neither runs it.
+- **PINV-17** — fully covered by automated `cargo test -p polarize-core`
+  (`action::tests`): an action the element does not publish, an element
+  that publishes no action at all, a disabled element, the exact text of
+  both refusal messages, and — in every refusal case — proof that the
+  recording fake `ActionPerformer` was never called. The happy path,
+  the default to `AXPress`, `index` selection, root-path selection, and
+  both error paths out of `describe` and the performer are covered as
+  well. The check is pure logic over an in-memory tree, so it needs no
+  macOS session at all.
+- **PINV-18** — split, and the untestable half is the important one.
+  The `polarize-core` half is covered by automated `cargo test -p
+  polarize-core`: `selector::tests` proves every found path reads back
+  to a matching node, and `action::tests` proves the recording fake
+  `ActionPerformer` receives the exact path `find_one` resolved, with
+  nothing rewriting it in between. The `polarize-macos` half is **not**
+  automated anywhere. Whether `action::walk_path`'s
+  `AxElement::children()` walk reaches the same real element that
+  `accessibility::build_node` reported at that path needs a live macOS
+  session with Accessibility permission granted, and a real app with a
+  nested interface. A human must confirm it: run `describe`, pick a
+  deeply nested control, run `perform_action` on it, and watch that
+  exact control respond. The macOS code is type-checked against
+  `aarch64-apple-darwin`, and CI compiles it on a real macOS runner,
+  but neither runs it.

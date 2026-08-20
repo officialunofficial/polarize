@@ -69,6 +69,9 @@ pub enum ToolKind {
     Describe,
     Tap,
     Keyboard,
+    /// `perform_action` — presses one element through its own AX
+    /// action. See `crate::action` (PINV-17).
+    PerformAction,
 }
 
 /// # PINV-2: every tool call is gated on exactly one permission
@@ -88,6 +91,7 @@ pub fn required_permission(tool: ToolKind) -> PermissionKind {
     match tool {
         ToolKind::Screenshot => PermissionKind::ScreenRecording,
         ToolKind::Describe | ToolKind::Tap | ToolKind::Keyboard => PermissionKind::Accessibility,
+        ToolKind::PerformAction => PermissionKind::Accessibility,
     }
 }
 
@@ -196,6 +200,14 @@ mod tests {
                 kind: PermissionKind::Accessibility,
                 state: PermissionState::NotDetermined
             }
+        );
+    }
+
+    #[test]
+    fn perform_action_requires_accessibility() {
+        assert_eq!(
+            required_permission(ToolKind::PerformAction),
+            PermissionKind::Accessibility
         );
     }
 

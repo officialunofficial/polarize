@@ -45,6 +45,17 @@ pub type AXUIElementRef = *const OpaqueAXUIElement;
 pub type AXError = i32;
 pub const AX_ERROR_SUCCESS: AXError = 0;
 
+/// The `AXError.h` codes [`ax_error_name`] can name. `polarize` reads
+/// none of these as a value; they exist to turn a bare number in an
+/// error message into a term a reader can search for.
+const AX_ERROR_FAILURE: AXError = -25200;
+const AX_ERROR_ILLEGAL_ARGUMENT: AXError = -25201;
+const AX_ERROR_INVALID_UI_ELEMENT: AXError = -25202;
+const AX_ERROR_CANNOT_COMPLETE: AXError = -25204;
+const AX_ERROR_ACTION_UNSUPPORTED: AXError = -25206;
+const AX_ERROR_NOT_IMPLEMENTED: AXError = -25208;
+const AX_ERROR_API_DISABLED: AXError = -25211;
+
 /// `typedef uint32_t AXValueType;` (`AXValue.h`). Only the two variants
 /// `polarize` reads (position/size) are declared.
 pub type AXValueType = u32;
@@ -77,6 +88,7 @@ unsafe extern "C" {
         attribute: *const CFString,
         settable: *mut bool,
     ) -> AXError;
+    fn AXUIElementPerformAction(element: AXUIElementRef, action: *const CFString) -> AXError;
     fn AXValueGetType(value: *const c_void) -> AXValueType;
     fn AXValueGetValue(value: *const c_void, the_type: AXValueType, out: *mut c_void) -> bool;
 }
@@ -264,6 +276,47 @@ impl AxElement {
             AXUIElementIsAttributeSettable(self.0, &*attr as *const CFString, &mut settable)
         };
         err == AX_ERROR_SUCCESS && settable
+    }
+
+    /// Performs one AX action, e.g. `"AXPress"`, on this element.
+    ///
+    /// Unlike [`Self::action_names`], a failure here is **not** degraded
+    /// to a default. A caller asked the app to do something, so a
+    /// non-success [`AXError`] is the whole result of the call, and it
+    /// travels back as a message (see [`ax_error_name`]).
+    ///
+    /// `AXUIElementPerformAction` is synchronous. It returns when the
+    /// app finishes the action, or when the AX timeout expires. The
+    /// caller checks the element first, so that a hang stays unlikely —
+    /// see PINV-17 in `docs/INVARIANTS.md`.
+    pub fn perform_action(&self, action: &str) -> Result<(), String> {
+        let name = CFString::from_str(action);
+        let err = unsafe { AXUIElementPerformAction(self.0, &*name as *const CFString) };
+        if err == AX_ERROR_SUCCESS {
+            return Ok(());
+        }
+        Err(format!(
+            "AXUIElementPerformAction({action:?}) failed: {} ({err})",
+            ax_error_name(err)
+        ))
+    }
+}
+
+/// The `AXError.h` name of one error code, or `"kAXErrorUnknown"`.
+///
+/// The raw number stays in the message next to this name, so an
+/// unmapped code is still readable. See [`AxElement::perform_action`].
+fn ax_error_name(err: AXError) -> &'static str {
+    match err {
+        AX_ERROR_SUCCESS => "kAXErrorSuccess",
+        AX_ERROR_FAILURE => "kAXErrorFailure",
+        AX_ERROR_ILLEGAL_ARGUMENT => "kAXErrorIllegalArgument",
+        AX_ERROR_INVALID_UI_ELEMENT => "kAXErrorInvalidUIElement",
+        AX_ERROR_CANNOT_COMPLETE => "kAXErrorCannotComplete",
+        AX_ERROR_ACTION_UNSUPPORTED => "kAXErrorActionUnsupported",
+        AX_ERROR_NOT_IMPLEMENTED => "kAXErrorNotImplemented",
+        AX_ERROR_API_DISABLED => "kAXErrorAPIDisabled",
+        _ => "kAXErrorUnknown",
     }
 }
 

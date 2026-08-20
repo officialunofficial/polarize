@@ -7,6 +7,7 @@
 //! dependencies and is fully covered by `cargo test`; see the "Testing
 //! harness" section of `docs/INVARIANTS.md`.
 
+pub mod action;
 pub mod ax;
 pub mod coords;
 pub mod error;
