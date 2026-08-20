@@ -8,7 +8,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/officialunofficial/polarize"
 homepage = "https://github.com/officialunofficial/polarize"
-rust-version = "1.97"
+rust-version = "1.96"
 # `dist` (see dist-workspace.toml) distributes the built `polarize`
 # binary through GitHub Releases, npm, and Homebrew — never through
 # crates.io. `publish = false` is Cargo's own hard block against
