@@ -53,3 +53,4 @@ pub mod permission_bootstrap;
 pub mod session;
 pub mod set_value;
 pub mod window;
+pub mod window_control;

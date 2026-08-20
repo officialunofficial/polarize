@@ -99,6 +99,12 @@ pub enum ToolKind {
     ClipboardRead,
     /// `clipboard_write` — see [`crate::clipboard`].
     ClipboardWrite,
+    /// `set_window_frame` — moves and resizes one window. See
+    /// `crate::window_control` (PINV-28, PINV-29).
+    SetWindowFrame,
+    /// `window_action` — minimizes, restores, focuses, closes, or
+    /// full-screens one window. See `crate::window_control`.
+    WindowAction,
 }
 
 /// # PINV-2: every tool call is gated on exactly one permission
@@ -134,6 +140,8 @@ pub fn required_permission(tool: ToolKind) -> PermissionKind {
         // permission. `polarize-macos` preflights neither clipboard
         // tool; see PINV-34.
         ToolKind::ClipboardRead | ToolKind::ClipboardWrite => PermissionKind::Clipboard,
+        // Both window tools read and write `AXUIElement` attributes.
+        ToolKind::SetWindowFrame | ToolKind::WindowAction => PermissionKind::Accessibility,
     }
 }
 
@@ -316,6 +324,8 @@ mod tests {
             PermissionKind::Accessibility
         );
     }
+
+    #[test]
     fn hit_test_requires_accessibility() {
         assert_eq!(
             required_permission(ToolKind::HitTest),
@@ -350,6 +360,17 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Clipboard permission is NotDetermined, not granted"
+        );
+    }
+    #[test]
+    fn both_window_tools_need_accessibility() {
+        assert_eq!(
+            required_permission(ToolKind::SetWindowFrame),
+            PermissionKind::Accessibility
+        );
+        assert_eq!(
+            required_permission(ToolKind::WindowAction),
+            PermissionKind::Accessibility
         );
     }
 }
