@@ -12,6 +12,9 @@ pub mod ax;
 pub mod clipboard;
 pub mod coords;
 pub mod error;
+/// OCR fallback for apps with a sparse accessibility tree. See
+/// PINV-37 and PINV-38.
+pub mod find_text;
 pub mod hit_test;
 pub mod orchestrate;
 pub mod permission;

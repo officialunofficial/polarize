@@ -52,5 +52,6 @@ pub mod observer;
 pub mod permission_bootstrap;
 pub mod session;
 pub mod set_value;
+pub mod vision;
 pub mod window;
 pub mod window_control;

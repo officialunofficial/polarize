@@ -17,3 +17,20 @@ objc2-app-kit = "0.3"
 objc2-core-foundation = "0.3"
 objc2-foundation = "0.3"
 objc2 = "0.6"
+# Vision, for the `find_text` OCR fallback (PINV-37, PINV-38). The
+# default feature set pulls in CoreML, AVFoundation, CoreMedia, and
+# CoreAudio, which `vision.rs` never calls. This is the smallest set
+# that builds it. Each name below is used: `VNRequestHandler` for
+# `VNImageRequestHandler`, `VNRecognizeTextRequest` for the request and
+# its recognition level, `VNObservation` for the observations and their
+# boxes, `VNRequest` for the array element type, `VNTypes` for
+# `VNConfidence`, and `objc2-core-foundation` for `CGRect`.
+objc2-vision = { version = "0.3", default-features = false, features = [
+    "std",
+    "VNObservation",
+    "VNRecognizeTextRequest",
+    "VNRequest",
+    "VNRequestHandler",
+    "VNTypes",
+    "objc2-core-foundation",
+] }
