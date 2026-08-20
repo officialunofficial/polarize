@@ -196,6 +196,7 @@ impl UiChangeWaiter for MacUiChangeWaiter {
                 state: PermissionState::NotDetermined,
             }));
         }
+        crate::session::ensure_session_usable()?;
 
         if budget.is_zero() {
             return Ok(false);
