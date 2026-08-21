@@ -58,6 +58,9 @@ pub mod permission_bootstrap;
 pub mod runloop;
 pub mod session;
 pub mod set_value;
+/// Runtime `dlopen`/`dlsym` resolution of `SkyLight.framework`'s private
+/// symbols. See PINV-46.
+pub mod skylight_ffi;
 pub mod vision;
 pub mod window;
 pub mod window_control;

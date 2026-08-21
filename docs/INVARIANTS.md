@@ -1210,6 +1210,30 @@ claim automated coverage they don't have.
   failure stayed open for 26+ seconds against an everyday file panel.
   It was not a contrived, pathological input.
 
+### PINV-46: a SkyLight symbol miss degrades to `None`, never a crash
+
+- Always: `skylight_ffi::symbols` resolves `SLEventPostToPid`,
+  `SLPSPostEventRecordTo`, `_SLPSSetFrontProcessWithOptions`, and
+  `_SLPSGetFrontProcess` with `dlopen`/`dlsym` at runtime, against
+  `/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight`. A
+  `dlopen` failure, or any one `dlsym` miss, leaves that symbol's field
+  `None`. Nothing in the resolution path panics or aborts.
+- Because: these four symbols are private and undocumented — no public
+  header ships them, and this crate's own knowledge of their names and
+  shapes comes from cross-referencing `yabai`
+  (github.com/koekeishiya/yabai), not from Apple. Apple can rename or
+  drop any of them in a future release without notice. `ax_ffi.rs`
+  links its (public, stable) symbols statically, where a missing one
+  breaks the build — the right outcome there. A private symbol needs
+  the opposite outcome: a caller that keeps working, on the public-API
+  fallback, on whichever macOS version stops shipping one of these
+  names.
+- If violated: a dropped or renamed symbol on some future macOS release
+  would either fail this binary to load (a static link) or crash a
+  `tap`/`keyboard` call outright (an unchecked call through a null
+  function pointer), instead of falling back to the global `CGEvent`
+  post and real activation this crate already had before this work.
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -2006,3 +2030,20 @@ claim automated coverage they don't have.
   Both the bound (it stopped at exactly the configured number) and the
   behavior (bounded time instead of an open-ended stall) are confirmed
   as designed.
+
+- **PINV-46** — partly automated, partly not. The graceful-degradation
+  half — a name `dlsym` cannot find yields `None`, never a panic — is
+  covered by `cargo test -p polarize-macos`
+  (`skylight_ffi::tests::unresolvable_symbol_name_yields_none`), and
+  runs for real in CI: `dlopen`ing `SkyLight.framework` needs no
+  display and no TCC grant, unlike everything else this crate touches,
+  so `skylight_ffi::tests::dlopen_resolves_the_real_framework` and
+  `symbols_is_idempotent_and_does_not_panic` are genuine CI coverage,
+  not a claim deferred to a real session. What is **not** automated,
+  and not yet live-verified in this pass: which of the four symbols
+  actually resolve to a working implementation — as opposed to merely
+  resolving to *some* code address — on a real, displayed macOS
+  session, and whether `SLEventPostToPid`'s guessed signature
+  (mirroring the public `CGEventPostToPid`'s shape) is correct. A human
+  on a real macOS session needs to confirm both, per this repo's policy
+  that native-API behavior has no CI coverage.
