@@ -1690,19 +1690,34 @@ necessary.
 **Follow-up: an App Group entitlement for the future embedding case.**
 `apps/polarize/polarize.entitlements` now also carries
 `com.apple.security.application-groups` (`N8R89M8725.fun.uno.polarize`),
-matching the same entitlement added on the desktop host app's own side.
-Neither app's code reads anything from this group yet — it exists so a
-sandboxed host app and an embedded, unsandboxed `Polarize.app` can
-later share state (for example, a Keychain or file-based handoff)
-under one Team ID instead of each depending on the other's sandbox
-container. This assumes `polarize`'s own Developer ID Application
-certificate signs under Team `N8R89M8725` — the desktop host app's
-known team, read from its own Xcode project. That assumption is
-unverified here: an App Group identifier is only usable once it is
-registered in the Apple Developer portal under the signing team, with
-both App IDs' App Groups capability pointed at it. Confirm the team
-match, then register the group, before relying on this entitlement for
-anything.
+matching the same entitlement added on the desktop host app's own
+side. Neither app's code reads anything from this group yet — it
+exists so a sandboxed host app and an embedded, unsandboxed
+`Polarize.app` can later share state (for example, a Keychain or
+file-based handoff) under one Team ID instead of each depending on the
+other's sandbox container. Team `N8R89M8725` is confirmed correct:
+Xcode's own Signing & Capabilities pane, inspected live, shows the
+desktop host app's Team as "Official Unofficial, Inc." against that
+same ID, with `N8R89M8725.fun.uno.polarize` already listed under its
+App Groups capability. With "Automatically manage signing" on, Xcode
+registers that group in the Apple Developer portal itself on its next
+successful signing resolution — no manual portal step on that side.
+
+**Still unverified: whether the entitlement does anything on
+`polarize`'s own side.** Xcode's managed signing validates entitlements
+against a real, Apple-issued provisioning profile embedded in the
+bundle. `just build` signs `polarize` a different way entirely: a bare
+`codesign --sign polarize-dev --entitlements ...` call, a local
+self-signed certificate, no provisioning profile at all. Whether
+`com.apple.security.application-groups` resolves to a real, usable
+container path (via
+`NSFileManager.containerURL(forSecurityApplicationGroupIdentifier:)`,
+or its Rust/`objc` equivalent) for a binary signed that way — profile-
+less, and not sandboxed itself — is unresolved. A live check, once
+`polarize` is signed with a real Developer ID Application certificate
+under Team `N8R89M8725` rather than `polarize-dev`, would confirm this
+one way or the other. Treat the entitlement as declared but unproven
+until that check runs.
 
 ## Enforcement checklist
 
