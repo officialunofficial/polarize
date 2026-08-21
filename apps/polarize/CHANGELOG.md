@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/officialunofficial/polarize/releases/tag/v0.2.0) - 2026-08-21
+
+### Bug Fixes
+
+- key the app's actual focused window during raise-free activation,
+  not always its main window
+- embed a real bundle identity so Automation TCC can grant `polarize`
+  its own permission
+- resolve the raise-free activation window id from AX, not
+  ScreenCaptureKit, closing an undisclosed Screen Recording dependency
+- close review findings across the Tier 1, Tier 2, and Tier 3 tools,
+  and the ones a live macOS session's own testing pass found
+- hit-test system-wide, and share the AX write primitives
+- give release-plz a git-only path for the two never-published crates
+
+### Features
+
+- expose all 25 tools: `screenshot`, `describe`, `tap`, `keyboard`,
+  `perform_action`, `await_ui_element`, `await_screen_idle`,
+  `run_applescript`, `script_dictionary`, `set_value`,
+  `hit_test_at_point`, `set_window_frame`, `window_action`,
+  `list_windows`, `app_launch`, `app_quit`, `list_displays`,
+  `find_text`, `clipboard_read`/`clipboard_write`,
+  `describe_notifications`, `dismiss_notification`, `frontmost_app`,
+  `await_workspace_event`, and `record_flow`
+- add tracing, structured per-tool-call logging to stderr
+- resolve `SkyLight.framework`'s private symbols at runtime, then
+  replace the private `SLEventPostToPid` with the public
+  `CGEventPostToPid`
+- give `tap` and `keyboard` a pid-scoped post path, reporting which
+  native path each call actually took
+- give `keyboard` a raise-free activation path that keys a target
+  app's window without raising it or switching Space
+- add a `request_automation_permission` tool, and disclaim the
+  Automation bootstrap send's TCC responsibility
+
+### Performance
+
+- batch a node's AX attribute reads into one call, in both `describe`
+  and the hit test
+
+### Documentation
+
+- record live-verified findings and corrections across
+  `docs/INVARIANTS.md`'s background-input and Automation-permission
+  invariants
+
 ## [0.1.0](https://github.com/officialunofficial/polarize/releases/tag/v0.1.0) - 2026-08-20
 
 ### Bug Fixes
