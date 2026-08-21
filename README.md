@@ -155,10 +155,7 @@ See PINV-10 in [`docs/INVARIANTS.md`](docs/INVARIANTS.md).
 
 ## Installing
 
-`polarize` has no GitHub release yet. The commands in this section do
-not work today. They document the intended install path instead. This
-section stays accurate the moment the first release ships. Every
-install path is built and published by
+Every install path below is built and published by
 [`dist`](https://opensource.axo.dev/cargo-dist/) — see
 [`docs/RELEASING.md`](docs/RELEASING.md) for how.
 
@@ -206,11 +203,9 @@ See [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md) for exactly which
 permission each tool needs, and when `polarize` does and doesn't
 prompt.
 
-Then register `polarize` with your MCP client. For Claude Code:
-
-```sh
-claude mcp add polarize --scope project -- "$(command -v polarize)"
-```
+Then register `polarize` with your MCP client — see "Using it with an
+MCP client" below for the generic stdio config shape most clients
+expect.
 
 ## Workspace layout
 
@@ -310,19 +305,12 @@ it at the built binary:
 }
 ```
 
-Adjust the config key/shape to match your client (Claude Code, Claude
-Desktop, or any other MCP-compatible tool) — the command/args pair
-above is the generic stdio shape most clients expect.
-
-For Claude Code specifically, register it with:
-
-```sh
-claude mcp add polarize --scope project -- "$(pwd)/target/debug/polarize"
-```
-
-This writes `.mcp.json`. That file is `.gitignore`d: the command it
-writes is an absolute, machine-specific path. Each clone regenerates
-its own by running the command above.
+Adjust the config key/shape to match your client — the command/args
+pair above is the generic stdio shape most MCP-compatible clients
+expect. Most clients write their own project- or machine-scoped config
+file for this (check your client's docs for its exact location and
+CLI, if it has one); treat that file as machine-specific and keep it
+out of version control, since it embeds an absolute local path.
 
 ### Keeping TCC permission grants across rebuilds
 
@@ -388,12 +376,12 @@ ScreenCapture` — this resets Screen Recording for *every* app on the
 Mac, not just `polarize`, so prefer removing the single stuck entry
 when you can.
 
-Stdio matches how a local MCP client, such as Claude Code, actually
-spawns `polarize`: one client, one subprocess, for the process's whole
-lifetime. `rmcp` also supports a Streamable HTTP transport, for a real
-shared server process multiple clients or machines could reach. Nothing
-in this repository builds or wires up that transport yet — it stays a
-possible future addition, not a v1 requirement.
+Stdio matches how a local MCP client typically spawns `polarize`: one
+client, one subprocess, for the process's whole lifetime. `rmcp` also
+supports a Streamable HTTP transport, for a real shared server process
+multiple clients or machines could reach. Nothing in this repository
+builds or wires up that transport yet — it stays a possible future
+addition, not a v1 requirement.
 
 ## Design notes
 
