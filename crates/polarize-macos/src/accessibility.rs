@@ -11,11 +11,11 @@
 
 use objc2_core_graphics::{CGDisplayBounds, CGMainDisplayID};
 use polarize_core::ax::AxNode;
-use polarize_core::coords::{PixelPoint, PixelSize};
+use polarize_core::coords::PixelSize;
 use polarize_core::error::PolarizeError;
 use polarize_core::permission::{PermissionError, PermissionKind, PermissionState};
 use polarize_core::schema::AppIdentifier;
-use polarize_core::traits::AccessibilityInspector;
+use polarize_core::traits::{AccessibilityInspector, ResolvedApp};
 
 use crate::ax_ffi::{self, AxElement};
 use crate::geometry::safe_normalize_frame;
@@ -31,12 +31,33 @@ use crate::window::resolve_running_app;
 /// left as an unexplained magic number.
 const MAX_AX_DEPTH: usize = 64;
 
+/// Hard cap on the total number of nodes one `describe` call may
+/// visit, across the whole tree — not per level, and not per depth.
+///
+/// [`MAX_AX_DEPTH`] alone does not bound a *wide* tree. A file list a
+/// thousand rows long is only two or three levels deep. Confirmed
+/// live: `describe` against TextEdit's own "Open" file panel was
+/// still walking after 26 seconds. That panel is an ordinary
+/// `NSOpenPanel`, not a pathological case. It had no node-count bound
+/// at all. It made real
+/// `AXUIElementCopyAttributeValue`/`AXUIElementCopyActionNames`/
+/// `AXUIElementCopyMultipleAttributeValues` calls the whole time; see
+/// PINV-45. 4,000 nodes covers even a busy app's whole UI — a few
+/// hundred elements is typical — with headroom. It still turns a file
+/// browser, a long outline, or a big spreadsheet into a bounded
+/// truncation. The alternative is an effectively unbounded wall-clock
+/// cost.
+const MAX_AX_NODES: usize = 4_000;
+
 /// `AccessibilityInspector` implementation over `AXUIElement`.
 #[derive(Debug, Default)]
 pub struct MacAccessibilityInspector;
 
 impl AccessibilityInspector for MacAccessibilityInspector {
-    fn describe(&self, app: Option<&AppIdentifier>) -> Result<(String, AxNode), PolarizeError> {
+    fn describe(
+        &self,
+        app: Option<&AppIdentifier>,
+    ) -> Result<(ResolvedApp, AxNode), PolarizeError> {
         // `AXIsProcessTrusted` collapses "never asked" and "explicitly
         // denied" into the same `false` — `NotDetermined` is the more
         // conservative of the two to report when we cannot distinguish
@@ -49,13 +70,17 @@ impl AccessibilityInspector for MacAccessibilityInspector {
                 state: PermissionState::NotDetermined,
             }));
         }
+        crate::session::ensure_session_usable()?;
 
         let running = resolve_running_app(app)?;
         let pid = running.processIdentifier();
-        let app_name = running
-            .localizedName()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
+        let resolved = ResolvedApp {
+            name: running
+                .localizedName()
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+            bundle_id: running.bundleIdentifier().map(|s| s.to_string()),
+        };
 
         let element = AxElement::for_application(pid);
         // See `window.rs`'s "known limitation" doc comment: normalizing
@@ -68,60 +93,55 @@ impl AccessibilityInspector for MacAccessibilityInspector {
             height: bounds.size.height,
         };
 
-        let root = build_node(&element, screen_size, 0);
-        Ok((app_name, root))
+        let mut budget = MAX_AX_NODES;
+        let root = build_node(&element, screen_size, 0, &mut budget);
+        Ok((resolved, root))
     }
 }
 
-/// See PINV-12 (a single unreadable attribute degrades to a default,
-/// never aborts the walk) and PINV-13 (recursion stops at
-/// [`MAX_AX_DEPTH`], truncating rather than erroring) in
-/// `docs/INVARIANTS.md`.
-fn build_node(element: &AxElement, screen_size: PixelSize, depth: usize) -> AxNode {
-    let role = element
-        .string_attribute("AXRole")
-        .unwrap_or_else(|| "AXUnknown".to_string());
-    let label = ["AXTitle", "AXDescription", "AXValue"]
-        .into_iter()
-        .find_map(|attr| {
-            element
-                .string_attribute(attr)
-                .filter(|value| !value.is_empty())
-        });
+/// Builds one node, then its subtree.
+///
+/// The eleven value attributes a node carries are read in one batch
+/// call (PINV-41), with a one-at-a-time fallback. Three round trips
+/// stay: the settable-`AXFocused` check, the action list, and
+/// `AXChildren`. See also PINV-12 (a single unreadable attribute
+/// degrades to a default, never aborts the walk), PINV-13 (recursion
+/// stops at [`MAX_AX_DEPTH`], truncating rather than erroring), and
+/// PINV-45 (the whole walk stops at [`MAX_AX_NODES`] total, truncating
+/// a wide tree the same way) in `docs/INVARIANTS.md`.
+///
+/// `budget` is shared across the whole call. It is not reset per
+/// level or per sibling. It decrements once for every node this
+/// function visits, anywhere in the tree. So a thousand siblings at
+/// one level exhausts it exactly as a thousand-deep chain would.
+fn build_node(
+    element: &AxElement,
+    screen_size: PixelSize,
+    depth: usize,
+    budget: &mut usize,
+) -> AxNode {
+    let attributes = element.node_attributes();
+    let frame = safe_normalize_frame(attributes.position, attributes.size, screen_size);
 
-    let position = element.point_attribute("AXPosition").unwrap_or_default();
-    let size = element.size_attribute("AXSize").unwrap_or_default();
-    let frame = safe_normalize_frame(
-        PixelPoint {
-            x: position.x,
-            y: position.y,
-        },
-        PixelSize {
-            width: size.width,
-            height: size.height,
-        },
-        screen_size,
-    );
-
+    // Neither of these two reads has a batched form.
+    // `AXUIElementIsAttributeSettable` and
+    // `AXUIElementCopyActionNames` are their own calls.
     let focusable = element.is_attribute_settable("AXFocused");
-    let interactive = element.has_actions();
+    let actions = element.action_names();
 
-    let children = if depth >= MAX_AX_DEPTH {
+    let children = if depth >= MAX_AX_DEPTH || *budget == 0 {
         Vec::new()
     } else {
-        element
-            .children()
-            .iter()
-            .map(|child| build_node(child, screen_size, depth + 1))
-            .collect()
+        let mut nodes = Vec::new();
+        for child in element.children().iter() {
+            if *budget == 0 {
+                break;
+            }
+            *budget -= 1;
+            nodes.push(build_node(child, screen_size, depth + 1, budget));
+        }
+        nodes
     };
 
-    AxNode {
-        role,
-        label,
-        frame,
-        focusable,
-        interactive,
-        children,
-    }
+    attributes.into_node(frame, focusable, actions, children)
 }

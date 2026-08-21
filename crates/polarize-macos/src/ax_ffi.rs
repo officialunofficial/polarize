@@ -24,7 +24,11 @@
 //! Nothing here has been exercised against a real accessibility session —
 //! see the crate-level docs and `docs/INVARIANTS.md`.
 
-use objc2_core_foundation::{CFArray, CFBoolean, CFRetained, CFString, CFType, CGPoint, CGSize};
+use objc2_core_foundation::{
+    CFArray, CFBoolean, CFNumber, CFRange, CFRetained, CFString, CFType, CGPoint, CGSize,
+};
+use polarize_core::ax_batch::{AxAttributeSlot, AxAttributes, BATCHED_ATTRIBUTES};
+use polarize_core::coords::{PixelPoint, PixelSize};
 use std::ffi::c_void;
 use std::ptr;
 use std::ptr::NonNull;
@@ -45,11 +49,35 @@ pub type AXUIElementRef = *const OpaqueAXUIElement;
 pub type AXError = i32;
 pub const AX_ERROR_SUCCESS: AXError = 0;
 
+/// The `AXError.h` codes [`ax_error_name`] can name. `polarize` reads
+/// none of these as a value; they exist to turn a bare number in an
+/// error message into a term a reader can search for.
+const AX_ERROR_FAILURE: AXError = -25200;
+const AX_ERROR_ILLEGAL_ARGUMENT: AXError = -25201;
+const AX_ERROR_INVALID_UI_ELEMENT: AXError = -25202;
+const AX_ERROR_CANNOT_COMPLETE: AXError = -25204;
+const AX_ERROR_ACTION_UNSUPPORTED: AXError = -25206;
+const AX_ERROR_NOT_IMPLEMENTED: AXError = -25208;
+const AX_ERROR_API_DISABLED: AXError = -25211;
+
 /// `typedef uint32_t AXValueType;` (`AXValue.h`). Only the two variants
 /// `polarize` reads (position/size) are declared.
 pub type AXValueType = u32;
 pub const AX_VALUE_TYPE_CG_POINT: AXValueType = 1;
 pub const AX_VALUE_TYPE_CG_SIZE: AXValueType = 2;
+pub const AX_VALUE_TYPE_CF_RANGE: AXValueType = 4;
+/// `kAXValueAXErrorType`. This one is never a value `polarize` wants.
+/// [`AXUIElementCopyMultipleAttributeValues`] writes it into every slot
+/// it could not read — see [`AxElement::batch_attributes`] and PINV-41.
+pub const AX_VALUE_TYPE_AX_ERROR: AXValueType = 5;
+
+/// `typedef UInt32 AXCopyMultipleAttributeOptions;`
+/// (`AXUIElement.h`). `polarize` passes no option, which is what keeps
+/// the result array aligned with the names it asked for. The one flag,
+/// `kAXCopyMultipleAttributeOptionStopOnError`, would instead truncate
+/// the result at the first attribute that failed.
+pub type AXCopyMultipleAttributeOptions = u32;
+pub const AX_COPY_MULTIPLE_ATTRIBUTE_OPTIONS_NONE: AXCopyMultipleAttributeOptions = 0;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
@@ -71,19 +99,58 @@ unsafe extern "C" {
         attribute: *const CFString,
         value: *mut *const CFType,
     ) -> AXError;
+    /// Reads many attributes of one element in one call.
+    ///
+    /// With no option set, `values` comes back with exactly one slot
+    /// per name in `attributes`, in the same order. A slot the call
+    /// could not read holds an `AXValue` of type
+    /// `kAXValueAXErrorType`, not a gap and not a null. See
+    /// [`AxElement::batch_attributes`] and PINV-41.
+    fn AXUIElementCopyMultipleAttributeValues(
+        element: AXUIElementRef,
+        attributes: *const CFArray,
+        options: AXCopyMultipleAttributeOptions,
+        values: *mut *const CFArray,
+    ) -> AXError;
     fn AXUIElementCopyActionNames(element: AXUIElementRef, names: *mut *const CFArray) -> AXError;
     fn AXUIElementIsAttributeSettable(
         element: AXUIElementRef,
         attribute: *const CFString,
         settable: *mut bool,
     ) -> AXError;
+    fn AXUIElementPerformAction(element: AXUIElementRef, action: *const CFString) -> AXError;
+    fn AXUIElementSetAttributeValue(
+        element: AXUIElementRef,
+        attribute: *const CFString,
+        value: *const CFType,
+    ) -> AXError;
+    /// The element at a point in the **global display** coordinate
+    /// space, the same space `crate::input` posts clicks into (PINV-4).
+    /// `application` must be an application element, or the system-wide
+    /// element.
+    fn AXUIElementCopyElementAtPosition(
+        application: AXUIElementRef,
+        x: f32,
+        y: f32,
+        element: *mut AXUIElementRef,
+    ) -> AXError;
+    /// The process id that owns `element`. A hit test needs this: the
+    /// system-wide element can return an element of any app.
+    fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
     fn AXValueGetType(value: *const c_void) -> AXValueType;
+    /// The `CFTypeID` of `AXValueRef`. `AXValueGetType` is defined only
+    /// for that type, so this is what makes calling it sound.
+    fn AXValueGetTypeID() -> usize;
     fn AXValueGetValue(value: *const c_void, the_type: AXValueType, out: *mut c_void) -> bool;
+    /// Wraps a `CGPoint`/`CGSize` in the `AXValue` box every geometric
+    /// AX attribute takes. Returns `NULL` on failure.
+    fn AXValueCreate(the_type: AXValueType, value_ptr: *const c_void) -> *const CFType;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn CFRetain(cf: *const c_void) -> *const c_void;
+    fn CFGetTypeID(cf: *const c_void) -> usize;
     fn CFRelease(cf: *const c_void);
 }
 
@@ -135,6 +202,17 @@ impl AxElement {
         Self(unsafe { AXUIElementCreateApplication(pid) })
     }
 
+    /// The system-wide accessibility element.
+    ///
+    /// A hit test needs this one. `AXUIElementCopyElementAtPosition`
+    /// searches only inside the element it is called on, so an
+    /// application element reports nothing about another app's window
+    /// covering the point. Only the system-wide element hit-tests
+    /// across applications. See PINV-32.
+    pub fn system_wide() -> Self {
+        Self(unsafe { AXUIElementCreateSystemWide() })
+    }
+
     /// Wraps an already-retained (+1) `AXUIElementRef`, e.g. one read out
     /// of a `kAXChildrenAttribute` array — see [`Self::children`].
     ///
@@ -162,8 +240,7 @@ impl AxElement {
         value.downcast_ref::<CFString>().map(ToString::to_string)
     }
 
-    /// Reads a `CFBoolean`-typed attribute (e.g. `AXFocused`).
-    #[allow(dead_code)] // read via is_attribute_settable for AXFocused today; kept for direct boolean attributes
+    /// Reads a `CFBoolean`-typed attribute (e.g. `AXEnabled`).
     pub fn bool_attribute(&self, attribute: &str) -> Option<bool> {
         let value = self.copy_attribute(attribute)?;
         value.downcast_ref::<CFBoolean>().map(CFBoolean::value)
@@ -214,21 +291,136 @@ impl AxElement {
             .collect()
     }
 
-    /// Whether the element has at least one AX action it can perform (a
-    /// button-like "this can be clicked" signal). Errors are treated as
-    /// "no actions" rather than propagated — a best-effort classification,
-    /// not a hard fact the caller should branch safety-critical logic on.
-    pub fn has_actions(&self) -> bool {
+    /// Reads every attribute an [`AxNode`](polarize_core::ax::AxNode)
+    /// carries, in one call where that works.
+    ///
+    /// This is the read path a tree walk repeats once per node, so its
+    /// cost is the cost of `describe`. One batch call replaces the nine
+    /// to eleven single reads the fallback below performs.
+    ///
+    /// The fallback runs when the batch call fails outright, and when
+    /// its result array does not line up with the names it was asked
+    /// for. A degraded but correct read beats a fast wrong one, so a
+    /// batch this code cannot trust is never guessed at. See PINV-41.
+    pub fn node_attributes(&self) -> AxAttributes {
+        self.batch_attributes(&BATCHED_ATTRIBUTES)
+            .and_then(|slots| AxAttributes::from_batch(&slots))
+            .unwrap_or_else(|| self.node_attributes_one_at_a_time())
+    }
+
+    /// Reads `attributes` in one `AXUIElementCopyMultipleAttributeValues`
+    /// call, as one slot per name.
+    ///
+    /// Returns `None` when the call itself fails. The caller then reads
+    /// the attributes one at a time (PINV-41).
+    ///
+    /// ## The error placeholder
+    ///
+    /// No option is passed, so the call reads every name it can and
+    /// reports the rest in place. A slot it could not read holds an
+    /// `AXValue` of type `kAXValueAXErrorType`. That placeholder is a
+    /// real Core Foundation object of a real type. Only its
+    /// `AXValueType` separates it from a value, so
+    /// [`slot_from_value`] checks that type on every slot.
+    pub fn batch_attributes(&self, attributes: &[&str]) -> Option<Vec<AxAttributeSlot>> {
+        let names: Vec<CFRetained<CFString>> = attributes
+            .iter()
+            .map(|name| CFString::from_str(name))
+            .collect();
+        let names = CFArray::from_retained_objects(&names);
+        let names: &CFArray = AsRef::as_ref(&*names);
+
+        let mut values: *const CFArray = ptr::null();
+        let err = unsafe {
+            AXUIElementCopyMultipleAttributeValues(
+                self.0,
+                ptr::from_ref(names),
+                AX_COPY_MULTIPLE_ATTRIBUTE_OPTIONS_NONE,
+                &mut values,
+            )
+        };
+        if err != AX_ERROR_SUCCESS {
+            return None;
+        }
+        let values = NonNull::new(values.cast_mut())?;
+        let values: CFRetained<CFArray> = unsafe { CFRetained::from_raw(values) };
+        Some(
+            (0..values.count())
+                .map(|index| slot_from_value(unsafe { values.value_at_index(index) }))
+                .collect(),
+        )
+    }
+
+    /// Reads the same attributes with one call each.
+    ///
+    /// This is the fallback [`Self::node_attributes`] uses when the
+    /// batch call fails. It reads exactly the attributes
+    /// [`BATCHED_ATTRIBUTES`] names, and it degrades each one to the
+    /// same default (PINV-12, PINV-16), so both paths build the same
+    /// node.
+    fn node_attributes_one_at_a_time(&self) -> AxAttributes {
+        let defaults = AxAttributes::default();
+        let non_empty = |attribute: &str| {
+            self.string_attribute(attribute)
+                .filter(|value| !value.is_empty())
+        };
+        let role = self.string_attribute("AXRole").unwrap_or(defaults.role);
+        let label = ["AXTitle", "AXDescription", "AXValue"]
+            .into_iter()
+            .find_map(non_empty);
+        let position = self.point_attribute("AXPosition").unwrap_or_default();
+        let size = self.size_attribute("AXSize").unwrap_or_default();
+        let enabled = self.bool_attribute("AXEnabled").unwrap_or(defaults.enabled);
+        AxAttributes {
+            role,
+            label,
+            position: PixelPoint {
+                x: position.x,
+                y: position.y,
+            },
+            size: PixelSize {
+                width: size.width,
+                height: size.height,
+            },
+            enabled,
+            subrole: non_empty("AXSubrole"),
+            role_description: non_empty("AXRoleDescription"),
+            identifier: non_empty("AXIdentifier"),
+            help: non_empty("AXHelp"),
+        }
+    }
+
+    /// The element's AX action names, e.g. `["AXPress", "AXShowMenu"]`.
+    ///
+    /// An error is reported as an empty list rather than propagated. A
+    /// caller reads this as "no action available", which is the same
+    /// conclusion it draws from a real empty list, and neither one should
+    /// abort a whole tree walk (PINV-12).
+    pub fn action_names(&self) -> Vec<String> {
         let mut names: *const CFArray = ptr::null();
         let err = unsafe { AXUIElementCopyActionNames(self.0, &mut names) };
         if err != AX_ERROR_SUCCESS {
-            return false;
+            return Vec::new();
         }
         let Some(names) = NonNull::new(names.cast_mut()) else {
-            return false;
+            return Vec::new();
         };
         let names: CFRetained<CFArray> = unsafe { CFRetained::from_raw(names) };
-        names.count() > 0
+        (0..names.count())
+            .filter_map(|i| {
+                let borrowed = unsafe { names.value_at_index(i) };
+                if borrowed.is_null() {
+                    return None;
+                }
+                // `value_at_index` hands back a borrowed (+0) reference;
+                // retain it so `CFRetained::from_raw` owns a real +1, the
+                // same handoff `children` performs.
+                let retained = unsafe { CFRetain(borrowed) };
+                let value: CFRetained<CFType> =
+                    unsafe { CFRetained::from_raw(NonNull::new(retained.cast_mut().cast())?) };
+                value.downcast_ref::<CFString>().map(ToString::to_string)
+            })
+            .collect()
     }
 
     /// Whether `attribute` is settable on this element — used as a
@@ -242,6 +434,286 @@ impl AxElement {
         };
         err == AX_ERROR_SUCCESS && settable
     }
+
+    /// Performs one AX action, e.g. `"AXPress"`, on this element.
+    ///
+    /// Unlike [`Self::action_names`], a failure here is **not** degraded
+    /// to a default. A caller asked the app to do something, so a
+    /// non-success [`AXError`] is the whole result of the call, and it
+    /// travels back as a message (see [`ax_error_name`]).
+    ///
+    /// `AXUIElementPerformAction` is synchronous. It returns when the
+    /// app finishes the action, or when the AX timeout expires. The
+    /// caller checks the element first, so that a hang stays unlikely —
+    /// see PINV-17 in `docs/INVARIANTS.md`.
+    pub fn perform_action(&self, action: &str) -> Result<(), String> {
+        let name = CFString::from_str(action);
+        let err = unsafe { AXUIElementPerformAction(self.0, &*name as *const CFString) };
+        if err == AX_ERROR_SUCCESS {
+            return Ok(());
+        }
+        Err(format!(
+            "AXUIElementPerformAction({action:?}) failed: {} ({err})",
+            ax_error_name(err)
+        ))
+    }
+
+    /// Reads an `AXUIElement`-typed attribute, e.g. `AXCloseButton`,
+    /// `AXFocusedUIElement`, or `AXParent`.
+    ///
+    /// The value arrives retained (+1), and the returned [`AxElement`]
+    /// takes ownership of that reference rather than retaining again.
+    pub fn element_attribute(&self, attribute: &str) -> Option<AxElement> {
+        let value = self.copy_attribute(attribute)?;
+        let raw = CFRetained::into_raw(value).as_ptr().cast_const();
+        Some(unsafe { AxElement::from_retained(raw.cast()) })
+    }
+
+    /// Reads an `AXUIElement`-array attribute, e.g. `AXWindows`.
+    pub fn element_array_attribute(&self, attribute: &str) -> Vec<AxElement> {
+        let Some(value) = self.copy_attribute(attribute) else {
+            return Vec::new();
+        };
+        let Some(array) = value.downcast_ref::<CFArray>() else {
+            return Vec::new();
+        };
+        (0..array.count())
+            .filter_map(|index| {
+                let borrowed = unsafe { array.value_at_index(index) };
+                if borrowed.is_null() {
+                    return None;
+                }
+                let retained = unsafe { CFRetain(borrowed) };
+                Some(unsafe { AxElement::from_retained(retained.cast()) })
+            })
+            .collect()
+    }
+
+    /// Writes one attribute from an already-built Core Foundation value.
+    ///
+    /// An error carries the `AXError` name as well as its number,
+    /// because the number alone is not searchable. The typed setters
+    /// below are what callers normally use.
+    pub fn set_attribute(&self, attribute: &str, value: &CFType) -> Result<(), String> {
+        let attr = CFString::from_str(attribute);
+        let err = unsafe {
+            AXUIElementSetAttributeValue(self.0, &*attr as *const CFString, value as *const CFType)
+        };
+        if err == AX_ERROR_SUCCESS {
+            return Ok(());
+        }
+        Err(format!(
+            "AXUIElementSetAttributeValue({attribute:?}) failed: {} ({err})",
+            ax_error_name(err)
+        ))
+    }
+
+    /// Writes a `CFString`-typed attribute, e.g. `AXValue` on a text
+    /// field.
+    pub fn set_string_attribute(&self, attribute: &str, value: &str) -> Result<(), String> {
+        let value = CFString::from_str(value);
+        self.set_attribute(attribute, &value)
+    }
+
+    /// Writes a `CFBoolean`-typed attribute, e.g. `AXMinimized`.
+    pub fn set_bool_attribute(&self, attribute: &str, value: bool) -> Result<(), String> {
+        self.set_attribute(attribute, CFBoolean::new(value).as_ref())
+    }
+
+    /// Writes a `CFNumber`-typed attribute, e.g. `AXValue` on a slider.
+    pub fn set_number_attribute(&self, attribute: &str, value: f64) -> Result<(), String> {
+        self.set_attribute(attribute, &CFNumber::new_f64(value))
+    }
+
+    /// Writes an `AXValue`-wrapped `CGPoint`, e.g. `AXPosition`.
+    pub fn set_point_attribute(&self, attribute: &str, value: CGPoint) -> Result<(), String> {
+        let boxed = ax_value(AX_VALUE_TYPE_CG_POINT, &value)?;
+        self.set_attribute(attribute, &boxed)
+    }
+
+    /// Writes an `AXValue`-wrapped `CGSize`, e.g. `AXSize`.
+    pub fn set_size_attribute(&self, attribute: &str, value: CGSize) -> Result<(), String> {
+        let boxed = ax_value(AX_VALUE_TYPE_CG_SIZE, &value)?;
+        self.set_attribute(attribute, &boxed)
+    }
+
+    /// Writes an `AXValue`-wrapped `CFRange`, e.g.
+    /// `AXSelectedTextRange`. `location` and `length` count UTF-16 code
+    /// units, which is what the AX API means by a text index.
+    pub fn set_range_attribute(
+        &self,
+        attribute: &str,
+        location: isize,
+        length: isize,
+    ) -> Result<(), String> {
+        let range = CFRange { location, length };
+        let boxed = ax_value(AX_VALUE_TYPE_CF_RANGE, &range)?;
+        self.set_attribute(attribute, &boxed)
+    }
+
+    /// The process id of the app that owns this element.
+    ///
+    /// A hit test asks the system-wide element, so the element it gets
+    /// back may belong to any app — including one the caller never
+    /// named. This is how the caller learns which. See PINV-32.
+    pub fn pid(&self) -> Option<i32> {
+        let mut pid: i32 = 0;
+        let err = unsafe { AXUIElementGetPid(self.0, &mut pid) };
+        (err == AX_ERROR_SUCCESS && pid > 0).then_some(pid)
+    }
+
+    /// The deepest element at `x`/`y`, in the **global display**
+    /// coordinate space — the space `crate::input` clicks into
+    /// (PINV-4).
+    ///
+    /// macOS hit-tests the point and returns whatever really sits on
+    /// top. An occluded element never comes back, which is what makes
+    /// this a usable `tap` preflight.
+    pub fn element_at_position(&self, x: f64, y: f64) -> Option<AxElement> {
+        let mut raw: AXUIElementRef = ptr::null();
+        let err = unsafe { AXUIElementCopyElementAtPosition(self.0, x as f32, y as f32, &mut raw) };
+        if err != AX_ERROR_SUCCESS || raw.is_null() {
+            return None;
+        }
+        // The copy already retained it.
+        Some(unsafe { AxElement::from_retained(raw) })
+    }
+}
+
+/// Reads one slot of a batch result into an [`AxAttributeSlot`].
+///
+/// `raw` is borrowed (+0) out of the result array, exactly as
+/// [`AxElement::children`] borrows a child.
+///
+/// Every branch that is not a value this reader understands ends at
+/// [`AxAttributeSlot::Unread`], which the pure reader then degrades to
+/// the field's default. That covers a null slot, the batch call's
+/// `kAXValueAXErrorType` placeholder, and a value of a type the
+/// attribute does not use. Each conversion mirrors one single-attribute
+/// reader above, so a batched read and a one-at-a-time read of the same
+/// element agree. See PINV-41.
+fn slot_from_value(raw: *const c_void) -> AxAttributeSlot {
+    let Some(borrowed) = NonNull::new(raw.cast_mut()) else {
+        return AxAttributeSlot::Unread;
+    };
+    // Retain the borrowed reference so `CFRetained` owns a real +1 —
+    // the same handoff `children` and `action_names` perform.
+    let retained = unsafe { CFRetain(borrowed.as_ptr()) };
+    let Some(retained) = NonNull::new(retained.cast_mut().cast::<CFType>()) else {
+        return AxAttributeSlot::Unread;
+    };
+    let value: CFRetained<CFType> = unsafe { CFRetained::from_raw(retained) };
+
+    // Mirrors `string_attribute`.
+    if let Some(text) = value.downcast_ref::<CFString>() {
+        return AxAttributeSlot::Text(text.to_string());
+    }
+    // Mirrors `bool_attribute`.
+    if let Some(flag) = value.downcast_ref::<CFBoolean>() {
+        return AxAttributeSlot::Flag(flag.value());
+    }
+
+    // `AXValueGetType` is defined only for an `AXValueRef`. A batched
+    // read returns whatever type each attribute really has, and several
+    // are neither a string, a boolean, nor an `AXValue`: `AXValue` on a
+    // slider or a stepper is a `CFNumber`, and a future attribute could
+    // be anything. Handing one of those to `AXValueGetType` reads a
+    // foreign object through the wrong lens. The single-attribute
+    // readers never met this, because each one asked for a specific
+    // attribute whose type it already knew.
+    let raw = value_as_ax_value_ptr(&value);
+    if unsafe { CFGetTypeID(raw) } != unsafe { AXValueGetTypeID() } {
+        return AxAttributeSlot::Unread;
+    }
+    match unsafe { AXValueGetType(raw) } {
+        // The placeholder for a slot the batch call could not read. It
+        // is a real object of a real type, so nothing but this check
+        // separates it from a value. Treating it as one would write a
+        // wrong point, size, or string into the node, which PINV-16
+        // forbids.
+        AX_VALUE_TYPE_AX_ERROR => AxAttributeSlot::Unread,
+        // Mirrors `point_attribute`.
+        AX_VALUE_TYPE_CG_POINT => {
+            let mut point = CGPoint::ZERO;
+            let ok =
+                unsafe { AXValueGetValue(raw, AX_VALUE_TYPE_CG_POINT, (&raw mut point).cast()) };
+            if ok {
+                AxAttributeSlot::Point(PixelPoint {
+                    x: point.x,
+                    y: point.y,
+                })
+            } else {
+                AxAttributeSlot::Unread
+            }
+        }
+        // Mirrors `size_attribute`.
+        AX_VALUE_TYPE_CG_SIZE => {
+            let mut size = CGSize::ZERO;
+            let ok = unsafe { AXValueGetValue(raw, AX_VALUE_TYPE_CG_SIZE, (&raw mut size).cast()) };
+            if ok {
+                AxAttributeSlot::Size(PixelSize {
+                    width: size.width,
+                    height: size.height,
+                })
+            } else {
+                AxAttributeSlot::Unread
+            }
+        }
+        _ => AxAttributeSlot::Unread,
+    }
+}
+
+/// The `AXError.h` name of one error code, or `"kAXErrorUnknown"`.
+///
+/// The raw number stays in the message next to this name, so an
+/// unmapped code is still readable. See [`AxElement::perform_action`].
+fn ax_error_name(err: AXError) -> &'static str {
+    match err {
+        AX_ERROR_SUCCESS => "kAXErrorSuccess",
+        AX_ERROR_FAILURE => "kAXErrorFailure",
+        AX_ERROR_ILLEGAL_ARGUMENT => "kAXErrorIllegalArgument",
+        AX_ERROR_INVALID_UI_ELEMENT => "kAXErrorInvalidUIElement",
+        AX_ERROR_CANNOT_COMPLETE => "kAXErrorCannotComplete",
+        AX_ERROR_ACTION_UNSUPPORTED => "kAXErrorActionUnsupported",
+        AX_ERROR_NOT_IMPLEMENTED => "kAXErrorNotImplemented",
+        AX_ERROR_API_DISABLED => "kAXErrorAPIDisabled",
+        _ => "kAXErrorUnknown",
+    }
+}
+
+/// Walks `path` down an element's children, one index per step.
+///
+/// `polarize-core` resolves an index path against the tree `describe`
+/// returned; this follows the same indices down the live hierarchy. The
+/// two must agree — that is PINV-18, and it is why an out-of-range index
+/// is an error rather than a stop at the parent. The app changed its
+/// interface between the two walks, so acting on the parent would press
+/// something the caller never named.
+pub fn walk_path(root: AxElement, path: &[usize]) -> Result<AxElement, String> {
+    let mut current = root;
+    for (step, &index) in path.iter().enumerate() {
+        let children = current.children();
+        let count = children.len();
+        current = children.into_iter().nth(index).ok_or_else(|| {
+            format!(
+                "the element path {path:?} left the tree at step {step}: \
+                 index {index} of {count} children. The app changed its \
+                 interface. Run `describe` again."
+            )
+        })?;
+    }
+    Ok(current)
+}
+
+/// Boxes a geometric value in the `AXValue` every AX setter takes.
+///
+/// `AXValueCreate` copies out of `value_ptr`, so the borrow does not
+/// need to outlive the call.
+fn ax_value<T>(value_type: AXValueType, value: &T) -> Result<CFRetained<CFType>, String> {
+    let raw = unsafe { AXValueCreate(value_type, ptr::from_ref(value).cast()) };
+    let raw = NonNull::new(raw.cast_mut())
+        .ok_or_else(|| format!("AXValueCreate returned null for AXValueType {value_type}"))?;
+    Ok(unsafe { CFRetained::from_raw(raw) })
 }
 
 /// Casts a copied attribute value's CF pointer to the raw pointer

@@ -99,6 +99,11 @@ pub struct DescribeRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DescribeResponse {
     pub app_name: String,
+    /// The resolved app's bundle id, when it publishes one. A caller
+    /// naming an app in a follow-up call should prefer this over
+    /// `app_name`: two processes can share one localized name.
+    #[serde(default)]
+    pub bundle_id: Option<String>,
     pub root: AxNode,
     /// [`crate::ax::format_tree`]'s indented text rendering of `root` — a
     /// ready-to-read tree, so a caller does not need to walk `root` itself
@@ -257,6 +262,7 @@ mod tests {
     fn describe_response_round_trips() {
         let value = DescribeResponse {
             app_name: "Finder".to_string(),
+            bundle_id: Some("com.apple.finder".to_string()),
             root: AxNode {
                 role: "AXWindow".to_string(),
                 label: Some("Untitled".to_string()),
@@ -266,9 +272,8 @@ mod tests {
                     width: 1.0,
                     height: 1.0,
                 },
-                focusable: false,
-                interactive: false,
                 children: vec![],
+                ..AxNode::default()
             },
             formatted: "AXWindow \"Untitled\" (0.00,0.00,1.00,1.00)".to_string(),
         };

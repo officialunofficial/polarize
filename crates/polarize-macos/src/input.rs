@@ -39,7 +39,7 @@ pub struct MacInputSynthesizer;
 /// to report when this method cannot tell them apart.
 fn ensure_input_permission() -> Result<(), PolarizeError> {
     if CGPreflightPostEventAccess() {
-        Ok(())
+        crate::session::ensure_session_usable()
     } else {
         Err(PolarizeError::Permission(PermissionError::NotGranted {
             kind: PermissionKind::Accessibility,

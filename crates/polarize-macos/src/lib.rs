@@ -37,12 +37,32 @@
 #![cfg(target_os = "macos")]
 
 pub mod accessibility;
+pub mod action;
 pub mod app_lookup;
+pub mod applescript;
 mod ax_ffi;
 pub mod capture;
+pub mod clipboard;
 mod content;
+/// Flow recording over a listen-only `CGEventTap`. See PINV-39 and
+/// PINV-40.
+pub mod event_tap;
 pub mod geometry;
+pub mod hit_test;
 pub mod input;
 pub mod keymap;
+pub mod notifications;
+pub mod observer;
 pub mod permission_bootstrap;
+/// Pumps the real main-thread `CFRunLoop`. See PINV-42.
+pub mod runloop;
+pub mod session;
+pub mod set_value;
+pub mod vision;
 pub mod window;
+pub mod window_control;
+pub mod workspace;
+/// Keeps `NSWorkspace`'s live-application tracking active. See
+/// PINV-42.
+pub mod workspace_activation;
+pub mod workspace_events;

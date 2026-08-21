@@ -12,6 +12,7 @@
 
 use crate::ax_ffi;
 use objc2_core_graphics::CGRequestScreenCaptureAccess;
+use polarize_core::script::AutomationCheck;
 
 /// Shows the system Accessibility consent alert (if not already
 /// trusted) and returns whether this binary is trusted afterward.
@@ -23,4 +24,15 @@ pub fn request_accessibility() -> bool {
 /// trusted) and returns whether this binary is trusted afterward.
 pub fn request_screen_recording() -> bool {
     CGRequestScreenCaptureAccess()
+}
+
+/// Shows the system Automation consent dialog for one target app (if
+/// not already determined). Returns the resulting permission state.
+///
+/// Unlike [`request_accessibility`] and [`request_screen_recording`],
+/// Automation is granted per (this process, target app) pair — see
+/// PINV-44. So a caller names every target it commonly scripts. It is
+/// not granted once for the whole binary.
+pub fn request_automation(target_app_name: &str) -> AutomationCheck {
+    crate::applescript::request_automation(target_app_name)
 }
