@@ -4,3 +4,4 @@
 # binary path. See README's "Using it with an MCP client" section for
 # the command that regenerates it locally.
 /.mcp.json
+.DS_Store
