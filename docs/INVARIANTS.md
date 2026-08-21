@@ -922,6 +922,67 @@ claim automated coverage they don't have.
   a faint line appears or disappears at the edge of the screen.
 - If violated: `index: 1` presses a different control on each call, and
   the caller cannot see it happen, because both calls succeed.
+### PINV-39: a flow recording listens only, and reports every tap macOS disabled
+
+- Always: `polarize_macos::event_tap` opens its `CGEventTap` with
+  `kCGEventTapOptionListenOnly`. Its callback returns the pointer it
+  received on every path, and calls no `CGEventSet*` function at all. The
+  callback also handles both disable notices. On
+  `kCGEventTapDisabledByTimeout` and on `kCGEventTapDisabledByUserInput`
+  it re-enables the tap at once, and it appends the notice to the event
+  list. `recording::assemble_recording` then counts each notice
+  separately, reports both counts, adds one warning that names the
+  cause, and sets `complete: false`. A full event budget is reported the
+  same way, through `dropped_events` and `StopReason::EventLimit`. One
+  thread owns the whole tap lifecycle — the port, the run-loop source,
+  and the run loop — exactly as PINV-20 requires of an `AXObserver`.
+  Every recorded click is normalized to a fraction of the display that
+  holds it, and clamped into `0.0..=1.0`.
+- Because: a tap that takes the default option can change an event or
+  swallow it. A bug there does not break `polarize`; it breaks the Mac.
+  The user's own keystrokes stop reaching their own apps while the
+  server runs, and the user has no way to connect the two facts. Listen
+  only is therefore not a detail, it is the whole safety story of the
+  module. The disable notices matter for a different reason. macOS turns
+  a tap off on its own, it says nothing more, and the tap then delivers
+  nothing. A recording that ends there looks complete. The caller gets a
+  short flow, believes it is the whole flow, and replays half a task.
+  An error would be better than that, and a counted, named report is
+  better still, because the recording that did arrive is still useful.
+  The clamp matters because `tap` refuses a fraction outside
+  `0.0..=1.0` (PINV-1), so an unclamped record is a record nobody can
+  replay.
+- If violated: the user's real input stops reaching their apps, or gets
+  duplicated, for as long as a recording runs. Or `record_flow` returns
+  a flow that stops half way, with `complete: true` on it, and nothing
+  anywhere says that macOS turned the tap off.
+
+### PINV-40: a recording withholds typed characters unless the caller opts in
+
+- Always: `RecordFlowRequest::capture_text` defaults to `false`. With
+  that default the tap never calls `CGEventKeyboardGetUnicodeString` at
+  all, so the characters never enter this process. `recording::translate_event`
+  drops any characters that reach it anyway, and marks every key event
+  `redacted: true`. `RecordFlowResponse::text_captured` reports which of
+  the two a recording is. `record_flow` is gated on
+  `PermissionKind::InputMonitoring`, and on nothing else: the pane a
+  caller must open is "Input Monitoring", not "Accessibility".
+- Because: a recording captures every keystroke, and some of those
+  keystrokes are passwords. A response travels much further than the
+  caller expects: into MCP client logs, into transcripts, and into bug
+  reports. This is the same reasoning PINV-22 gives for an AppleScript
+  source. The two layers of redaction are deliberate. Reading nothing is
+  the real protection, and dropping what arrives anyway means one bug in
+  `polarize-macos` still cannot put a password in a response. The
+  permission name matters for a plainer reason: Input Monitoring
+  (`kTCCServiceListenEvent`, `CGPreflightListenEventAccess`) is a
+  different grant from the Accessibility one that posts a `CGEvent`. A
+  caller told to open the Accessibility pane grants what `polarize`
+  already holds, sees nothing improve, and has no next step.
+- If violated: a password a user typed once now sits in a log file, and
+  nobody knows it is there. Or a caller cannot make `record_flow` run at
+  all, because every error points at the wrong System Settings pane.
+
 ### PINV-41: a batched attribute read is used only when it is aligned and type-checked
 
 - Always: `ax_ffi::AxElement::node_attributes` reads the eleven value
@@ -951,7 +1012,6 @@ claim automated coverage they don't have.
   slot held an error. An element reports another element's identifier.
   A caller then selects on that identifier and acts on the wrong
   control.
-
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -1529,6 +1589,87 @@ claim automated coverage they don't have.
   `aarch64-apple-darwin` and nothing more: no `VNRecognizeTextRequest`
   has ever run here. A human must also confirm the first call's roughly
   27 second model compile, and that later calls return in about 100 ms.
+
+- **PINV-39** — split, and the untestable half is the tap itself. The
+  decision half is fully covered by automated `cargo test -p
+  polarize-core` (`recording::tests`, 54 tests): the defaults and both
+  clamps, a zero duration and a zero event budget both refused before
+  any tap opens, the raw-type table in every direction, an unknown raw
+  type left out, the flag-to-modifier map in a fixed order, the key-code
+  to `NamedKey` map, a point normalized against the display that holds
+  it, a point on a second display, an off-screen point clamped into
+  `0.0..=1.0` and then proved acceptable to `coords::fraction_to_pixel`,
+  the offset arithmetic including an event stamped before the recording
+  started, offsets proved never to go backwards, a move dropped by
+  default and kept on request, a disable notice counted rather than
+  emitted as an event, every notice counted and not only the first, both
+  causes named in their own warning, a full event budget truncating and
+  reporting `dropped_events`, and the whole call against a fake
+  `FlowRecorder` and a fake `DisplayLister`. Six more tests in
+  `permission::recording_permission_tests` prove `record_flow` maps to
+  Input Monitoring and not to Accessibility.
+  `crates/polarize-macos/src/event_tap.rs` also holds 7 tests that
+  compare this crate's copies of the `CGEventType` and `CGEventFlags`
+  numbers against the real `objc2-core-graphics` constants, and check
+  the event mask. Those need no window server and no permission, so they
+  run under `cargo test -p polarize-macos` on any Mac — but **nobody has
+  run them**, because this environment is Linux and cannot build that
+  crate. `event_tap.rs` is type-checked against `aarch64-apple-darwin`,
+  and `cargo clippy --target aarch64-apple-darwin -- -D warnings` is
+  clean. That is all.
+  What is **not** automated, and cannot be, is every fact that matters
+  most. A human on a real macOS session must confirm, in this order:
+  1. **That the tap is genuinely listen-only.** This is the single most
+     important check in this feature. Start a 30-second `record_flow`,
+     then type a paragraph and click around in another app. Every
+     keystroke and every click must reach that app, unchanged, in order,
+     with nothing dropped and nothing repeated. A tap that swallows
+     input makes the Mac unusable while the server runs, and no test and
+     no error message can show it.
+  2. **That Input Monitoring is really the grant.** Run `record_flow`
+     with the grant withheld and confirm the error names "Input
+     Monitoring". Confirm that granting Accessibility alone does not
+     make it run. Then grant Input Monitoring in System Settings →
+     Privacy & Security → Input Monitoring and confirm it runs. Confirm
+     `CGPreflightListenEventAccess` reports without opening a prompt.
+  3. **That a disabled tap really is reported.** Focus a secure input
+     field, such as a password field or a keychain prompt, while a
+     recording runs. macOS raises `kCGEventTapDisabledByUserInput`
+     there. Confirm the response reports `tap_disabled_by_user_input` of
+     at least 1, `complete: false`, and a warning that names the cause.
+     Then confirm the recording kept working afterwards, which proves
+     the re-enable ran. A timeout disable is harder to force by hand;
+     the honest fallback is to read the callback and confirm it handles
+     both notices the same way.
+  4. **That a recording replays.** Record one click, then feed the
+     event's `x`, `y`, and `display_id` straight into `tap`. The click
+     must land on the same control. Repeat on a second display, and on a
+     window that does not sit at the screen origin.
+  5. **That nothing leaks.** Run a few hundred recordings and watch the
+     process's Mach port count. One thread, one tap port, and one
+     run-loop source per call must all go away.
+  6. **What a secure input field really delivers.** macOS may hand a tap
+     no key events at all while secure input is on. Nobody here knows
+     what a recording of a password field looks like. Write down the
+     answer.
+- **PINV-40** — split. The redaction rule is fully covered by automated
+  `cargo test -p polarize-core` (`recording::tests`): text withheld by
+  default with `redacted: true`, text present only after the opt-in, a
+  click never marked redacted, and a whole `perform_record_flow` call
+  against a fake recorder that hands back characters the caller never
+  asked for, proving the response still holds none. The permission half
+  is covered by `permission::recording_permission_tests`: the pane's
+  exact display name, and a granted Accessibility status proved not to
+  satisfy `record_flow`.
+  What is **not** automated is the layer that matters more: that
+  `crates/polarize-macos/src/event_tap.rs` really does not call
+  `CGEventKeyboardGetUnicodeString` without the opt-in. A reader can
+  confirm the branch, and the type-check compiles it, but no test runs
+  it. A human must record while typing a password with the default
+  settings, and confirm no `text` field appears anywhere in the
+  response. The same human must then record with `capture_text: true`
+  and confirm the characters do appear, so the opt-in is proved to be
+  the only difference.
 
 - **PINV-41** — split, and the native half is the risky half. The pure
   half — the mapping from a positional slot array to node attributes —
