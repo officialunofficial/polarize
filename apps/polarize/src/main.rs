@@ -44,6 +44,20 @@ fn init_tracing() {
         .init();
 }
 
+/// Logs one line per private `SkyLight.framework` symbol, naming it and
+/// whether it resolved on this machine. This makes the fallback state
+/// PINV-46 requires observable without a debugger.
+///
+/// `polarize-macos` does not depend on `tracing` itself. This binary
+/// already owns the tracing setup, so it reads
+/// [`SkylightSymbols::resolution_summary`](polarize_macos::skylight_ffi::SkylightSymbols::resolution_summary)
+/// and logs it here instead.
+fn log_skylight_symbol_resolution() {
+    for (symbol, resolved) in polarize_macos::skylight_ffi::symbols().resolution_summary() {
+        tracing::info!(symbol, resolved, "SkyLight symbol resolution");
+    }
+}
+
 fn main() {
     init_tracing();
 
@@ -68,6 +82,7 @@ fn main() {
     polarize_macos::workspace_activation::activate();
 
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting");
+    log_skylight_symbol_resolution();
 
     let (result_tx, result_rx) = mpsc::channel::<Result<(), String>>();
     let server_task = runtime.spawn(async { run().await.map_err(|err| err.to_string()) });
