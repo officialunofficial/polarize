@@ -12,7 +12,9 @@ use std::fmt;
 
 /// The state of one macOS TCC permission, mirroring the states Apple's
 /// own APIs report (`kTCCAuthorizationStatus*` / `AXIsProcessTrusted`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionState {
     /// The user has never been asked.

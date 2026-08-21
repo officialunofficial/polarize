@@ -47,6 +47,7 @@ pub mod capture;
 mod carbon_process;
 pub mod clipboard;
 mod content;
+mod disclaimed_spawn;
 /// Flow recording over a listen-only `CGEventTap`. See PINV-39 and
 /// PINV-40.
 pub mod event_tap;

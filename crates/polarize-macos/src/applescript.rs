@@ -211,6 +211,18 @@ impl MacAppleScriptRunner {
 /// harmless script send is what reliably raises the same dialog
 /// instead.
 ///
+/// That send goes through
+/// [`crate::disclaimed_spawn::send_disclaimed_bootstrap_script`], not a
+/// plain `osascript` subprocess. Automation permission is not checked
+/// against whichever process literally sends the Apple Event — macOS
+/// climbs to the nearest ancestor process it considers "responsible",
+/// and neither an interactive shell nor an MCP server's own process
+/// tree gives this binary's embedded identity a place to stop that
+/// climb. Disclaiming the spawned `osascript`'s responsibility makes it
+/// responsible for itself instead. Whether that actually changes which
+/// identity macOS checks, or which dialog it raises, is unverified —
+/// see `docs/INVARIANTS.md`.
+///
 /// [`preflight_automation`]: MacAppleScriptRunner::preflight_automation
 ///
 /// How long to give `open -g -a` before the script send below. A
@@ -228,8 +240,7 @@ pub fn request_automation(target_app_name: &str) -> AutomationCheck {
         .status();
     std::thread::sleep(Duration::from_millis(AUTOMATION_BOOTSTRAP_LAUNCH_SETTLE_MS));
 
-    let script = format!("tell application \"{target_app_name}\" to get its name");
-    let _ = run("osascript", &[], Some(script.as_str()), 15_000);
+    let _ = crate::disclaimed_spawn::send_disclaimed_bootstrap_script(target_app_name);
 
     let identifier = AppIdentifier {
         bundle_id: Some(target_app_name.to_string()),
@@ -293,5 +304,9 @@ impl AppleScriptRunner for MacAppleScriptRunner {
             app_name,
             xml: outcome.stdout,
         })
+    }
+
+    fn request_automation(&self, target_app_name: &str) -> AutomationCheck {
+        request_automation(target_app_name)
     }
 }
