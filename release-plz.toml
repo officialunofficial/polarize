@@ -45,10 +45,23 @@ changelog_update = true
 [[package]]
 name = "polarize-core"
 version_group = "polarize"
+# Same reasoning as `polarize`'s own entry above: never on crates.io,
+# so "is this version already released" needs a git-tag answer, not a
+# registry one. Without this, release-plz's own next-version
+# computation runs `cargo package` against the real registry and fails
+# outright — `polarize-core` has no path dependencies of its own, so
+# it packages fine in isolation, but confirms this crate is being
+# treated as if it might really publish.
+git_only = true
 
 [[package]]
 name = "polarize-macos"
 version_group = "polarize"
+# Same as `polarize-core` above, and more load-bearing here:
+# `polarize-macos` path-depends on `polarize-core`, so packaging it
+# without `git_only` tries to resolve `polarize-core` from crates.io
+# and fails, since it was never actually published there.
+git_only = true
 
 [changelog]
 protect_breaking_commits = true

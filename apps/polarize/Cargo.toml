@@ -20,9 +20,9 @@ rust-version.workspace = true
 # package at all; release-plz.toml's own `publish = false` (workspace
 # default, not overridden for this package) decides whether it ever
 # runs `cargo publish`. A manual `cargo publish` here would also fail
-# on its own regardless — polarize-core/polarize-macos below are path
-# dependencies with no `version` requirement, and Cargo refuses to
-# publish a crate whose path dependencies lack one.
+# on its own regardless — `polarize-core`/`polarize-macos` below each
+# set `publish = false` themselves (via `publish.workspace = true`),
+# Cargo's own hard block against publishing either one.
 
 [[bin]]
 name = "polarize"
@@ -37,8 +37,15 @@ path = "src/main.rs"
 dist = true
 
 [dependencies]
-polarize-core = { path = "../../crates/polarize-core" }
-polarize-macos = { path = "../../crates/polarize-macos" }
+# `version` here is required for `cargo package` to succeed, even
+# though neither crate ever really publishes (see above) — `cargo
+# package` refuses to package a manifest whose path dependencies carry
+# no version requirement at all. release-plz runs `cargo package`
+# internally to compute the next version, so this was blocking every
+# release until added. Keep this in step with the workspace version;
+# release-plz's own version-bump commits update it automatically.
+polarize-core = { path = "../../crates/polarize-core", version = "0.1.0" }
+polarize-macos = { path = "../../crates/polarize-macos", version = "0.1.0" }
 # `rmcp`'s "macros" feature re-exports `rmcp-macros`'s `#[tool]`/
 # `#[tool_router]`/`#[tool_handler]` attributes as `rmcp::{tool, ...}`.
 # See `rmcp::lib`'s `pub use rmcp_macros::*`. A direct `rmcp-macros`

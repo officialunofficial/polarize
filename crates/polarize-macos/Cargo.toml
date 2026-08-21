@@ -9,7 +9,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-polarize-core = { path = "../polarize-core" }
+polarize-core = { path = "../polarize-core", version = "0.1.0" }
 screencapturekit = { version = "8.0.1", features = ["macos_14_0"] }
 objc2-accessibility = "0.3"
 objc2-core-graphics = "0.3"
