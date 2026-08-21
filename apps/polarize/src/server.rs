@@ -155,6 +155,11 @@ pub struct PolarizeServer {
 /// message string.
 fn to_error_data(err: PolarizeError) -> ErrorData {
     let message = err.to_string();
+    // Every tool's error path funnels through here, so this is the one
+    // place that needs a log call to cover all 25 — `message` is
+    // already `PolarizeError::Display`'s sanitized text, which PINV-22
+    // guarantees never carries a script's raw source.
+    tracing::error!(error = %message, "tool call failed");
     match &err {
         PolarizeError::Coord(_)
         | PolarizeError::Selector(_)
@@ -232,6 +237,7 @@ impl PolarizeServer {
     /// [`polarize_core::schema`]'s "screenshots travel as base64" note
     /// for why.
     #[tool(name = "screenshot")]
+    #[tracing::instrument(skip(self))]
     fn screenshot(
         &self,
         Parameters(request): Parameters<ScreenshotRequest>,
@@ -245,6 +251,7 @@ impl PolarizeServer {
     /// a named) app, returning each element's role, label, normalized
     /// `[0, 1]` frame, and focusable/interactive flags.
     #[tool(name = "describe")]
+    #[tracing::instrument(skip(self))]
     async fn describe(
         &self,
         Parameters(request): Parameters<DescribeRequest>,
@@ -258,6 +265,7 @@ impl PolarizeServer {
     /// a real pixel point (against the target's resolved size) before
     /// any native call runs; see PINV-4 in `docs/INVARIANTS.md`.
     #[tool(name = "tap")]
+    #[tracing::instrument(skip(self))]
     fn tap(
         &self,
         Parameters(request): Parameters<TapRequest>,
@@ -272,6 +280,10 @@ impl PolarizeServer {
     /// names a `target` app, activates that app first — see PINV-14 in
     /// `docs/INVARIANTS.md`.
     #[tool(name = "keyboard", input_schema = keyboard_input_schema())]
+    // A `type` request's `text` is exactly what a caller types — which
+    // can be a password. Skipped whole, the same reasoning PINV-40
+    // gives for withholding `record_flow`'s captured characters.
+    #[tracing::instrument(skip(self, request))]
     fn keyboard(
         &self,
         Parameters(request): Parameters<KeyboardRequest>,
@@ -290,6 +302,7 @@ impl PolarizeServer {
     /// element does not publish, and refuses a disabled element, before
     /// it calls the platform (PINV-17).
     #[tool(name = "perform_action")]
+    #[tracing::instrument(skip(self))]
     async fn perform_action(
         &self,
         Parameters(request): Parameters<PerformActionRequest>,
@@ -310,6 +323,7 @@ impl PolarizeServer {
     /// interval regardless, because some trees never post one
     /// (PINV-19).
     #[tool(name = "await_ui_element")]
+    #[tracing::instrument(skip(self))]
     async fn await_ui_element(
         &self,
         Parameters(request): Parameters<AwaitUiElementRequest>,
@@ -329,6 +343,7 @@ impl PolarizeServer {
     /// requested idle window. Use it after an action that starts an
     /// animation or a load, when there is no single element to wait for.
     #[tool(name = "await_screen_idle")]
+    #[tracing::instrument(skip(self))]
     async fn await_screen_idle(
         &self,
         Parameters(request): Parameters<AwaitScreenIdleRequest>,
@@ -349,6 +364,10 @@ impl PolarizeServer {
     /// scriptable apps — Finder, Mail, Safari, Music, Notes — with
     /// semantic operations no accessibility or `CGEvent` call can express.
     #[tool(name = "run_applescript")]
+    // `request.source` is the raw script text, which can carry a
+    // password (PINV-22) — so `request` is skipped whole, not just
+    // narrowed, the same way PINV-22 keeps it out of every error too.
+    #[tracing::instrument(skip(self, request), fields(target_app = ?request.target_app))]
     async fn run_applescript(
         &self,
         Parameters(request): Parameters<RunAppleScriptRequest>,
@@ -360,6 +379,7 @@ impl PolarizeServer {
     /// `sdef` scripting dictionary. Call it before `run_applescript` to
     /// find out what an app accepts.
     #[tool(name = "script_dictionary")]
+    #[tracing::instrument(skip(self))]
     async fn script_dictionary(
         &self,
         Parameters(request): Parameters<ScriptDictionaryRequest>,
@@ -374,6 +394,10 @@ impl PolarizeServer {
     /// without firing `input` or `keydown`, so a controlled component
     /// can update and then snap back.
     #[tool(name = "set_value")]
+    // A text write's value is exactly what a caller writes into the
+    // element — which can be a password. Skipped whole, same reasoning
+    // as `keyboard`.
+    #[tracing::instrument(skip(self, request), fields(selector = ?request.selector))]
     async fn set_value(
         &self,
         Parameters(request): Parameters<SetValueRequest>,
@@ -389,6 +413,7 @@ impl PolarizeServer {
     /// as occlusion. It resolves the same fraction `tap` resolves, so a
     /// caller can preflight a click with it (PINV-32).
     #[tool(name = "hit_test_at_point")]
+    #[tracing::instrument(skip(self))]
     async fn hit_test_at_point(
         &self,
         Parameters(request): Parameters<HitTestRequest>,
@@ -401,6 +426,7 @@ impl PolarizeServer {
     /// error rather than empty text, because macOS can withhold the
     /// contents from a programmatic read (PINV-34).
     #[tool(name = "clipboard_read")]
+    #[tracing::instrument(skip(self))]
     async fn clipboard_read(
         &self,
         Parameters(request): Parameters<ClipboardReadRequest>,
@@ -413,6 +439,10 @@ impl PolarizeServer {
     /// Replaces the pasteboard contents. macOS never refuses a write, so
     /// this tool needs no permission.
     #[tool(name = "clipboard_write")]
+    // `request.text` becomes the pasteboard contents — which can be a
+    // password a caller is about to paste elsewhere. Skipped whole,
+    // same reasoning as `keyboard`.
+    #[tracing::instrument(skip(self, request))]
     fn clipboard_write(
         &self,
         Parameters(request): Parameters<ClipboardWriteRequest>,
@@ -427,6 +457,7 @@ impl PolarizeServer {
     /// whether it matched the request — apps clamp their own minimum and
     /// maximum size (PINV-29).
     #[tool(name = "set_window_frame")]
+    #[tracing::instrument(skip(self))]
     async fn set_window_frame(
         &self,
         Parameters(request): Parameters<SetWindowFrameRequest>,
@@ -445,6 +476,7 @@ impl PolarizeServer {
     /// A full-screen action against a window that publishes no
     /// `AXFullScreen` is refused rather than silently ignored.
     #[tool(name = "window_action")]
+    #[tracing::instrument(skip(self))]
     async fn window_action(
         &self,
         Parameters(request): Parameters<WindowActionRequest>,
@@ -461,6 +493,7 @@ impl PolarizeServer {
     /// appears, with the other source's fields absent rather than false
     /// (PINV-30).
     #[tool(name = "list_windows")]
+    #[tracing::instrument(skip(self))]
     async fn list_windows(
         &self,
         Parameters(request): Parameters<ListWindowsRequest>,
@@ -470,6 +503,7 @@ impl PolarizeServer {
 
     /// Starts an app, or reports it was already running.
     #[tool(name = "app_launch")]
+    #[tracing::instrument(skip(self))]
     async fn app_launch(
         &self,
         Parameters(request): Parameters<AppLaunchRequest>,
@@ -484,6 +518,7 @@ impl PolarizeServer {
     /// `force` explicitly, because a forced quit discards unsaved work
     /// (PINV-31). The response reports whether the app really exited.
     #[tool(name = "app_quit")]
+    #[tracing::instrument(skip(self))]
     async fn app_quit(
         &self,
         Parameters(request): Parameters<AppQuitRequest>,
@@ -495,6 +530,7 @@ impl PolarizeServer {
     /// Reports every active display, with bounds in the same global
     /// pixel space `screenshot` and `tap` use.
     #[tool(name = "list_displays")]
+    #[tracing::instrument(skip(self))]
     fn list_displays(
         &self,
         Parameters(request): Parameters<ListDisplaysRequest>,
@@ -512,6 +548,7 @@ impl PolarizeServer {
     /// macOS compiles the recognition model. Later calls take about
     /// 100 ms.
     #[tool(name = "find_text")]
+    #[tracing::instrument(skip(self))]
     async fn find_text(
         &self,
         Parameters(request): Parameters<FindTextRequest>,
@@ -526,6 +563,7 @@ impl PolarizeServer {
     /// and frame. Banners are found by structure, not by subrole string,
     /// because those shift between macOS releases (PINV-35).
     #[tool(name = "describe_notifications")]
+    #[tracing::instrument(skip(self))]
     async fn describe_notifications(
         &self,
         Parameters(request): Parameters<DescribeNotificationsRequest>,
@@ -536,6 +574,7 @@ impl PolarizeServer {
     /// Closes one notification banner, then re-reads to report whether
     /// it really went away.
     #[tool(name = "dismiss_notification")]
+    #[tracing::instrument(skip(self))]
     async fn dismiss_notification(
         &self,
         Parameters(request): Parameters<DismissNotificationRequest>,
@@ -545,6 +584,7 @@ impl PolarizeServer {
 
     /// Reports the app that holds focus right now.
     #[tool(name = "frontmost_app")]
+    #[tracing::instrument(skip(self))]
     fn frontmost_app(&self) -> Result<Json<FrontmostAppResponse>, ErrorData> {
         workspace_events::perform_frontmost_app(&self.workspace_inspector)
             .map(Json)
@@ -563,6 +603,7 @@ impl PolarizeServer {
     /// a recording captures real keystrokes and those include passwords
     /// (PINV-40). Only input during the call is recorded.
     #[tool(name = "record_flow")]
+    #[tracing::instrument(skip(self))]
     async fn record_flow(
         &self,
         Parameters(request): Parameters<RecordFlowRequest>,
@@ -576,6 +617,7 @@ impl PolarizeServer {
     /// at the same time, and names which channel saw the event
     /// (PINV-36).
     #[tool(name = "await_workspace_event")]
+    #[tracing::instrument(skip(self))]
     async fn await_workspace_event(
         &self,
         Parameters(request): Parameters<AwaitWorkspaceEventRequest>,

@@ -27,7 +27,26 @@ use rmcp::transport::stdio;
 
 use server::PolarizeServer;
 
+/// Sets up `tracing`: plain text to stderr, level controlled by
+/// `RUST_LOG`, `info` by default.
+///
+/// Stderr, never stdout. Stdout carries the MCP JSON-RPC stream
+/// itself; any other byte on it corrupts the protocol. Enabling span
+/// close events means every `#[tracing::instrument]`-annotated tool
+/// call in `server.rs` logs its own duration for free.
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(filter)
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+        .init();
+}
+
 fn main() {
+    init_tracing();
+
     if std::env::args().nth(1).as_deref() == Some("--request-permissions") {
         request_permissions();
         return;
@@ -39,7 +58,7 @@ fn main() {
     {
         Ok(runtime) => runtime,
         Err(err) => {
-            eprintln!("polarize: {err}");
+            tracing::error!("{err}");
             std::process::exit(1);
         }
     };
@@ -47,6 +66,8 @@ fn main() {
     // Must happen on this thread, before the run loop starts: see
     // `polarize_macos::workspace_activation`.
     polarize_macos::workspace_activation::activate();
+
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting");
 
     let (result_tx, result_rx) = mpsc::channel::<Result<(), String>>();
     let server_task = runtime.spawn(async { run().await.map_err(|err| err.to_string()) });
@@ -68,9 +89,13 @@ fn main() {
     // The server task always sends before it stops the run loop, so
     // this is only ever empty if the channel itself was dropped
     // without sending — nothing left to report in that case.
-    if let Ok(Err(err)) = result_rx.try_recv() {
-        eprintln!("polarize: {err}");
-        std::process::exit(1);
+    match result_rx.try_recv() {
+        Ok(Err(err)) => {
+            tracing::error!("{err}");
+            std::process::exit(1);
+        }
+        Ok(Ok(())) => tracing::info!("stdio client disconnected, shutting down"),
+        Err(_) => {}
     }
 }
 
