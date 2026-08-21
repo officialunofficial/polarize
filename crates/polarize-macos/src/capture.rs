@@ -19,9 +19,11 @@ use screencapturekit::stream::content_filter::SCContentFilter;
 use crate::content;
 use crate::window::resolve_running_app;
 
-/// Checks Screen Recording permission before any `ScreenCaptureKit` call.
-/// Both [`ScreenCapture`] methods below call this first — see PINV-10 in
-/// `docs/INVARIANTS.md`, which now covers `screenshot` too.
+/// Checks Screen Recording permission before any `ScreenCaptureKit` call
+/// — including `content::shareable_content`, so `crate::window`'s
+/// raise-free activation path (PINV-48) calls this too, not only the
+/// two [`ScreenCapture`] methods below. See PINV-10 in
+/// `docs/INVARIANTS.md`.
 ///
 /// `CGPreflightScreenCaptureAccess` collapses "never asked" and
 /// "explicitly denied" into the same `false`, the same caveat
@@ -31,16 +33,13 @@ use crate::window::resolve_running_app;
 ///
 /// Calls `CGMainDisplayID` first, purely for its side effect of
 /// establishing this process's connection to the WindowServer.
-/// `polarize` has no `NSApplication` run loop. Nothing else in the
-/// `screenshot` path touches CoreGraphics before `ScreenCaptureKit`
-/// does. Without that connection already open, `SCShareableContent::get()`
-/// crashes the whole process — `Assertion failed: (did_initialize),
-/// function CGS_REQUIRE_INIT` — instead of returning an `Err`.
-/// `describe`'s AX-frame math happens to call
-/// `CGMainDisplayID`/`CGDisplayBounds` too, which is why only a
-/// `screenshot`-first process (no prior `describe` call in the same
-/// process) can hit this.
-fn ensure_screen_recording_permission() -> Result<(), PolarizeError> {
+/// `polarize` has no `NSApplication` run loop. Without that connection
+/// already open, `SCShareableContent::get()` crashes the whole process
+/// — `Assertion failed: (did_initialize), function CGS_REQUIRE_INIT` —
+/// instead of returning an `Err`. Calling this function first is what
+/// guarantees that connection exists, for every caller, not only
+/// `screenshot`.
+pub(crate) fn ensure_screen_recording_permission() -> Result<(), PolarizeError> {
     let _ = CGMainDisplayID();
     if CGPreflightScreenCaptureAccess() {
         crate::session::ensure_session_usable()

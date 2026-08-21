@@ -1227,15 +1227,15 @@ claim automated coverage they don't have.
   drop any of them in a future release, without notice. `ax_ffi.rs`
   links its symbols statically, because they are public and stable. A
   missing one there should break the build. A private symbol needs the
-  opposite outcome: a caller that keeps working on the public-API
-  fallback, on whichever macOS version stops shipping one of these
-  names.
+  opposite outcome. A caller should keep working on the public-API
+  fallback. That must hold on whichever macOS version stops shipping
+  one of these names.
 - If violated: a dropped or renamed symbol on some future macOS release
   would fail this binary to load, if it were linked statically instead.
   Or it would crash a `tap`/`keyboard` call outright, through an
   unchecked call to a null function pointer. Either way, `polarize`
   would lose the global `CGEvent` post and real activation it already
-  had before this work, instead of falling back to it.
+  had before this work. It would not fall back to them.
 
 ### PINV-47: a `tap` reports which native path actually posted its click
 
@@ -1254,8 +1254,8 @@ claim automated coverage they don't have.
   A caller cannot see the screen. It cannot tell which path ran by
   watching the click land — both paths click the same point. Without
   `post_path`, a caller could not tell whether this exact call left the
-  shared cursor alone, which is the one property the whole PRD behind
-  PINV-46/PINV-47 exists to give it.
+  shared cursor alone. That property is the whole reason PINV-46 and
+  this invariant exist.
 - If violated: `post_path` could report "pid" when the click actually
   ran through the global path, or the reverse. A caller checking
   `post_path` before relying on "the cursor did not move" would then
@@ -1266,32 +1266,34 @@ claim automated coverage they don't have.
 - Always: for a request that names a `target`,
   `orchestrate::perform_keyboard` tries
   `WindowManager::activate_app_without_raise` first. `MacWindowManager`
-  runs this path only when three things all hold. `skylight_ffi::symbols`
+  runs this path only when four things all hold. `skylight_ffi::symbols`
   resolved both `SLPSPostEventRecordTo` and
   `_SLPSSetFrontProcessWithOptions`. A `ProcessSerialNumber` resolved
-  for the target's pid, via `carbon_process::find_psn_for_pid`. The
-  target has an on-screen window. When it runs, it posts `yabai`'s
-  `window_manager_make_key_window` event-record pair. It then calls
-  `_SLPSSetFrontProcessWithOptions` with `kCPSUserGenerated`. Neither
-  step raises the target's window. Neither switches the current Space.
-  `perform_keyboard` calls the older `WindowManager::activate_app` only
-  when the raise-free path reports itself unavailable.
-  `KeyboardResponse.activation_path` always names whichever tier
-  actually ran, or `none` when `target` was absent.
+  for the target's pid, via `carbon_process::find_psn_for_pid`. Screen
+  Recording permission is granted — `content::shareable_content` needs
+  it, the same as `screenshot` (PINV-10). The target has an on-screen
+  window. When it runs, it posts `yabai`'s `window_manager_make_key_window`
+  event-record pair. It then calls `_SLPSSetFrontProcessWithOptions`
+  with `kCPSUserGenerated`. It never calls `AXUIElementPerformAction`
+  with `kAXRaiseAction`. `perform_keyboard` calls the older
+  `WindowManager::activate_app` only when the raise-free path reports
+  itself unavailable. `KeyboardResponse.activation_path` always names
+  whichever tier actually ran, or `none` when `target` was absent.
 - Because: raising a window, or switching Spaces, is the one visible
   interruption this PRD exists to remove from an agent driving a
   background app. `activate_app`'s single
   `NSRunningApplication::activateWithOptions` call conflates two
-  separate operations into one. The first flips AppKit-active state —
-  the actual thing that makes typed input reach the right app. The
-  second raises a window. The raise-free path performs only the first.
+  separate operations into one. The first flips AppKit-active state.
+  That is the actual thing that makes typed input reach the right app.
+  The second raises a window. The raise-free path performs only the
+  first.
 - If violated: a `keyboard` call with `target` still raises the target's
   window, or still switches the current Space, even though
   `activation_path` reports `raise_free`. A caller relying on that field
   to avoid disrupting whoever is at the machine would be misled.
 
-**Correction to this slice's originating issue.** The issue that
-specified this work read `yabai`'s source as "drop the
+**Correction to this slice's originating issue, part one: the call the
+issue said to drop.** The issue read `yabai`'s source as "drop the
 `_SLPSSetFrontProcessWithOptions` call." The real source disagrees.
 `window_manager_focus_window_without_raise` (`window_manager.c:1293`)
 calls `_SLPSSetFrontProcessWithOptions` unconditionally, every time. It
@@ -1299,21 +1301,48 @@ pairs that call with `window_manager_make_key_window`'s event records.
 It never drops it. This implementation follows the real source, not
 the issue's paraphrase of it.
 
-This implementation also deliberately skips one part of that real
-source: a leading conditional block of two further event records. That
-block only runs when the target's psn equals `yabai`'s own tracked
-previously-focused window. The block exists to replay `yabai`'s own
-per-Space focus history across a Space switch. `polarize` keeps no such
-history — a `keyboard` call is one request, not a step in a tracked
-sequence — so there is nothing here for that gate to check.
+**Correction, part two: what the without-raise variant actually skips.**
+`_SLPSSetFrontProcessWithOptions` and `window_manager_make_key_window`
+are not the raise/no-raise difference at all. `yabai` pairs exactly
+those same two calls in `window_manager_focus_window_with_raise`
+(`window_manager.c:1324`) too — they are shared machinery both
+variants use. The real difference is one further call the raising
+variant makes and the non-raising one does not:
+`AXUIElementPerformAction(window_ref, kAXRaiseAction)`. This
+implementation never calls it, which is what actually makes it
+"without raise" — not the event records, and not
+`_SLPSSetFrontProcessWithOptions`.
+
+**What this implementation deliberately skips, and why.**
+`window_manager_focus_window_without_raise` also has a leading
+conditional block: two further event records, gated on whether the
+target's psn equals `yabai`'s own tracked previously-focused window.
+That gate replays `yabai`'s own per-Space focus history across a Space
+switch. `polarize` keeps no such history. A `keyboard` call is one
+request, not a step in a tracked sequence. There is no equivalent state
+here for that gate to check, so this implementation does not
+reproduce it.
 
 Finding a `ProcessSerialNumber` for an arbitrary pid needed its own new
 piece, `carbon_process::find_psn_for_pid`, which the issue did not
 mention. None of PINV-46's four SkyLight symbols convert a pid to a
 psn. This new piece walks Carbon's deprecated `GetNextProcess`/
-`GetProcessPID` pair instead — the same primitive `yabai` uses to build
-its own long-lived pid/psn table, run fresh on every call instead of
-cached.
+`GetProcessPID` pair instead. That is the same primitive `yabai` uses
+to build its own long-lived pid/psn table. This one runs fresh on
+every call instead of caching it.
+
+A working real-session probe of this path also touches
+`ScreenCaptureKit`, through `content::shareable_content`, to find the
+target's on-screen window id. `keyboard` never needed Screen Recording
+permission before this slice. It does now, on this one path only —
+`MacInputSynthesizer::type_text`/`press_key` still only need
+Accessibility. A caller without Screen Recording granted gets a real
+`PolarizeError::Permission`, not a silent fall back to `activate_app`:
+PINV-10 requires every native call to preflight its real permission,
+and a permission gap is not the same kind of "unavailable" the other
+three gates above describe. A target with no on-screen window,
+by contrast, degrades to `Ok(false)` and the `activate_app` fallback —
+that is a real "unavailable," not a permission problem.
 
 ### PINV-49: `keyboard` posts key events by pid, and reports which path ran
 
@@ -2156,10 +2185,10 @@ See the enforcement checklist entry below.
   What is **not** automated, and not yet live-verified in this pass:
   whether each of the four symbols resolves to a *working*
   implementation, not merely to some code address. Also unverified:
-  whether `SLEventPostToPid`'s guessed signature — mirroring the public
-  `CGEventPostToPid`'s shape — is correct. A human on a real macOS
-  session needs to confirm both, per this repo's policy that native-API
-  behavior has no CI coverage.
+  whether `SLEventPostToPid`'s guessed signature is correct. It mirrors
+  the public `CGEventPostToPid`'s shape. A human on a real macOS session
+  needs to confirm both. This repo's policy is that native-API behavior
+  has no CI coverage.
 
 - **PINV-47** — the decision logic is fully covered by automated `cargo
   test -p polarize-core` (`orchestrate::tests`), against fakes: target
@@ -2174,10 +2203,10 @@ See the enforcement checklist entry below.
 
   What is **not** automated: whether `MacInputSynthesizer`'s real
   `click_at_pixel` reports `post_path` correctly against the real
-  `SLEventPostToPid` call, and whether a pid-posted click really leaves
-  the cursor untouched on a real screen. Not yet live-verified in this
-  pass. A human on a real macOS session needs to confirm both, per this
-  repo's policy that native-API behavior has no CI coverage.
+  `SLEventPostToPid` call. Also unverified: whether a pid-posted click
+  really leaves the cursor untouched on a real screen. Neither is
+  live-verified in this pass. A human on a real macOS session needs to
+  confirm both.
 
 - **PINV-48** — the decision logic is fully covered by automated `cargo
   test -p polarize-core` (`orchestrate::tests`), against fakes:
@@ -2193,18 +2222,20 @@ See the enforcement checklist entry below.
 
   What is **not** automated, and not yet live-verified in this pass:
   everything about `MacWindowManager::activate_app_without_raise`'s
-  real behavior. Whether it actually avoids raising the window and
-  switching the current Space. Whether
+  real behavior. This invariant's "Correction, part two" names
+  skipping `AXUIElementPerformAction`/`kAXRaiseAction` as the real
+  no-raise mechanism. Whether that alone is enough is unverified. This
+  implementation also skips a further conditional event-record block
+  ("What this implementation deliberately skips" above). Whether that
+  second gap matters too is also unverified. Whether
   `carbon_process::find_psn_for_pid` resolves a real psn for a real
-  running app's pid. Whether `kCPSUserGenerated` alone is enough for
-  `polarize`'s simpler one-shot case — this implementation skips this
-  function's leading conditional event-record block (see this
-  invariant's "Correction" note above), and that gap could mean a real
-  target still raises sometimes. Whether the fallback to `activate_app`
-  genuinely reproduces today's raising behavior when the SkyLight
-  symbols are forced off. A human on a real macOS session needs to
-  confirm all of this, per this repo's policy that native-API behavior
-  has no CI coverage.
+  running app's pid is unverified. Whether the no-on-screen-window gate
+  really degrades to `Ok(false)` against a real headless or backgrounded
+  target is unverified — a real native failure this code has not seen
+  could surface differently. Whether the fallback to `activate_app`
+  genuinely reproduces today's raising behavior, when the SkyLight
+  symbols are forced off, is unverified too. A human on a real macOS
+  session needs to confirm all of this.
 
 - **PINV-49** — the decision logic is fully covered by automated `cargo
   test -p polarize-core` (`orchestrate::tests`), against fakes: target
@@ -2220,9 +2251,8 @@ See the enforcement checklist entry below.
 
   What is **not** automated, and not yet live-verified in this pass:
   whether `MacInputSynthesizer`'s real `type_text`/`press_key` report
-  `post_path` correctly against the real `SLEventPostToPid` call.
-  Whether a pid-posted key event really reaches the target app's first
-  responder — including the open question this invariant's text
-  states, above, about first-responder delivery when the target is not
-  AppKit-active. A human on a real macOS session needs to confirm both,
-  per this repo's policy that native-API behavior has no CI coverage.
+  `post_path` correctly against the real `SLEventPostToPid` call. Also
+  unverified: whether a pid-posted key event really reaches the target
+  app's first responder when it is not AppKit-active — the open
+  question this invariant's text states above. A human on a real macOS
+  session needs to confirm both.
