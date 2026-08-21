@@ -44,6 +44,9 @@ mod ax_ffi;
 pub mod capture;
 pub mod clipboard;
 mod content;
+/// Flow recording over a listen-only `CGEventTap`. See PINV-39 and
+/// PINV-40.
+pub mod event_tap;
 pub mod geometry;
 pub mod hit_test;
 pub mod input;

@@ -20,6 +20,9 @@ pub mod notifications;
 pub mod orchestrate;
 pub mod permission;
 pub mod process;
+/// Flow recording over a listen-only `CGEventTap`. See PINV-39 and
+/// PINV-40.
+pub mod recording;
 pub mod schema;
 pub mod script;
 pub mod selector;

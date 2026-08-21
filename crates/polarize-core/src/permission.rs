@@ -53,6 +53,13 @@ pub enum PermissionKind {
     /// the case that prompts. A write never prompts. See PINV-34 and
     /// [`crate::clipboard`].
     Clipboard,
+    /// Input Monitoring — required to open a listen-only `CGEventTap`
+    /// and read the real input a user makes. macOS calls this grant
+    /// `kTCCServiceListenEvent`, and `CGPreflightListenEventAccess`
+    /// reports it. It is **not** the Accessibility grant that posts
+    /// synthetic events, and it lives in its own System Settings pane.
+    /// See [`crate::recording`] and PINV-39.
+    InputMonitoring,
 }
 
 impl fmt::Display for PermissionKind {
@@ -62,6 +69,10 @@ impl fmt::Display for PermissionKind {
             PermissionKind::Accessibility => write!(f, "Accessibility"),
             PermissionKind::Automation => write!(f, "Automation"),
             PermissionKind::Clipboard => write!(f, "Clipboard"),
+            // The exact name of the System Settings pane. A caller who
+            // reads "Accessibility" here goes to the wrong pane, grants
+            // a permission polarize already holds, and sees no change.
+            PermissionKind::InputMonitoring => write!(f, "Input Monitoring"),
         }
     }
 }
@@ -131,6 +142,9 @@ pub enum ToolKind {
     /// `await_workspace_event` — waits for an app switch, a wake, or a
     /// session change. See `crate::workspace_events` (PINV-36).
     AwaitWorkspaceEvent,
+    /// `record_flow` — records the real input a user makes, for a
+    /// bounded time. See `crate::recording` (PINV-39, PINV-40).
+    RecordFlow,
 }
 
 /// # PINV-2: every tool call is gated on at most one permission
@@ -193,6 +207,10 @@ pub fn required_permission(tool: ToolKind) -> Option<PermissionKind> {
         | ToolKind::ListDisplays
         | ToolKind::FrontmostApp
         | ToolKind::AwaitWorkspaceEvent => None,
+        // A listen-only `CGEventTap` needs Input Monitoring, and only
+        // Input Monitoring. The Accessibility grant that posts a
+        // `CGEvent` does not open a tap that reads one. See PINV-39.
+        ToolKind::RecordFlow => Some(PermissionKind::InputMonitoring),
     }
 }
 
@@ -481,3 +499,76 @@ mod tests {
 }
 
 // ---- the workspace tools: list_windows, app_launch, app_quit, list_displays ----
+
+// ---- flow recording: record_flow (PINV-39, PINV-40) ----------------------
+
+#[cfg(test)]
+mod recording_permission_tests {
+    use super::*;
+
+    #[test]
+    fn record_flow_requires_input_monitoring() {
+        assert_eq!(
+            required_permission(ToolKind::RecordFlow),
+            Some(PermissionKind::InputMonitoring)
+        );
+    }
+
+    #[test]
+    fn record_flow_does_not_reuse_the_accessibility_grant() {
+        // Posting a `CGEvent` and listening for one are two different
+        // TCC grants. A caller sent to the Accessibility pane grants
+        // what polarize already holds, and nothing improves.
+        assert_ne!(
+            required_permission(ToolKind::RecordFlow),
+            required_permission(ToolKind::Tap)
+        );
+        assert_ne!(
+            required_permission(ToolKind::RecordFlow),
+            required_permission(ToolKind::Keyboard)
+        );
+    }
+
+    #[test]
+    fn input_monitoring_displays_its_settings_pane_name() {
+        assert_eq!(
+            PermissionKind::InputMonitoring.to_string(),
+            "Input Monitoring"
+        );
+    }
+
+    #[test]
+    fn a_granted_accessibility_status_does_not_satisfy_record_flow() {
+        let statuses = [PermissionStatus {
+            kind: PermissionKind::Accessibility,
+            state: PermissionState::Granted,
+        }];
+        let err = check_permission(ToolKind::RecordFlow, &statuses).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Input Monitoring permission is NotDetermined, not granted"
+        );
+    }
+
+    #[test]
+    fn a_granted_input_monitoring_status_lets_record_flow_run() {
+        let statuses = [PermissionStatus {
+            kind: PermissionKind::InputMonitoring,
+            state: PermissionState::Granted,
+        }];
+        assert!(check_permission(ToolKind::RecordFlow, &statuses).is_ok());
+    }
+
+    #[test]
+    fn a_denied_input_monitoring_status_names_the_pane() {
+        let statuses = [PermissionStatus {
+            kind: PermissionKind::InputMonitoring,
+            state: PermissionState::Denied,
+        }];
+        let err = check_permission(ToolKind::RecordFlow, &statuses).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Input Monitoring permission is Denied, not granted"
+        );
+    }
+}
