@@ -62,7 +62,10 @@ fn main() {
     init_tracing();
 
     if std::env::args().nth(1).as_deref() == Some("--request-permissions") {
-        request_permissions();
+        let automation_target = std::env::args()
+            .nth(2)
+            .unwrap_or_else(|| AUTOMATION_BOOTSTRAP_TARGET.to_string());
+        request_permissions(&automation_target);
         return;
     }
 
@@ -121,12 +124,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The one target every Mac has, that `run_applescript` is documented
-/// to reach. See PINV-44: Automation is granted per (this process,
-/// target app) pair, so this only ever bootstraps Finder — a caller
-/// scripting Mail, Safari, Music, or Notes still needs its own first
-/// real script send (through `run_applescript` itself) to raise that
-/// target's own consent dialog.
+/// The default bootstrap target when `--request-permissions` names
+/// none. Every Mac has Finder, so this always resolves.
 const AUTOMATION_BOOTSTRAP_TARGET: &str = "Finder";
 
 /// One-time setup: shows the system Accessibility, Screen Recording,
@@ -134,7 +133,17 @@ const AUTOMATION_BOOTSTRAP_TARGET: &str = "Finder";
 /// grants survive future `just build` re-signs. Not part of the MCP
 /// server's own startup path — see `polarize_macos::permission_bootstrap`
 /// for why this exists.
-fn request_permissions() {
+///
+/// Automation is granted per (this process, target app) pair — see
+/// PINV-44. `run_applescript` itself never raises a new target's
+/// consent dialog: `preflight_automation` (`applescript.rs`) checks
+/// with `ask_user_if_needed: false` and returns an error before
+/// `osascript` ever runs, so a script aimed at an unauthorized app
+/// always refuses locally, silently, with no dialog. `automation_target`
+/// names which app this call bootstraps; run this once per target app
+/// `run_applescript` needs to reach, e.g.
+/// `./target/debug/polarize --request-permissions Messages`.
+fn request_permissions(automation_target: &str) {
     println!("Requesting Accessibility permission...");
     let accessibility = polarize_macos::permission_bootstrap::request_accessibility();
     println!("  Accessibility trusted: {accessibility}");
@@ -143,10 +152,9 @@ fn request_permissions() {
     let screen_recording = polarize_macos::permission_bootstrap::request_screen_recording();
     println!("  Screen Recording trusted: {screen_recording}");
 
-    println!("Requesting Automation permission for {AUTOMATION_BOOTSTRAP_TARGET}...");
-    let automation =
-        polarize_macos::permission_bootstrap::request_automation(AUTOMATION_BOOTSTRAP_TARGET);
-    println!("  Automation ({AUTOMATION_BOOTSTRAP_TARGET}): {automation:?}");
+    println!("Requesting Automation permission for {automation_target}...");
+    let automation = polarize_macos::permission_bootstrap::request_automation(automation_target);
+    println!("  Automation ({automation_target}): {automation:?}");
 
     if !accessibility
         || !screen_recording
@@ -154,9 +162,11 @@ fn request_permissions() {
     {
         println!(
             "\nIf a system dialog appeared, approve it, then run \
-             `./target/debug/polarize --request-permissions` again to confirm.\n\
-             `run_applescript` against any other app (Mail, Safari, Music, Notes, …) \
-             still needs its own first real call to raise that app's own consent dialog — \
+             `./target/debug/polarize --request-permissions {automation_target}` again to \
+             confirm.\n\
+             `run_applescript` against any other app (Mail, Safari, Music, Notes, …) needs \
+             its own bootstrap run first — \
+             `./target/debug/polarize --request-permissions <App Name>` — \
              Automation is granted per target app, not once for the whole binary."
         );
     }

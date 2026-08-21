@@ -100,6 +100,8 @@ pub enum ToolKind {
     /// `await_screen_idle` — see [`crate::wait`].
     AwaitScreenIdle,
     RunAppleScript,
+    /// `script_dictionary` — reads an app's scripting dictionary via the
+    /// `sdef` CLI tool, a plain resource read. See `crate::script`.
     ScriptDictionary,
     /// `set_value` — writes one AX attribute of one element. See
     /// `crate::set_value` (PINV-26).
@@ -171,7 +173,12 @@ pub fn required_permission(tool: ToolKind) -> Option<PermissionKind> {
         // Both `await` tools read the accessibility tree, and
         // `AXObserverCreate` needs the same trust as `AXUIElement` does.
         ToolKind::AwaitUiElement | ToolKind::AwaitScreenIdle => Some(PermissionKind::Accessibility),
-        ToolKind::RunAppleScript | ToolKind::ScriptDictionary => Some(PermissionKind::Automation),
+        ToolKind::RunAppleScript => Some(PermissionKind::Automation),
+        // `sdef` reads a bundle's scripting-definition resource straight
+        // off disk. It sends no Apple Event, so it needs no Automation
+        // grant — unlike `run_applescript`, which actually drives the
+        // target app.
+        ToolKind::ScriptDictionary => None,
         // `set_value` writes through `AXUIElementSetAttributeValue`,
         // which needs the same trust every other AX call needs.
         ToolKind::SetValue => Some(PermissionKind::Accessibility),
@@ -399,15 +406,18 @@ mod tests {
     }
 
     #[test]
-    fn applescript_tools_require_automation() {
+    fn run_applescript_requires_automation() {
         assert_eq!(
             required_permission(ToolKind::RunAppleScript),
             Some(PermissionKind::Automation)
         );
-        assert_eq!(
-            required_permission(ToolKind::ScriptDictionary),
-            Some(PermissionKind::Automation)
-        );
+    }
+
+    #[test]
+    fn script_dictionary_needs_no_permission() {
+        // `sdef` reads a bundle resource off disk; it sends no Apple
+        // Event, unlike `run_applescript`.
+        assert_eq!(required_permission(ToolKind::ScriptDictionary), None);
     }
 
     #[test]

@@ -53,35 +53,50 @@ claim automated coverage they don't have.
   tap at the wrong point instead of a clear error that points at the
   caller's bug.
 
-### PINV-2: every tool call is gated on at most one permission (decision logic)
+### PINV-2: `required_permission` is an audit table, not a live gate — real enforcement is per tool
 
 - Always: `permission::required_permission` maps each `ToolKind` to at
-  most one `PermissionKind`, and `permission::check_permission` refuses
-  to run a tool whose required permission is not `Granted` (a permission
-  absent from the caller's status list is treated as `NotDetermined`,
-  never as implicitly granted). A tool that needs no TCC grant maps to
-  `None` and always passes the check.
+  most one `PermissionKind`. `permission::check_permission` decides,
+  given a permission-status list, whether that mapped requirement is
+  `Granted` (a permission absent from the list reads as
+  `NotDetermined`, never as implicitly granted). Neither function is
+  called anywhere in `polarize`'s real request path — no server code,
+  no orchestration function, ever calls `check_permission`. That is
+  deliberate: `apps/polarize/src/server.rs`'s own doc comment states
+  each `polarize-macos` tool implementation preflights its own
+  permission directly (`ensure_input_permission`,
+  `ensure_screen_recording_permission`, `preflight_automation`, and so
+  on — see PINV-10), rather than passing through one central gate.
+  `required_permission`'s job is narrower: it is the single, pure,
+  fully-tested table an audit checks each tool's real ad-hoc preflight
+  against, and the table a caller reads to learn what a tool needs
+  before calling it. A tool that needs no TCC grant maps to `None`.
 - Because: `polarize-macos`'s native calls fail in ways that are easy to
   misdiagnose from the raw OS error alone (a denied AX permission and a
   genuinely missing UI element can both surface as "element not found").
-  Deciding, from a permission-status list, whether a tool may run — in
-  one pure, testable place — is what makes that decision auditable
-  independent of which real API `polarize-macos` happens to call to
-  learn the status. The mapping must be able to say "none", because
+  Having one pure, testable table of what each tool *should* need makes
+  that claim auditable independent of which real API each tool happens
+  to call to learn its status — and independent of whether a future
+  tool's own ad-hoc preflight is missing or wrong, which this table
+  alone cannot catch. The mapping must be able to say "none", because
   several tools really need nothing: `app_launch`, `app_quit`,
-  `list_displays`, `frontmost_app`, `await_workspace_event`, and a
+  `list_displays`, `frontmost_app`, `await_workspace_event`,
+  `script_dictionary` (an `sdef` file read, not an Apple Event), and a
   clipboard *write* are all unprivileged. A table that could only name a
   permission would force each of those to claim a grant it never uses,
   and the table is read as the answer to "what does `polarize` need?".
-  (Scope note: this function encodes the *decision*; see PINV-10 for how
-  `polarize-macos`'s real tool implementations actually learn the
-  permission status and gate on it today.)
-- If violated: a caller sees a confusing native failure (or, worse, a
-  `tap`/`keyboard` call that silently no-ops) instead of "grant
-  Accessibility access to run this tool". Map a tool to a permission it
-  does not use, and the table lies the other way: a caller grants
-  something nothing needed, and an audit of what `polarize` asks for
-  stops matching what it does.
+- If violated: this table claiming a permission a tool's real
+  implementation does not check for is a documentation bug, not a
+  security gap — the tool still runs unchecked either way, since
+  nothing here enforces anything. A caller who trusts the table instead
+  of the tool's own behavior would grant, or withhold, the wrong thing.
+  A tool's own missing preflight is the real gap this table cannot
+  detect by itself; that requires auditing each `polarize-macos`
+  implementation directly, which a full pass of this repository's
+  tools confirmed clean except for one prior mismatch corrected here:
+  `script_dictionary` was mapped to `Automation` although `app_sdef`
+  (`applescript.rs`) only shells out to `sdef`, never sends an Apple
+  Event, and needs no TCC grant at all.
 
 ### PINV-3: `describe` output is pre-order and depth-accurate
 
@@ -1458,6 +1473,15 @@ target both times. See the enforcement checklist entry below.
   `polarize-macos` or `apps/polarize`. The real tool implementations gate
   permission a different way (see PINV-10). That real-world gating path
   is native-only, and has **not** been automatically tested anywhere.
+  **Audited in this pass**: every `ToolKind` this table names was traced
+  to its real implementation to confirm each one's own ad-hoc preflight
+  actually matches what the table claims. 23 of 24 gated/ungated tools
+  checked out correctly. One mismatch was found and fixed:
+  `script_dictionary` was mapped to `Automation`, but its real
+  implementation (`app_sdef`, over the `sdef` CLI tool) sends no Apple
+  Event and needs no TCC grant; it is now mapped to `None`. No tool was
+  found silently running a native call its own claimed permission
+  should have refused.
 - **PINV-3** — fully covered by automated `cargo test -p polarize-core`
   (`ax::tests`): depth-zero single node, pre-order traversal with
   correct depths across a multi-level tree, children-order preservation,
