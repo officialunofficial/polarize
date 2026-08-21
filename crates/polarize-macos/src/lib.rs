@@ -38,6 +38,9 @@
 
 pub mod accessibility;
 pub mod action;
+/// Resolves whether `polarize`'s own code signature can see the
+/// shared App Group container. See PINV-52's follow-up note.
+pub mod app_group;
 pub mod app_lookup;
 pub mod applescript;
 mod ax_ffi;

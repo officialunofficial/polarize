@@ -68,6 +68,18 @@ fn log_responsibility_state() {
     );
 }
 
+/// Logs whether this process's own code signature can see the shared
+/// App Group container, so PINV-52's still-open question about
+/// `polarize`'s own entitlements is observable without a debugger —
+/// the same role `log_responsibility_state` plays for the
+/// responsible-process question.
+fn log_app_group_state() {
+    tracing::info!(
+        state = %polarize_macos::app_group::container_summary(),
+        "shared App Group container state"
+    );
+}
+
 /// Respawns this process disclaimed when
 /// [`polarize_macos::self_responsibility::should_respawn_disclaimed`]
 /// says it is warranted, so `polarize` becomes its own TCC-responsible
@@ -106,6 +118,7 @@ fn main() {
     // above already returned, so its own bootstrap send (PINV-51)
     // stays untouched by this.
     log_responsibility_state();
+    log_app_group_state();
     respawn_disclaimed_if_warranted();
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()

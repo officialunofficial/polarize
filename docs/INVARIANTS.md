@@ -1703,21 +1703,47 @@ App Groups capability. With "Automatically manage signing" on, Xcode
 registers that group in the Apple Developer portal itself on its next
 successful signing resolution — no manual portal step on that side.
 
-**Still unverified: whether the entitlement does anything on
-`polarize`'s own side.** Xcode's managed signing validates entitlements
-against a real, Apple-issued provisioning profile embedded in the
-bundle. `just build` signs `polarize` a different way entirely: a bare
-`codesign --sign polarize-dev --entitlements ...` call, a local
-self-signed certificate, no provisioning profile at all. Whether
-`com.apple.security.application-groups` resolves to a real, usable
-container path (via
-`NSFileManager.containerURL(forSecurityApplicationGroupIdentifier:)`,
-or its Rust/`objc` equivalent) for a binary signed that way — profile-
-less, and not sandboxed itself — is unresolved. A live check, once
-`polarize` is signed with a real Developer ID Application certificate
-under Team `N8R89M8725` rather than `polarize-dev`, would confirm this
-one way or the other. Treat the entitlement as declared but unproven
-until that check runs.
+**Live-verified: the entitlement resolves for `polarize`'s own signing
+story too.** See PINV-53 for the check, the code that makes it
+observable at startup, and its confirmed result.
+
+### PINV-53: the shared App Group container resolves for `polarize`'s own signing story, confirmed live under a real Developer ID certificate
+
+- Always: `polarize_macos::app_group::container_summary`, logged at
+  MCP server startup right after PINV-52's own responsibility-state
+  log line, asks `NSFileManager.defaultManager()` for the container
+  directory of `N8R89M8725.fun.uno.polarize` — the same App Group
+  string both `apps/polarize/polarize.entitlements` and the desktop
+  host app's own entitlements carry. `container_url` reports the real
+  path when the calling process's own code signature can see the
+  group; `None` when it cannot.
+- Because: PINV-52's own follow-up flagged this as unresolved — Xcode
+  validates App Group access against a real, Apple-issued provisioning
+  profile, and `polarize`'s own `codesign`-only signing story has no
+  direct equivalent to that. Whether the App Groups entitlement does
+  anything for a profile-less binary was an open question, not an
+  assumption to build on.
+- If violated: any future code that reads or writes through this
+  group silently gets `None`/a permissions error instead of a real
+  container path, with no signal at startup that the entitlement
+  never took effect.
+
+**Live-verified**, once `com.officialunofficial.polarize` was
+registered as an App ID under Team `N8R89M8725` with App Groups
+capability, matching the desktop host app's own registration (see this
+invariant's own git history for the manual portal step that unblocked
+this). `target/debug/Polarize.app`, re-signed with a real "Developer ID
+Application: Official Unofficial, Inc. (N8R89M8725)" certificate
+instead of the local `polarize-dev` one — `codesign -dv` confirmed
+`TeamIdentifier=N8R89M8725` and both entitlements present — logged a
+resolved container path under the App Group's own directory inside
+`~/Library/Group Containers/`, on every run tried, both before and
+after PINV-52's own disclaimed self-respawn (the respawned child is
+the same signed binary, so this was expected to match, and did). No
+provisioning profile was embedded in the bundle at any point
+— confirming, for this specific entitlement and this specific macOS
+session, that App Group container access on macOS does not require
+one the way iOS does.
 
 ## Enforcement checklist
 
@@ -2697,3 +2723,15 @@ until that check runs.
   to that row. That needs a live macOS session with a real approval —
   the same live check PINV-44/50/51 already required and could not
   fully resolve.
+
+- **PINV-53** — not automated: this needs a real App ID/App Group
+  registration under a real team, which no CI runner has. Live-verified
+  in this session instead, after `com.officialunofficial.polarize` was
+  registered as an App ID with App Groups capability, matching under
+  Team `N8R89M8725`: `target/debug/Polarize.app`, signed with a real
+  "Developer ID Application: Official Unofficial, Inc." certificate,
+  logged a resolved shared-container path on every run, both before
+  and after PINV-52's own disclaimed self-respawn. `app_group`'s two
+  functions are otherwise compile/link-checked only — the actual
+  `NSFileManager` call they wrap cannot run meaningfully without a
+  real, team-registered App Group behind it.
