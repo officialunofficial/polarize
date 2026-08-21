@@ -79,7 +79,8 @@ use polarize_core::schema::{
     ScreenshotResponse, TapRequest, TapResponse,
 };
 use polarize_core::script::{
-    self, RunAppleScriptRequest, RunAppleScriptResponse, ScriptDictionaryRequest,
+    self, RequestAutomationPermissionRequest, RequestAutomationPermissionResponse,
+    RunAppleScriptRequest, RunAppleScriptResponse, ScriptDictionaryRequest,
     ScriptDictionaryResponse,
 };
 use polarize_core::set_value::{self, SetValueRequest, SetValueResponse};
@@ -385,6 +386,29 @@ impl PolarizeServer {
         Parameters(request): Parameters<ScriptDictionaryRequest>,
     ) -> Result<Json<ScriptDictionaryResponse>, ErrorData> {
         blocking(move || script::perform_script_dictionary(&MacAppleScriptRunner, &request)).await
+    }
+
+    /// One-time setup: shows the system Automation consent dialog for
+    /// one target app, if its permission is not already determined, and
+    /// reports the resulting state. Call this once per app
+    /// `run_applescript` needs to reach — Automation is granted per
+    /// (this process, target app) pair, not once for the whole binary.
+    /// Unlike `run_applescript` itself, this never refuses locally
+    /// before trying: it always attempts a real, harmless script send,
+    /// which is what actually raises the system dialog.
+    #[tool(name = "request_automation_permission")]
+    #[tracing::instrument(skip(self))]
+    async fn request_automation_permission(
+        &self,
+        Parameters(request): Parameters<RequestAutomationPermissionRequest>,
+    ) -> Result<Json<RequestAutomationPermissionResponse>, ErrorData> {
+        blocking(move || {
+            Ok(script::perform_request_automation_permission(
+                &MacAppleScriptRunner,
+                &request,
+            ))
+        })
+        .await
     }
 
     /// Writes one accessibility attribute of one element directly:

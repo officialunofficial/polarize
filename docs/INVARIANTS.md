@@ -18,7 +18,7 @@ the order they were added, not by severity or crate.
 logic: coordinate normalization, the accessibility-tree data model, MCP
 tool schemas, error types, the permission-state enum, and the trait
 definitions `polarize-macos` implements. Every invariant that lives in
-it has real `cargo test` coverage (631 tests as of this writing).
+it has real `cargo test` coverage (649 tests as of this writing).
 
 `polarize-macos` implements those traits with real native calls
 (`ScreenCaptureKit`, `AXUIElement`, `CGEvent`, AppKit). These **cannot**
@@ -1160,11 +1160,15 @@ claim automated coverage they don't have.
 
 ### PINV-44: an Automation grant is requested with a real script send, per target app, never with the prompting preflight call
 
-- Always: `polarize --request-permissions` calls
-  `polarize_macos::applescript::request_automation` once, for Finder.
-  That function launches (or activates) the target. It sends one
-  real, harmless script through the same `osascript` path
-  `run_applescript` uses. It deliberately skips
+- Always: `polarize --request-permissions <app name>` calls
+  `polarize_macos::applescript::request_automation` once, for the named
+  app (`Finder` when none is given — every Mac has it, so it always
+  resolves). The same bootstrap is also reachable from a live session,
+  without a CLI restart, through the `request_automation_permission`
+  MCP tool, which calls the identical function from inside the running
+  server process. Either caller launches (or activates) the target,
+  then sends one real, harmless script — see PINV-51 for what that
+  send actually runs through. It deliberately skips
   `MacAppleScriptRunner::preflight_automation`, the check that would
   otherwise refuse it. It reports the resulting
   `polarize_core::script::AutomationCheck`. It never calls
@@ -1196,6 +1200,37 @@ claim automated coverage they don't have.
   A caller that reaches for `AEDeterminePermissionToAutomateTarget`'s
   prompting form instead risks the hang bug. That bug blocks the whole
   bootstrap, not just one target.
+
+**Correction: the earlier "responsible process" caveat, resolved.** An
+earlier pass through this invariant flagged, but could not isolate, a
+real risk: TCC's Automation grant is keyed to a "responsible process,"
+and that identity can be inherited up a parent chain rather than
+belonging to `polarize` itself. A later live session confirmed this
+directly, not by inference. `open -a <path to polarize's binary>`
+fails outright, `-600` (`kLSApplicationNotFoundErr`) — `LaunchServices`
+refuses to treat a bare, non-bundle executable as an application at
+all, closing off "just launch it differently" as a workaround. And
+System Settings' own Privacy & Security > Automation pane, inspected
+live via `describe` and a screenshot, groups every grant by the
+*requesting* process: `Ghostty.app` (the terminal `polarize` was
+launched from) held real grants for several apps. `polarize` itself
+never appeared as its own row, with or without PINV-50's embedded
+bundle identity in place. Every Automation grant this session actually
+exercised, including the one that finally let `run_applescript` reach
+Messages, was recorded against the launching terminal — or, if PINV-51's
+disclaim took effect, against a spawned child disclaiming that
+terminal's identity. Neither this pass, nor PINV-51's own text, can
+cleanly tell those two apart from the observable evidence.
+
+The practical result: `--request-permissions <app>`'s dialog is real
+and its resulting grant works — confirmed live, `run_applescript`
+reached Messages and sent a real message after approval — but nothing
+in this codebase makes that grant belong to `polarize`'s own process
+identity specifically. It belongs to whatever launched `polarize`, or
+to `osascript`'s own disclaimed spawn. A real `.app` bundle for
+`polarize`, registered with `LaunchServices` and not attempted in this
+pass, is the one remaining path research turned up for `polarize` to
+hold a grant under its own name, independent of how it was launched.
 
 ### PINV-45: a `describe` walk stops at a total node budget, not only a depth limit
 
@@ -1457,6 +1492,85 @@ live session confirmed this directly: two `keyboard` calls in a row,
 each targeting a backgrounded app while a person was actively working
 in a different one, visibly pulled real keyboard focus back to the
 target both times. See the enforcement checklist entry below.
+
+### PINV-50: `polarize` embeds a real bundle identity for Automation's own sake
+
+- Always: `apps/polarize/build.rs` generates an `Info.plist`
+  (`CFBundleIdentifier: com.officialunofficial.polarize`,
+  `CFBundleVersion`, `NSAppleEventsUsageDescription`) and links it into
+  the binary's `__TEXT,__info_plist` Mach-O section — the same section
+  a real `.app` bundle's `Contents/Info.plist` would occupy, but on a
+  bare executable with no bundle directory at all.
+  `justfile`'s `build` recipe signs the result with `--options runtime
+  --entitlements apps/polarize/polarize.entitlements`, which grants
+  `com.apple.security.automation.apple-events`. `codesign -dv` confirms
+  both: `Info.plist entries=5` and the entitlement's presence.
+- Because: TCC's Automation check needs two separate things from a
+  binary that wants to send Apple Events at all — a stable
+  code-signing identity (already covered by `justfile`'s
+  `--identifier`, so a grant survives a rebuild) and a real bundle
+  identity macOS can hold a permission record against. A bare Mach-O
+  executable has neither by default: `cargo build` alone produces an
+  ad-hoc, content-hash identity that changes on every rebuild, and no
+  `Info.plist` at all. `--options runtime` plus the
+  `com.apple.security.automation.apple-events` entitlement are
+  separately required — an unentitled binary's Apple Event sends are
+  refused outright, even once it has a bundle identity to check
+  against.
+- If violated: `AEDeterminePermissionToAutomateTarget` has nothing
+  stable to key a grant to. Every `--request-permissions` run reports
+  `NotDetermined` forever, and a grant a person did manage to approve
+  cannot survive the next rebuild.
+
+**This alone did not resolve the live symptom this session
+investigated.** See PINV-44's "Correction" section: a bundle identity
+is necessary, but this pass found it is not sufficient on its own —
+`polarize`, launched from an interactive shell or an MCP server's own
+process tree, still never appeared as its own row in System Settings'
+Automation pane, embedded `Info.plist` or not. TCC's
+"responsible-process" climb looks past this fix entirely when
+`polarize` is not itself the process a human directly launched.
+
+### PINV-51: the Automation bootstrap disclaims its spawned child's TCC responsibility
+
+- Always: `request_automation`'s real script send goes through
+  `disclaimed_spawn::send_disclaimed_bootstrap_script`, not a plain
+  `osascript` subprocess. That function resolves the private,
+  undocumented `responsibility_spawnattrs_setdisclaim` symbol via
+  `dlsym(RTLD_DEFAULT, ...)` — the same resolution pattern
+  `skylight_ffi.rs` uses for its own private symbols — sets it on a
+  `posix_spawnattr_t`, and spawns `osascript` with `posix_spawnp`
+  directly, bypassing `std::process::Command` (which offers no hook to
+  set this attribute). A name that does not resolve degrades to an
+  ordinary, non-disclaimed spawn; the send still happens, just without
+  retargeting its responsible process. `stdin`/`stdout`/`stderr` are
+  each redirected to `/dev/null` via `posix_spawn_file_actions_addopen`
+  — this send's own process's real stdio may be an MCP stdio
+  transport, and the spawned child must never inherit those
+  descriptors directly.
+- Because: a disclaimed child becomes its own responsible process,
+  decoupled from whatever launched `polarize` (an interactive shell, or
+  an MCP client). LLVM's own `lldb` uses the identical API for the same
+  reason, in a different context (decoupling a debuggee from its
+  debugger's own responsibility) — confirmed by reading `lldb`'s actual
+  source (`Host.mm`), not a secondhand description of it.
+- If violated: the bootstrap's real send keeps inheriting whatever
+  process actually launched `polarize`, and PINV-44's "Correction"
+  section's finding holds without qualification: `polarize` can never
+  hold its own Automation grant, under any bundle identity, no matter
+  how the send itself is spawned.
+
+**Whether this specific mechanism is what let a real session's
+Automation permission for Messages reach `Permitted` is unverified.**
+Four different techniques were tried in the same session — a direct
+shell-launched send, a plain spawn from `polarize`'s own CLI, a plain
+spawn from the live MCP server process, and this disclaimed spawn —
+and none of them visibly raised a new consent dialog in the moments
+right after running. The permission did become `Permitted`
+afterward, following a person's own approval of a dialog found later.
+Which of the four sends that dialog actually belonged to could not be
+isolated from the available evidence. See the enforcement checklist
+entry below, and PINV-44's "Correction" section.
 
 ## Enforcement checklist
 
@@ -2229,20 +2343,20 @@ target both times. See the enforcement checklist entry below.
   same `run_applescript` call against Finder succeeded. It returned
   real data (`get name of every disk`).
 
-  One caveat this pass could not cleanly isolate. TCC's Automation
-  grant is keyed to a "responsible process." That identity can be
-  inherited up a parent chain (Scripting OS X's writeup on avoiding
-  AppleScript privacy prompts documents this). This session had
-  already sent a real, unrelated `osascript` call to Finder directly
-  from the same shell, hours earlier. That call may have granted the
-  same underlying identity before this fix's own bootstrap ever ran.
-  `tccutil reset AppleEvents` would isolate this cleanly. But it
-  resets every Automation grant on the machine, not just this
-  binary's, so this pass did not run it. A human re-verifying this
-  invariant on a genuinely clean machine (or after `tccutil reset
-  AppleEvents`) should confirm one thing: `--request-permissions`
-  alone, with no prior `osascript` call from any process, is what
-  raises the dialog and moves the state to `Permitted`.
+  **Update, a later session: the caveat above is resolved, not in the
+  direction hoped.** A follow-up pass confirmed directly (System
+  Settings' own Automation pane, inspected live) that the "responsible
+  process" is genuinely the launching terminal, not `polarize` itself
+  — see PINV-44's "Correction" section, and PINV-50/PINV-51. That same
+  pass still reached `Permitted` for Messages specifically, and
+  `run_applescript` sent a real message after a person approved a real
+  consent dialog — live-verified, not inferred. But which of several
+  bootstrap attempts that dialog belonged to could not be isolated. A
+  future re-verification on a genuinely clean machine (or after
+  `tccutil reset AppleEvents`, which resets every Automation grant on
+  the machine, not just one binary's) is the only way to confirm
+  `--request-permissions` alone, under `polarize`'s own process
+  identity, is what raises a given target's dialog.
 
 - **PINV-45** — not automatable. It is a claim about real wall-clock
   cost against a real, wide AX tree, which does not exist in CI. The
@@ -2366,3 +2480,37 @@ target both times. See the enforcement checklist entry below.
   the activation call for the pid-post case is not a viable fix; it
   would only make `keyboard` post text nobody's focused view reads.
   See PINV-48's text above for the full argument.
+
+- **PINV-50** — the embedding itself is code-inspectable and confirmed
+  live: `codesign -dv target/debug/polarize` reports `Info.plist
+  entries=5` and `flags=0x10000(runtime)`; `codesign --entitlements -`
+  confirms `com.apple.security.automation.apple-events` is present.
+  The binary still launches cleanly under this signing (confirmed via
+  a direct run: `SkyLight symbol resolution` logs appear as before,
+  proving the hardened runtime does not block `dlopen`ing an
+  Apple-signed system framework). What is **not** automated, and only
+  partly live-verified: whether this embedded identity is what TCC
+  actually checks a grant against, on its own, independent of launch
+  context. See PINV-44's "Correction" section — this pass found direct
+  evidence it is not sufficient alone.
+
+- **PINV-51** — fully covered by automated `cargo test -p
+  polarize-macos` (`disclaimed_spawn::tests`), and runs for real in
+  CI: resolving `responsibility_spawnattrs_setdisclaim` via `dlsym`
+  needs no display and no TCC grant, the same reasoning
+  `skylight_ffi.rs`'s own tests rely on.
+  `set_disclaim_fn_resolves_on_a_real_macos_install` confirms the
+  private symbol resolves on a real install (this session's own dev
+  machine, confirmed non-`None`).
+  `send_disclaimed_bootstrap_script_does_not_panic_or_hang` sends a
+  real, harmless script against a deliberately bogus app name and
+  confirms the whole `posix_spawn` path returns cleanly.
+
+  What is **not** automated, and only inconclusively live-verified:
+  whether disclaiming the child's responsibility changes which
+  identity TCC's Automation check attributes a send to, or which
+  dialog it raises. Four different send techniques were tried
+  live in the same session, this one included, and none visibly
+  raised a new dialog in the moments right after running. See
+  PINV-44's "Correction" section and this invariant's own text above
+  for what could and could not be isolated.

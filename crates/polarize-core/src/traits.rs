@@ -14,6 +14,7 @@ use crate::ax::AxNode;
 use crate::coords::PixelPoint;
 use crate::error::PolarizeError;
 use crate::schema::{AppIdentifier, Modifier, NamedKey, PostPath};
+use crate::script::AutomationCheck;
 
 /// A captured image, still in encoded PNG form.
 #[derive(Debug, Clone, PartialEq)]
@@ -280,6 +281,18 @@ pub trait AppleScriptRunner {
 
     /// Returns `app`'s scripting dictionary as raw `sdef` XML.
     fn app_sdef(&self, app: &AppIdentifier) -> Result<AppSdef, PolarizeError>;
+
+    /// Shows the system Automation consent dialog for `target_app_name`,
+    /// if its permission is not already determined, and returns the
+    /// resulting state. See PINV-44 and
+    /// `polarize_macos::permission_bootstrap::request_automation`.
+    ///
+    /// This bypasses [`Self::run_script`]'s own preflight on purpose: a
+    /// `NotDetermined` refusal there is exactly the state this method
+    /// exists to move past. Automation is granted per (this process,
+    /// target app) pair, so a caller names every target it commonly
+    /// scripts.
+    fn request_automation(&self, target_app_name: &str) -> AutomationCheck;
 }
 
 /// Writes one accessibility attribute of one element. Implemented by

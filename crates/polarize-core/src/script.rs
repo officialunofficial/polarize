@@ -228,7 +228,8 @@ pub fn script_failure_to_error(failure: ScriptFailure) -> PolarizeError {
 }
 
 /// What the native Automation preflight decided. See PINV-21.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum AutomationCheck {
     /// The caller may send Apple Events to this target.
     Permitted,
@@ -447,6 +448,40 @@ where
     })
 }
 
+/// A `request_automation_permission` call: which app to bootstrap
+/// Automation permission for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RequestAutomationPermissionRequest {
+    /// The target app's name, exactly as `run_applescript`'s
+    /// `target_app` names it. Automation is granted per (this process,
+    /// target app) pair — bootstrap each target this way once.
+    pub app_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RequestAutomationPermissionResponse {
+    /// What the permission state is after this call. `permitted` means
+    /// `run_applescript` can now reach `app_name`. Anything else means
+    /// either the user has not yet approved the system consent dialog
+    /// this call raised, or already refused it.
+    pub check: AutomationCheck,
+}
+
+/// Runs `runner`'s real Automation bootstrap for one target app and
+/// reports the resulting state. See
+/// [`AppleScriptRunner::request_automation`].
+pub fn perform_request_automation_permission<R>(
+    runner: &R,
+    request: &RequestAutomationPermissionRequest,
+) -> RequestAutomationPermissionResponse
+where
+    R: AppleScriptRunner,
+{
+    RequestAutomationPermissionResponse {
+        check: runner.request_automation(&request.app_name),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,6 +530,8 @@ mod tests {
         fail_with: Option<String>,
         runs: RefCell<Vec<RecordedRun>>,
         sdef_calls: RefCell<Vec<AppIdentifier>>,
+        automation_check: AutomationCheck,
+        automation_calls: RefCell<Vec<String>>,
     }
 
     impl FakeRunner {
@@ -508,6 +545,8 @@ mod tests {
                 fail_with: None,
                 runs: RefCell::new(Vec::new()),
                 sdef_calls: RefCell::new(Vec::new()),
+                automation_check: AutomationCheck::Permitted,
+                automation_calls: RefCell::new(Vec::new()),
             }
         }
 
@@ -515,6 +554,13 @@ mod tests {
             let mut runner = Self::new(outcome_ok(""));
             runner.fail_with = Some(message.to_string());
             runner
+        }
+
+        fn with_automation_check(automation_check: AutomationCheck) -> Self {
+            Self {
+                automation_check,
+                ..Self::new(outcome_ok(""))
+            }
         }
     }
 
@@ -542,6 +588,13 @@ mod tests {
                 Some(message) => Err(PolarizeError::Platform(message.clone())),
                 None => Ok(self.sdef.clone()),
             }
+        }
+
+        fn request_automation(&self, target_app_name: &str) -> AutomationCheck {
+            self.automation_calls
+                .borrow_mut()
+                .push(target_app_name.to_string());
+            self.automation_check
         }
     }
 
@@ -1122,6 +1175,33 @@ mod tests {
         };
         let err = perform_script_dictionary(&runner, &request).unwrap_err();
         assert!(err.to_string().contains("sdef failed"));
+    }
+
+    // --- perform_request_automation_permission ---
+
+    #[test]
+    fn the_automation_bootstrap_tool_names_the_target_app_it_asked_for() {
+        let runner = FakeRunner::with_automation_check(AutomationCheck::Permitted);
+        let request = RequestAutomationPermissionRequest {
+            app_name: "Messages".to_string(),
+        };
+        let response = perform_request_automation_permission(&runner, &request);
+        assert_eq!(response.check, AutomationCheck::Permitted);
+        assert_eq!(runner.automation_calls.borrow().as_slice(), ["Messages"]);
+    }
+
+    #[test]
+    fn the_automation_bootstrap_tool_reports_a_refusal_state() {
+        let runner =
+            FakeRunner::with_automation_check(AutomationCheck::Refused(PermissionState::Denied));
+        let request = RequestAutomationPermissionRequest {
+            app_name: "Mail".to_string(),
+        };
+        let response = perform_request_automation_permission(&runner, &request);
+        assert_eq!(
+            response.check,
+            AutomationCheck::Refused(PermissionState::Denied)
+        );
     }
 
     #[test]
