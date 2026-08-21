@@ -18,7 +18,7 @@ the order they were added, not by severity or crate.
 logic: coordinate normalization, the accessibility-tree data model, MCP
 tool schemas, error types, the permission-state enum, and the trait
 definitions `polarize-macos` implements. Every invariant that lives in
-it has real `cargo test` coverage (546 tests as of this writing).
+it has real `cargo test` coverage (631 tests as of this writing).
 
 `polarize-macos` implements those traits with real native calls
 (`ScreenCaptureKit`, `AXUIElement`, `CGEvent`, AppKit). These **cannot**

@@ -18,6 +18,8 @@
 //! - `script_dictionary` runs `sdef`, which reads an app bundle.
 //! - `clipboard_read` can raise a macOS consent prompt, which blocks
 //!   until the user answers it.
+//! - `record_flow` runs a `CFRunLoop` for the whole recording window,
+//!   which is up to a minute.
 //! - `perform_action` walks a whole accessibility tree, then makes a
 //!   synchronous `AXUIElementPerformAction` call that some apps answer
 //!   slowly.
@@ -71,6 +73,7 @@ use polarize_core::notifications::{
 };
 use polarize_core::orchestrate;
 use polarize_core::permission::PermissionError;
+use polarize_core::recording::{self, RecordFlowRequest, RecordFlowResponse};
 use polarize_core::schema::{
     DescribeRequest, DescribeResponse, KeyboardRequest, KeyboardResponse, ScreenshotRequest,
     ScreenshotResponse, TapRequest, TapResponse,
@@ -99,6 +102,7 @@ use polarize_macos::action::MacActionPerformer;
 use polarize_macos::applescript::MacAppleScriptRunner;
 use polarize_macos::capture::MacScreenCapture;
 use polarize_macos::clipboard::MacClipboard;
+use polarize_macos::event_tap::MacFlowRecorder;
 use polarize_macos::hit_test::MacHitTester;
 use polarize_macos::input::MacInputSynthesizer;
 use polarize_macos::notifications::MacNotificationCenter;
@@ -543,6 +547,26 @@ impl PolarizeServer {
         workspace_events::perform_frontmost_app(&self.workspace_inspector)
             .map(Json)
             .map_err(to_error_data)
+    }
+
+    /// Records real mouse and keyboard input for a bounded window, then
+    /// returns it. The tap listens only: it never modifies or swallows
+    /// an event, so the user keeps full control of their Mac while a
+    /// recording runs (PINV-39).
+    ///
+    /// This needs the **Input Monitoring** grant, which is not the
+    /// Accessibility grant the other tools use.
+    ///
+    /// Typed characters are withheld unless the caller opts in, because
+    /// a recording captures real keystrokes and those include passwords
+    /// (PINV-40). Only input during the call is recorded.
+    #[tool(name = "record_flow")]
+    async fn record_flow(
+        &self,
+        Parameters(request): Parameters<RecordFlowRequest>,
+    ) -> Result<Json<RecordFlowResponse>, ErrorData> {
+        blocking(move || recording::perform_record_flow(&MacFlowRecorder, &MacWorkspace, &request))
+            .await
     }
 
     /// Waits for an app switch, a wake, or a session change. It watches

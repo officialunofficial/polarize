@@ -12,7 +12,7 @@ not support plain native macOS windows. `polarize` fills that gap.
 
 ## Status
 
-All 24 tools are implemented and wired into a real `rmcp` stdio MCP
+All 25 tools are implemented and wired into a real `rmcp` stdio MCP
 server (`apps/polarize`), backed by real macOS framework bindings
 (`crates/polarize-macos`). The workspace builds, lints, and tests
 cleanly.
@@ -29,14 +29,14 @@ granted still needs to confirm a `screenshot` returns real pixels,
 see [`docs/INVARIANTS.md`](docs/INVARIANTS.md)'s "Testing harness"
 section.
 
-The other 20 tools have **not** been run on a real macOS session at all.
+The other 21 tools have **not** been run on a real macOS session at all.
 Their pure logic is unit-tested, and their native halves compile and
 link only. Read each tool's enforcement-checklist entry in
 [`docs/INVARIANTS.md`](docs/INVARIANTS.md) before you trust one.
 
 ## Tools
 
-`polarize` exposes 24 MCP tools, in six families:
+`polarize` exposes 25 MCP tools, in six families:
 
 1. **`screenshot`** — capture a window or the whole screen to PNG,
    optionally scoped by a bundle id or app name.
@@ -110,6 +110,11 @@ link only. Read each tool's enforcement-checklist entry in
 23. **`frontmost_app`** — report the app that holds focus now.
 24. **`await_workspace_event`** — wait for an app switch, a wake, or a
     session change.
+25. **`record_flow`** — record real mouse and keyboard input for a
+    bounded window, for flow replay. The tap listens only: it never
+    modifies or swallows an event. Typed characters are withheld unless
+    the caller opts in, because a recording captures real keystrokes and
+    those include passwords.
 
 ## Permissions
 
@@ -124,6 +129,9 @@ terminal, your MCP client, or a wrapper binary) needs:
 - **Automation** — required for `run_applescript` and
   `script_dictionary`. macOS asks per target app, the first time a
   script addresses one.
+- **Input Monitoring** — required for `record_flow`, and for nothing
+  else. This is a separate grant from Accessibility: posting an event
+  and listening to one are different privileges.
 
 `app_launch`, `app_quit`, `list_displays`, `frontmost_app`,
 `await_workspace_event`, and `clipboard_write` need no grant at all.
@@ -274,7 +282,7 @@ or `cargo test` fixes this with no environment variable needed.
 cargo test --workspace
 ```
 
-This runs `polarize-core`'s full unit-test suite (546 tests covering
+This runs `polarize-core`'s full unit-test suite (631 tests covering
 coordinate math, the AX-tree model, MCP schemas, permission logic, and
 orchestration), plus `polarize-macos`'s tests for the pure sub-logic it
 factors out of its native calls (22 tests covering app-identity
