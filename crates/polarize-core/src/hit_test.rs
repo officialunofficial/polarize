@@ -200,6 +200,12 @@ mod tests {
             // above. This module never calls `perform_keyboard`.
             Ok(false)
         }
+
+        fn resolve_app_pid(&self, _app: &AppIdentifier) -> Result<Option<i32>, PolarizeError> {
+            // Not exercised here — see the `resolve_target_pid` note
+            // above.
+            Ok(None)
+        }
     }
 
     #[derive(Default)]
@@ -250,12 +256,21 @@ mod tests {
             Ok(crate::schema::PostPath::Global)
         }
 
-        fn type_text(&self, _text: &str) -> Result<(), PolarizeError> {
-            Ok(())
+        fn type_text(
+            &self,
+            _text: &str,
+            _pid: Option<i32>,
+        ) -> Result<crate::schema::PostPath, PolarizeError> {
+            Ok(crate::schema::PostPath::Global)
         }
 
-        fn press_key(&self, _key: NamedKey, _modifiers: &[Modifier]) -> Result<(), PolarizeError> {
-            Ok(())
+        fn press_key(
+            &self,
+            _key: NamedKey,
+            _modifiers: &[Modifier],
+            _pid: Option<i32>,
+        ) -> Result<crate::schema::PostPath, PolarizeError> {
+            Ok(crate::schema::PostPath::Global)
         }
     }
 

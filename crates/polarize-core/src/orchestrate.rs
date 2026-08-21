@@ -147,6 +147,11 @@ where
 /// first. It falls back to [`WindowManager::activate_app`] only when the
 /// raise-free path reports itself unavailable. `KeyboardResponse.activation_path`
 /// always names whichever tier actually ran.
+///
+/// See also PINV-49: the key events themselves can now post by pid too,
+/// the same way [`perform_tap`] does. `KeyboardResponse.post_path`
+/// always names whichever path [`InputSynthesizer::type_text`] or
+/// [`InputSynthesizer::press_key`] actually took.
 pub fn perform_keyboard<W, I>(
     window_manager: &W,
     input: &I,
@@ -171,13 +176,22 @@ where
             }
         }
     };
-    match request {
-        KeyboardRequest::Type { text, .. } => input.type_text(text)?,
-        KeyboardRequest::KeyPress { key, modifiers, .. } => input.press_key(*key, modifiers)?,
-    }
+    // A pid-resolution failure only loses the pid-post optimization —
+    // activation above already succeeded either way. See PINV-49.
+    let pid = match target {
+        None => None,
+        Some(app) => window_manager.resolve_app_pid(app).unwrap_or(None),
+    };
+    let post_path = match request {
+        KeyboardRequest::Type { text, .. } => input.type_text(text, pid)?,
+        KeyboardRequest::KeyPress { key, modifiers, .. } => {
+            input.press_key(*key, modifiers, pid)?
+        }
+    };
     Ok(KeyboardResponse {
         sent: true,
         activation_path,
+        post_path,
     })
 }
 
@@ -273,6 +287,10 @@ mod tests {
             }
             Ok(self.raise_free_available)
         }
+
+        fn resolve_app_pid(&self, _app: &AppIdentifier) -> Result<Option<i32>, PolarizeError> {
+            Ok(self.pid)
+        }
     }
 
     struct FakeInputSynthesizer {
@@ -324,14 +342,27 @@ mod tests {
             })
         }
 
-        fn type_text(&self, text: &str) -> Result<(), PolarizeError> {
+        fn type_text(&self, text: &str, pid: Option<i32>) -> Result<PostPath, PolarizeError> {
             self.typed.borrow_mut().push(text.to_string());
-            Ok(())
+            Ok(if pid.is_some() && self.symbol_available {
+                PostPath::Pid
+            } else {
+                PostPath::Global
+            })
         }
 
-        fn press_key(&self, key: NamedKey, modifiers: &[Modifier]) -> Result<(), PolarizeError> {
+        fn press_key(
+            &self,
+            key: NamedKey,
+            modifiers: &[Modifier],
+            pid: Option<i32>,
+        ) -> Result<PostPath, PolarizeError> {
             self.pressed.borrow_mut().push((key, modifiers.to_vec()));
-            Ok(())
+            Ok(if pid.is_some() && self.symbol_available {
+                PostPath::Pid
+            } else {
+                PostPath::Global
+            })
         }
     }
 
@@ -741,6 +772,7 @@ mod tests {
             KeyboardResponse {
                 sent: true,
                 activation_path: ActivationPath::None,
+                post_path: PostPath::Global,
             }
         );
         assert_eq!(input.typed.borrow().as_slice(), &["hi".to_string()]);
@@ -864,5 +896,75 @@ mod tests {
         assert!(wm.activated.borrow().is_empty());
         assert!(wm.raise_free_activated.borrow().is_empty());
         assert_eq!(response.activation_path, ActivationPath::None);
+        assert_eq!(response.post_path, PostPath::Global);
+    }
+
+    // ---- perform_keyboard pid-post -----------------------------------
+    //
+    // PINV-49: the same pid-post decision table PINV-47 established for
+    // `tap`, extended to `keyboard`'s key events.
+
+    #[test]
+    fn perform_keyboard_posts_by_pid_when_a_target_pid_and_the_symbol_are_both_available() {
+        let wm = FakeWindowManager::with_pid(
+            PixelSize {
+                width: 100.0,
+                height: 100.0,
+            },
+            4242,
+        );
+        let input = FakeInputSynthesizer::default();
+        let request = KeyboardRequest::Type {
+            text: "hi".to_string(),
+            target: Some(AppIdentifier {
+                bundle_id: Some("com.apple.TextEdit".to_string()),
+                app_name: None,
+            }),
+        };
+
+        let response = perform_keyboard(&wm, &input, &request).unwrap();
+
+        assert_eq!(response.post_path, PostPath::Pid);
+    }
+
+    #[test]
+    fn perform_keyboard_falls_back_to_global_when_no_target_names_an_app() {
+        let wm = FakeWindowManager::new(PixelSize {
+            width: 100.0,
+            height: 100.0,
+        });
+        let input = FakeInputSynthesizer::default();
+        let request = KeyboardRequest::Type {
+            text: "hi".to_string(),
+            target: None,
+        };
+
+        let response = perform_keyboard(&wm, &input, &request).unwrap();
+
+        assert_eq!(response.post_path, PostPath::Global);
+    }
+
+    #[test]
+    fn perform_keyboard_falls_back_to_global_when_the_pid_symbol_is_unavailable() {
+        let wm = FakeWindowManager::with_pid(
+            PixelSize {
+                width: 100.0,
+                height: 100.0,
+            },
+            4242,
+        );
+        let input = FakeInputSynthesizer::without_pid_symbol();
+        let request = KeyboardRequest::KeyPress {
+            key: NamedKey::Return,
+            modifiers: vec![],
+            target: Some(AppIdentifier {
+                bundle_id: Some("com.apple.TextEdit".to_string()),
+                app_name: None,
+            }),
+        };
+
+        let response = perform_keyboard(&wm, &input, &request).unwrap();
+
+        assert_eq!(response.post_path, PostPath::Global);
     }
 }

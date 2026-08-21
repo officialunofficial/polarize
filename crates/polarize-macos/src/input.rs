@@ -88,26 +88,15 @@ impl InputSynthesizer for MacInputSynthesizer {
                 CGEventField::MouseEventClickState,
                 click_state,
             );
-            match pid_post {
-                Some((pid, post_to_pid)) => {
-                    // `SLEventPostToPid` takes the same `CGEventRef` the
-                    // global post takes — reuse the already-retained
-                    // pointer rather than building a second event.
-                    let event_ptr: *const c_void =
-                        CFRetained::as_ptr(&event).as_ptr().cast_const().cast();
-                    unsafe { post_to_pid(pid, event_ptr) };
-                }
-                None => CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event)),
-            }
+            post_cgevent(&event, pid_post);
         }
-        Ok(if pid_post.is_some() {
-            PostPath::Pid
-        } else {
-            PostPath::Global
-        })
+        Ok(post_path(pid_post))
     }
 
-    fn type_text(&self, text: &str) -> Result<(), PolarizeError> {
+    /// Posts each key event via `SLEventPostToPid` when `pid` is `Some`
+    /// and [`skylight_ffi::symbols`] resolved the symbol. Falls back to
+    /// the global `CGEvent` post otherwise. See PINV-49.
+    fn type_text(&self, text: &str, pid: Option<i32>) -> Result<PostPath, PolarizeError> {
         ensure_input_permission()?;
         let source = event_source()?;
         // Virtual key `0` plus an explicit Unicode payload is the standard
@@ -115,6 +104,8 @@ impl InputSynthesizer for MacInputSynthesizer {
         // layout-dependent keycode for every character — the same trick
         // most macOS UI-automation tools use.
         let utf16: Vec<u16> = text.encode_utf16().collect();
+
+        let pid_post = pid.zip(skylight_ffi::symbols().event_post_to_pid);
 
         for key_down in [true, false] {
             let event =
@@ -128,16 +119,25 @@ impl InputSynthesizer for MacInputSynthesizer {
                     utf16.as_ptr(),
                 );
             }
-            CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
+            post_cgevent(&event, pid_post);
         }
-        Ok(())
+        Ok(post_path(pid_post))
     }
 
-    fn press_key(&self, key: NamedKey, modifiers: &[Modifier]) -> Result<(), PolarizeError> {
+    /// See [`Self::type_text`]'s doc for the pid-post rule this follows
+    /// too.
+    fn press_key(
+        &self,
+        key: NamedKey,
+        modifiers: &[Modifier],
+        pid: Option<i32>,
+    ) -> Result<PostPath, PolarizeError> {
         ensure_input_permission()?;
         let source = event_source()?;
         let keycode = keymap::named_key_to_keycode(key);
         let flags = keymap::modifiers_to_cgevent_flags(modifiers);
+
+        let pid_post = pid.zip(skylight_ffi::symbols().event_post_to_pid);
 
         for key_down in [true, false] {
             let event =
@@ -145,8 +145,38 @@ impl InputSynthesizer for MacInputSynthesizer {
                     PolarizeError::Platform("CGEventCreateKeyboardEvent returned null".to_string())
                 })?;
             CGEvent::set_flags(Some(&event), flags);
-            CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
+            post_cgevent(&event, pid_post);
         }
-        Ok(())
+        Ok(post_path(pid_post))
+    }
+}
+
+/// Posts one already-built `CGEvent` — mouse or keyboard. Posts via
+/// `SLEventPostToPid` when `pid_post` is `Some`. Posts through the
+/// global `CGEvent` stream otherwise. Shared by every
+/// [`InputSynthesizer`] method above — see PINV-47 and PINV-49.
+fn post_cgevent(
+    event: &CFRetained<CGEvent>,
+    pid_post: Option<(i32, skylight_ffi::SlEventPostToPidFn)>,
+) {
+    match pid_post {
+        Some((pid, post_to_pid)) => {
+            // `SLEventPostToPid` takes the same `CGEventRef` the global
+            // post takes — reuse the already-retained pointer rather
+            // than building a second event.
+            let event_ptr: *const c_void = CFRetained::as_ptr(event).as_ptr().cast_const().cast();
+            unsafe { post_to_pid(pid, event_ptr) };
+        }
+        None => CGEvent::post(CGEventTapLocation::HIDEventTap, Some(event)),
+    }
+}
+
+/// The [`PostPath`] a `pid_post` value implies — `Pid` when a pid and a
+/// resolved symbol were both available, `Global` otherwise.
+fn post_path(pid_post: Option<(i32, skylight_ffi::SlEventPostToPidFn)>) -> PostPath {
+    if pid_post.is_some() {
+        PostPath::Pid
+    } else {
+        PostPath::Global
     }
 }
