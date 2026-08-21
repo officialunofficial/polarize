@@ -38,8 +38,18 @@ version_group = "polarize"
 git_only = true
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
-git_release_enable = true
-git_release_name = "v{{ version }}"
+# Deliberately false, though this package still tags. dist's own
+# release.yml (.github/workflows/release.yml) creates the actual GitHub
+# Release once a tag lands -- see docs/RELEASING.md, step 4. Live-tested
+# with this set to true: release-plz's fast "release" job (runs on every
+# push to main) won the race and created a release with no binaries
+# attached, before dist's slower artifact-build jobs finished. dist's own
+# "Create GitHub Release" step then failed outright: "a release with the
+# same tag name already exists." Only one of the two tools can create the
+# release; dist's is the one worth keeping, since its body carries the
+# real download links and checksums, not just the changelog text (which
+# still lives in CHANGELOG.md regardless of who posts the release body).
+git_release_enable = false
 changelog_update = true
 
 [[package]]

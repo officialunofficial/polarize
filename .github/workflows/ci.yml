@@ -22,6 +22,16 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Caches ~/.cargo/registry, ~/.cargo/git, and target/ between runs,
+      # keyed on Cargo.lock's hash plus the rustc version and target
+      # triple. sccache is not used here on purpose: it caches compiled
+      # object code across repeated builds of the same crate under
+      # different flags, which suits a cross-compilation matrix, not
+      # this single-job workflow. rust-cache is the standard fit for
+      # exactly this shape, and already carries its own workaround for
+      # a known macOS cache-corruption issue (cargo#8603).
+      - uses: Swatinem/rust-cache@v2
+
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
