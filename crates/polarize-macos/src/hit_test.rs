@@ -116,60 +116,20 @@ fn owning_app(pid: i32) -> Option<ResolvedApp> {
 
 /// Reads one element's attributes into an [`AxNode`], with no children.
 ///
-/// This mirrors `crate::accessibility`'s `build_node`, minus the
-/// recursion. PINV-33 says a hit test reports one element, so this
-/// function never reads `AXChildren`. Every attribute read degrades to a
-/// default, exactly as PINV-12 and PINV-16 require.
+/// This is `crate::accessibility`'s `build_node` minus the recursion, and
+/// it shares the same batched read: one
+/// `AXUIElementCopyMultipleAttributeValues` call for the eleven
+/// attributes, plus the two that have no batched form (PINV-41). Every
+/// unread attribute degrades to the same default, because
+/// `polarize_core::ax_batch` owns that rule in one place — a second copy
+/// of it here would be a second place for PINV-12 and PINV-16 to drift.
+///
+/// PINV-33 says a hit test reports one element, so this never reads
+/// `AXChildren`.
 fn leaf_node(element: &AxElement, screen_size: PixelSize) -> AxNode {
-    let role = element
-        .string_attribute("AXRole")
-        .unwrap_or_else(|| "AXUnknown".to_string());
-    let label = ["AXTitle", "AXDescription", "AXValue"]
-        .into_iter()
-        .find_map(|attr| {
-            element
-                .string_attribute(attr)
-                .filter(|value| !value.is_empty())
-        });
-
-    let position = element.point_attribute("AXPosition").unwrap_or_default();
-    let size = element.size_attribute("AXSize").unwrap_or_default();
-    let frame = safe_normalize_frame(
-        PixelPoint {
-            x: position.x,
-            y: position.y,
-        },
-        PixelSize {
-            width: size.width,
-            height: size.height,
-        },
-        screen_size,
-    );
-
+    let attributes = element.node_attributes();
+    let frame = safe_normalize_frame(attributes.position, attributes.size, screen_size);
     let focusable = element.is_attribute_settable("AXFocused");
     let actions = element.action_names();
-    let interactive = !actions.is_empty();
-    // A missing `AXEnabled` means "this element does not publish an
-    // enabled state", not "this element is disabled" — see PINV-16.
-    let enabled = element.bool_attribute("AXEnabled").unwrap_or(true);
-    let non_empty = |attribute: &str| {
-        element
-            .string_attribute(attribute)
-            .filter(|value| !value.is_empty())
-    };
-
-    AxNode {
-        role,
-        label,
-        frame,
-        focusable,
-        interactive,
-        enabled,
-        subrole: non_empty("AXSubrole"),
-        role_description: non_empty("AXRoleDescription"),
-        identifier: non_empty("AXIdentifier"),
-        help: non_empty("AXHelp"),
-        actions,
-        children: Vec::new(),
-    }
+    attributes.into_node(frame, focusable, actions, Vec::new())
 }
