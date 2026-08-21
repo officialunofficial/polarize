@@ -1687,6 +1687,23 @@ attribution, beyond a well-formed bundle sitting on disk, is also
 unresolved. No `lsregister` step is added until a live check proves one
 necessary.
 
+**Follow-up: an App Group entitlement for the future embedding case.**
+`apps/polarize/polarize.entitlements` now also carries
+`com.apple.security.application-groups` (`N8R89M8725.fun.uno.polarize`),
+matching the same entitlement added on the desktop host app's own side.
+Neither app's code reads anything from this group yet — it exists so a
+sandboxed host app and an embedded, unsandboxed `Polarize.app` can
+later share state (for example, a Keychain or file-based handoff)
+under one Team ID instead of each depending on the other's sandbox
+container. This assumes `polarize`'s own Developer ID Application
+certificate signs under Team `N8R89M8725` — the desktop host app's
+known team, read from its own Xcode project. That assumption is
+unverified here: an App Group identifier is only usable once it is
+registered in the Apple Developer portal under the signing team, with
+both App IDs' App Groups capability pointed at it. Confirm the team
+match, then register the group, before relying on this entitlement for
+anything.
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
