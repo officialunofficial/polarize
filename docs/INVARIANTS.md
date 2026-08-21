@@ -957,6 +957,17 @@ claim automated coverage they don't have.
   a flow that stops half way, with `complete: true` on it, and nothing
   anywhere says that macOS turned the tap off.
 
+- Always, second: a recording that lost input never reports itself
+  complete. The tap counts every event that arrived after its budget
+  filled, because only the tap can see them: it stops collecting at
+  `max_events`, so those events never reach `polarize-core` to be
+  counted. `RawRecording::dropped_events` carries the count across,
+  `assemble_recording` reports it, and `complete` is false while any
+  warning stands.
+- Because: a short flow that claims to be whole is worse than an error.
+  A caller replays it, the replay does not reproduce what the user did,
+  and nothing in the response explains why.
+
 ### PINV-40: a recording withholds typed characters unless the caller opts in
 
 - Always: `RecordFlowRequest::capture_text` defaults to `false`. With
@@ -983,6 +994,13 @@ claim automated coverage they don't have.
   nobody knows it is there. Or a caller cannot make `record_flow` run at
   all, because every error points at the wrong System Settings pane.
 
+- Always, second: only a key event ever carries text. The tap does not
+  call `CGEventKeyboardGetUnicodeString` for a mouse or a scroll event,
+  and `translate_event` drops any characters that arrive on one anyway.
+- Because: that function is a keyboard API, so whatever it yields for a
+  click means nothing. A click record carrying a `text` field would tell
+  a caller the user typed during the click, which nothing observed.
+
 ### PINV-41: a batched attribute read is used only when it is aligned and type-checked
 
 - Always: `ax_ffi::AxElement::node_attributes` reads the eleven value
@@ -1007,6 +1025,12 @@ claim automated coverage they don't have.
   gap then answers for the wrong attribute. A slow tree is a nuisance,
   and a wrong tree is a trap, so an untrusted batch is thrown away
   instead of guessed at.
+- Always, second: `AXValueGetType` runs only after `CFGetTypeID`
+  confirms the slot really is an `AXValueRef`. A batched read returns
+  whatever type each attribute actually has, and several are none of a
+  string, a boolean, or an `AXValue` — `AXValue` on a slider is a
+  `CFNumber`. The single-attribute readers never met this, because each
+  one asked for a single attribute whose type it already knew.
 - If violated: `describe` returns a tree that looks complete and names
   the wrong things. A control reads as disabled because its `AXEnabled`
   slot held an error. An element reports another element's identifier.
