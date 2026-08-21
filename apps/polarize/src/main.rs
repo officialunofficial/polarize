@@ -58,6 +58,37 @@ fn log_skylight_symbol_resolution() {
     }
 }
 
+/// Logs this process's own TCC "responsible process" state, so PINV-52
+/// is observable without a debugger — the same role
+/// `log_skylight_symbol_resolution` plays for PINV-46.
+fn log_responsibility_state() {
+    tracing::info!(
+        state = %polarize_macos::self_responsibility::responsibility_summary(),
+        "TCC responsible-process state"
+    );
+}
+
+/// Respawns this process disclaimed when
+/// [`polarize_macos::self_responsibility::should_respawn_disclaimed`]
+/// says it is warranted, so `polarize` becomes its own TCC-responsible
+/// process instead of inheriting whatever launched it (PINV-52).
+///
+/// A successful respawn never returns: the respawned child inherits
+/// this process's stdio, and this process blocks on it, then exits
+/// with its exit status. This only returns when no respawn was
+/// warranted, or the respawn's own setup failed before a child ever
+/// existed — the caller then keeps running the MCP server in this
+/// process, exactly as if no respawn had been attempted.
+fn respawn_disclaimed_if_warranted() {
+    if !polarize_macos::self_responsibility::should_respawn_disclaimed() {
+        return;
+    }
+    tracing::info!("respawning disclaimed to become our own TCC-responsible process");
+    if let Err(err) = polarize_macos::self_responsibility::respawn_self_disclaimed() {
+        tracing::warn!("disclaimed self-respawn failed, continuing in this process: {err}");
+    }
+}
+
 fn main() {
     init_tracing();
 
@@ -68,6 +99,14 @@ fn main() {
         request_permissions(&automation_target);
         return;
     }
+
+    // Must happen before the runtime below starts any other thread —
+    // see `polarize_macos::self_responsibility`'s own doc comment for
+    // why. This is the server-run path only; `--request-permissions`
+    // above already returned, so its own bootstrap send (PINV-51)
+    // stays untouched by this.
+    log_responsibility_state();
+    respawn_disclaimed_if_warranted();
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()

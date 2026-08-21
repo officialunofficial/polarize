@@ -60,6 +60,10 @@ pub mod observer;
 pub mod permission_bootstrap;
 /// Pumps the real main-thread `CFRunLoop`. See PINV-42.
 pub mod runloop;
+/// Resolves `polarize`'s own TCC "responsible process" identity, and
+/// makes `polarize` its own responsible process through a disclaimed
+/// self-respawn. See PINV-52.
+pub mod self_responsibility;
 pub mod session;
 pub mod set_value;
 /// Runtime `dlopen`/`dlsym` resolution of `SkyLight.framework`'s private

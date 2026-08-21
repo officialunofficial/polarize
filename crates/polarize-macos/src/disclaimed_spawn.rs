@@ -35,7 +35,11 @@ use std::time::{Duration, Instant};
 /// `posix_spawnattr_t` and `posix_spawn_file_actions_t` are both
 /// `typedef void *` per `<spawn.h>` — plain opaque handles, not
 /// structs whose layout this crate would need to reproduce.
-type PosixSpawnattrT = *mut c_void;
+///
+/// `pub(crate)`: [`crate::self_responsibility`]'s own disclaimed spawn
+/// (PINV-52) reuses this type and [`init_disclaimed_attr`] below,
+/// rather than duplicating the disclaim-attribute setup a second time.
+pub(crate) type PosixSpawnattrT = *mut c_void;
 type PosixFileActionsT = *mut c_void;
 
 /// `O_RDWR`, from `<fcntl.h>`. The only flag this module needs: opening
@@ -55,9 +59,16 @@ const WNOHANG: i32 = 0x0001;
 /// user has not yet had a chance to see.
 const SEND_POLL_TIMEOUT: Duration = Duration::from_secs(3);
 
+// `pub(crate)` on the four items `self_responsibility.rs` also calls
+// directly for its own `posix_spawnp` send (PINV-52): the
+// attr/spawn/wait calls themselves, and the process's real `environ`.
+// `posix_spawn_file_actions_*` stay private — only this module's
+// bootstrap send redirects stdio; `self_responsibility`'s respawn
+// passes a null `file_actions` to inherit stdio unchanged, so it never
+// needs these.
 unsafe extern "C" {
-    fn posix_spawnattr_init(attr: *mut PosixSpawnattrT) -> i32;
-    fn posix_spawnattr_destroy(attr: *mut PosixSpawnattrT) -> i32;
+    pub(crate) fn posix_spawnattr_init(attr: *mut PosixSpawnattrT) -> i32;
+    pub(crate) fn posix_spawnattr_destroy(attr: *mut PosixSpawnattrT) -> i32;
     fn posix_spawn_file_actions_init(actions: *mut PosixFileActionsT) -> i32;
     fn posix_spawn_file_actions_destroy(actions: *mut PosixFileActionsT) -> i32;
     fn posix_spawn_file_actions_addopen(
@@ -67,7 +78,7 @@ unsafe extern "C" {
         oflag: i32,
         mode: u16,
     ) -> i32;
-    fn posix_spawnp(
+    pub(crate) fn posix_spawnp(
         pid: *mut i32,
         file: *const c_char,
         file_actions: *const PosixFileActionsT,
@@ -75,12 +86,12 @@ unsafe extern "C" {
         argv: *const *mut c_char,
         envp: *const *mut c_char,
     ) -> i32;
-    fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    pub(crate) fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
 
     /// The current process's environment, as a null-terminated `char**`.
     /// Always present: every process on Darwin links libSystem, which
     /// defines this.
-    static environ: *mut *mut c_char;
+    pub(crate) static environ: *mut *mut c_char;
 
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
 }
@@ -97,7 +108,11 @@ type SetDisclaimFn = unsafe extern "C" fn(*mut PosixSpawnattrT, i32) -> i32;
 /// result. `None` means the name did not resolve on this macOS version
 /// — every caller must treat that as "cannot disclaim here", not as a
 /// bug.
-fn set_disclaim_fn() -> Option<SetDisclaimFn> {
+///
+/// `pub(crate)`: [`crate::self_responsibility::should_respawn_disclaimed`]
+/// checks this resolution too, to decide whether a self-respawn has
+/// anything to gain. See PINV-52.
+pub(crate) fn set_disclaim_fn() -> Option<SetDisclaimFn> {
     static CACHE: OnceLock<Option<usize>> = OnceLock::new();
     let address = *CACHE.get_or_init(|| {
         let name = c"responsibility_spawnattrs_setdisclaim";
@@ -109,6 +124,35 @@ fn set_disclaim_fn() -> Option<SetDisclaimFn> {
     // SAFETY: `address`, when present, came from a real `dlsym` result
     // for this exact symbol name, immediately above.
     address.map(|address| unsafe { std::mem::transmute::<usize, SetDisclaimFn>(address) })
+}
+
+/// Initializes a `posix_spawnattr_t` and applies the disclaim flag on
+/// it when `responsibility_spawnattrs_setdisclaim` resolves.
+///
+/// Returns a valid, non-disclaimed attr when the symbol does not
+/// resolve — a caller still spawns with it either way, just without
+/// retargeting the child's responsible process. The caller owns
+/// `posix_spawnattr_destroy`ing the returned attr once its `posix_spawnp`
+/// call is done with it.
+///
+/// `pub(crate)`: shared between this module's bootstrap send and
+/// [`crate::self_responsibility::respawn_self_disclaimed`]'s own send,
+/// so the disclaim-attribute setup lives in exactly one place. See
+/// PINV-52.
+pub(crate) fn init_disclaimed_attr() -> Result<PosixSpawnattrT, String> {
+    let mut attr: PosixSpawnattrT = ptr::null_mut();
+    // SAFETY: `attr` is a valid local out-pointer.
+    if unsafe { posix_spawnattr_init(&mut attr) } != 0 {
+        return Err("posix_spawnattr_init failed".to_string());
+    }
+    if let Some(set_disclaim) = set_disclaim_fn() {
+        // SAFETY: `attr` was just initialized above. The return value
+        // only reports whether this specific attribute could be set;
+        // a failure here still leaves a valid (non-disclaimed) `attr`
+        // to spawn with.
+        let _ = unsafe { set_disclaim(&mut attr, 1) };
+    }
+    Ok(attr)
 }
 
 /// Sends `tell application "<target_app_name>" to get its name` through
@@ -137,7 +181,7 @@ pub fn send_disclaimed_bootstrap_script(target_app_name: &str) -> Result<(), Str
     let dev_null =
         CString::new("/dev/null").map_err(|error| format!("bad /dev/null path: {error}"))?;
 
-    let mut attr: PosixSpawnattrT = ptr::null_mut();
+    let mut attr = init_disclaimed_attr()?;
     let mut file_actions: PosixFileActionsT = ptr::null_mut();
 
     // SAFETY: every pointer passed below is either a live local (`attr`,
@@ -145,15 +189,6 @@ pub fn send_disclaimed_bootstrap_script(target_app_name: &str) -> Result<(), Str
     // call. `posix_spawnp` is given a valid, null-terminated `argv` and
     // the process's own real `environ`.
     let result = unsafe {
-        if posix_spawnattr_init(&mut attr) != 0 {
-            return Err("posix_spawnattr_init failed".to_string());
-        }
-        if let Some(set_disclaim) = set_disclaim_fn() {
-            // The return value only reports whether this specific
-            // attribute could be set; a failure here still leaves a
-            // valid (non-disclaimed) `attr` to spawn with.
-            let _ = set_disclaim(&mut attr, 1);
-        }
         if posix_spawn_file_actions_init(&mut file_actions) != 0 {
             posix_spawnattr_destroy(&mut attr);
             return Err("posix_spawn_file_actions_init failed".to_string());

@@ -388,6 +388,32 @@ ScreenCapture` — this resets Screen Recording for *every* app on the
 Mac, not just `polarize`, so prefer removing the single stuck entry
 when you can.
 
+### Automation permission and the app bundle
+
+`run_applescript` and `script_dictionary` need Automation access,
+granted per target app (Messages, Mail, Finder, …), not once for the
+whole binary. Accessibility and Screen Recording key their grant to
+`polarize`'s code-signing identity alone, and the bare binary already
+has a stable one after `just build`. Automation needs one more thing:
+a real `CFBundleIdentifier` for macOS to hold the grant against.
+
+`just build` assembles this as `target/debug/Polarize.app` alongside
+the bare `target/debug/polarize` (`just bundle-app` on its own re-runs
+just that step; `just verify-bundle` lints and codesign-verifies it,
+and confirms LaunchServices accepts it). Run the bootstrap flag through
+the bundle to request Automation for a target app:
+
+```sh
+./target/debug/Polarize.app/Contents/MacOS/polarize --request-permissions Messages
+```
+
+The MCP server itself — launched by your client, from either the bare
+binary or the bundle — respawns itself once at startup through a
+disclaimed spawn, so it holds its own responsible-process identity
+rather than inheriting the launching shell's or client's. See PINV-52
+in `docs/INVARIANTS.md` for the full mechanism, and for what a real
+macOS session still needs to confirm about the resulting grant.
+
 Stdio matches how a local MCP client, such as Claude Code, actually
 spawns `polarize`: one client, one subprocess, for the process's whole
 lifetime. `rmcp` also supports a Streamable HTTP transport, for a real

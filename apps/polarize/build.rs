@@ -50,27 +50,28 @@ fn main() {
 /// stable identity to hold that grant against, matching
 /// `justfile`'s `--identifier` (code-signing identity and TCC's
 /// bundle identity are two different things; both are needed).
+///
+/// This section covers the bare-binary artifact — `cargo build`'s own
+/// output, and what `dist` ships in a release. `just bundle-app`
+/// assembles a real `Polarize.app` directory around the same signed
+/// binary; that bundle's own `Contents/Info.plist` is the identity
+/// macOS actually checks when the bundle is present. See PINV-52.
+///
+/// Both plists render from the same template
+/// (`apps/polarize/bundle/Info.plist.in`), so they cannot drift apart.
+/// This function only substitutes `__VERSION__`; `just bundle-app`
+/// does the same substitution with `sed` for the bundle copy.
 fn embed_info_plist() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR is always set for a build script");
+    let template_path = std::path::Path::new(&manifest_dir).join("bundle/Info.plist.in");
+    println!("cargo:rerun-if-changed={}", template_path.display());
+    let template = std::fs::read_to_string(&template_path)
+        .expect("reading apps/polarize/bundle/Info.plist.in");
+
     let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
-    let plist = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>CFBundleIdentifier</key>
-	<string>com.officialunofficial.polarize</string>
-	<key>CFBundleName</key>
-	<string>polarize</string>
-	<key>CFBundleVersion</key>
-	<string>{version}</string>
-	<key>CFBundleShortVersionString</key>
-	<string>{version}</string>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>polarize sends Apple Events to automate apps on your behalf, through its run_applescript MCP tool.</string>
-</dict>
-</plist>
-"#
-    );
+    let plist = template.replace("__VERSION__", &version);
+
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR is always set for a build script");
     let plist_path = std::path::Path::new(&out_dir).join("Info.plist");
     std::fs::write(&plist_path, plist).expect("writing the generated Info.plist to OUT_DIR");
