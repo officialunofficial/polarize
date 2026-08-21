@@ -293,47 +293,19 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct FakeInputSynthesizer {
         clicks: RefCell<Vec<(crate::coords::PixelPoint, u8, Option<i32>)>>,
         typed: RefCell<Vec<String>>,
         pressed: RefCell<Vec<(NamedKey, Vec<Modifier>)>>,
-        /// Simulates whether `skylight_ffi`'s `SLEventPostToPid` symbol
-        /// resolved on this fake macOS. `true` by default: a test that
-        /// only wants to check the pid gets passed through does not
-        /// need to opt in.
-        symbol_available: bool,
-    }
-
-    impl Default for FakeInputSynthesizer {
-        fn default() -> Self {
-            Self {
-                clicks: RefCell::new(Vec::new()),
-                typed: RefCell::new(Vec::new()),
-                pressed: RefCell::new(Vec::new()),
-                symbol_available: true,
-            }
-        }
     }
 
     impl FakeInputSynthesizer {
-        /// Simulates a macOS version where `SLEventPostToPid` did not
-        /// resolve — every click falls back to the global path even
-        /// when a pid is available.
-        fn without_pid_symbol() -> Self {
-            Self {
-                symbol_available: false,
-                ..Self::default()
-            }
-        }
-    }
-
-    impl FakeInputSynthesizer {
-        /// The `PostPath` every method below reports: `Pid` only when a
-        /// pid was passed and this fake's symbol is available, `Global`
-        /// otherwise. Shared so the three methods don't each repeat the
-        /// same decision.
+        /// The `PostPath` every method below reports: `Pid` when a pid
+        /// was passed, `Global` otherwise. Shared so the three methods
+        /// don't each repeat the same decision.
         fn post_path(&self, pid: Option<i32>) -> PostPath {
-            if pid.is_some() && self.symbol_available {
+            if pid.is_some() {
                 PostPath::Pid
             } else {
                 PostPath::Global
@@ -563,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn perform_tap_posts_by_pid_when_a_target_pid_and_the_symbol_are_both_available() {
+    fn perform_tap_posts_by_pid_when_a_target_pid_is_available() {
         let wm = FakeWindowManager::with_pid(
             PixelSize {
                 width: 100.0,
@@ -608,36 +580,6 @@ mod tests {
 
         assert_eq!(response.post_path, PostPath::Global);
         assert_eq!(input.clicks.borrow()[0].2, None);
-    }
-
-    #[test]
-    fn perform_tap_falls_back_to_global_when_the_pid_symbol_is_unavailable() {
-        let wm = FakeWindowManager::with_pid(
-            PixelSize {
-                width: 100.0,
-                height: 100.0,
-            },
-            4242,
-        );
-        let input = FakeInputSynthesizer::without_pid_symbol();
-        let request = TapRequest {
-            x: 0.0,
-            y: 0.0,
-            target: Some(ScreenshotTarget::App {
-                app: AppIdentifier {
-                    bundle_id: Some("com.apple.TextEdit".to_string()),
-                    app_name: None,
-                },
-            }),
-            click_count: None,
-        };
-
-        let response = perform_tap(&wm, &input, &request).unwrap();
-
-        // The pid still reaches the synthesizer — it is the symbol
-        // that is missing, not the pid.
-        assert_eq!(input.clicks.borrow()[0].2, Some(4242));
-        assert_eq!(response.post_path, PostPath::Global);
     }
 
     #[test]
@@ -907,7 +849,7 @@ mod tests {
     // `tap`, extended to `keyboard`'s key events.
 
     #[test]
-    fn perform_keyboard_posts_by_pid_when_a_target_pid_and_the_symbol_are_both_available() {
+    fn perform_keyboard_posts_by_pid_when_a_target_pid_is_available() {
         let wm = FakeWindowManager::with_pid(
             PixelSize {
                 width: 100.0,
@@ -939,30 +881,6 @@ mod tests {
         let request = KeyboardRequest::Type {
             text: "hi".to_string(),
             target: None,
-        };
-
-        let response = perform_keyboard(&wm, &input, &request).unwrap();
-
-        assert_eq!(response.post_path, PostPath::Global);
-    }
-
-    #[test]
-    fn perform_keyboard_falls_back_to_global_when_the_pid_symbol_is_unavailable() {
-        let wm = FakeWindowManager::with_pid(
-            PixelSize {
-                width: 100.0,
-                height: 100.0,
-            },
-            4242,
-        );
-        let input = FakeInputSynthesizer::without_pid_symbol();
-        let request = KeyboardRequest::KeyPress {
-            key: NamedKey::Return,
-            modifiers: vec![],
-            target: Some(AppIdentifier {
-                bundle_id: Some("com.apple.TextEdit".to_string()),
-                app_name: None,
-            }),
         };
 
         let response = perform_keyboard(&wm, &input, &request).unwrap();
