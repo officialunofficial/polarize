@@ -13,7 +13,7 @@
 use crate::ax::AxNode;
 use crate::coords::PixelPoint;
 use crate::error::PolarizeError;
-use crate::schema::{AppIdentifier, Modifier, NamedKey};
+use crate::schema::{AppIdentifier, Modifier, NamedKey, PostPath};
 
 /// A captured image, still in encoded PNG form.
 #[derive(Debug, Clone, PartialEq)]
@@ -96,7 +96,22 @@ pub trait InputSynthesizer {
     /// (PINV-4). Implementations must not re-interpret `point` as
     /// anything other than raw pixels in the global display coordinate
     /// space.
-    fn click_at_pixel(&self, point: PixelPoint, click_count: u8) -> Result<(), PolarizeError>;
+    ///
+    /// `pid` is the target app's process id, when
+    /// [`WindowManager::resolve_target_pid`] resolved one. An
+    /// implementation may use `pid` to post through `SLEventPostToPid`
+    /// instead of the global `CGEvent` stream. See PINV-47 in
+    /// `docs/INVARIANTS.md`. A `Some` pid does not force that path: an
+    /// implementation may still fall back, for instance when the
+    /// symbol did not resolve. The returned [`PostPath`] must always
+    /// name whichever path actually ran. A caller must never see a
+    /// silent behavior change.
+    fn click_at_pixel(
+        &self,
+        point: PixelPoint,
+        click_count: u8,
+        pid: Option<i32>,
+    ) -> Result<PostPath, PolarizeError>;
 
     /// Types a literal string as a sequence of key-down/key-up events.
     fn type_text(&self, text: &str) -> Result<(), PolarizeError>;
@@ -124,6 +139,22 @@ pub trait WindowManager {
         &self,
         target: &crate::schema::ScreenshotTarget,
     ) -> Result<crate::coords::PixelRect, PolarizeError>;
+
+    /// The process id of the app `target` names, if it names one. A
+    /// `Screen` target names no particular app, so this returns `None`
+    /// for it.
+    ///
+    /// [`crate::orchestrate::perform_tap`] passes this pid to
+    /// [`InputSynthesizer::click_at_pixel`], as a candidate for the
+    /// `SLEventPostToPid` path (PINV-47). A caller treats an `Err` here
+    /// the same as `Ok(None)`. [`Self::resolve_target_rect`] already
+    /// resolved this same app moments earlier, so a real failure here
+    /// is rare. It must never block the click itself. Losing the pid
+    /// only loses the pid-post optimization, not the click.
+    fn resolve_target_pid(
+        &self,
+        target: &crate::schema::ScreenshotTarget,
+    ) -> Result<Option<i32>, PolarizeError>;
 }
 
 /// Performs one accessibility action on one element. Implemented by

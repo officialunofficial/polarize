@@ -91,6 +91,16 @@ impl WindowManager for MacWindowManager {
         }
     }
 
+    fn resolve_target_pid(&self, target: &ScreenshotTarget) -> Result<Option<i32>, PolarizeError> {
+        match target {
+            ScreenshotTarget::Screen { .. } => Ok(None),
+            ScreenshotTarget::App { app } | ScreenshotTarget::Window { app, .. } => {
+                let running = resolve_running_app(Some(app))?;
+                Ok(Some(running.processIdentifier()))
+            }
+        }
+    }
+
     fn resolve_target_rect(&self, target: &ScreenshotTarget) -> Result<PixelRect, PolarizeError> {
         match target {
             ScreenshotTarget::Screen { display_id } => {

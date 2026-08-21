@@ -131,6 +131,21 @@ pub struct TapResponse {
     /// The pixel point the fraction resolved to, for debugging.
     pub pixel_x: f64,
     pub pixel_y: f64,
+    /// Which native path actually posted this click. See PINV-47.
+    pub post_path: PostPath,
+}
+
+/// Which native path posted one `tap`'s click. See PINV-47 in
+/// `docs/INVARIANTS.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PostPath {
+    /// Posted straight into the target app's own event queue, through
+    /// `SLEventPostToPid`. The shared cursor did not move.
+    Pid,
+    /// Posted through the global `CGEvent` stream. This was `tap`'s
+    /// only path before PINV-47. The shared cursor still moves.
+    Global,
 }
 
 /// A named, non-printable key `keyboard` can press, independent of
@@ -297,6 +312,18 @@ mod tests {
             tapped: true,
             pixel_x: 960.0,
             pixel_y: 270.0,
+            post_path: PostPath::Pid,
+        };
+        assert_eq!(round_trip(&value), value);
+    }
+
+    #[test]
+    fn tap_response_round_trips_the_global_post_path() {
+        let value = TapResponse {
+            tapped: true,
+            pixel_x: 960.0,
+            pixel_y: 270.0,
+            post_path: PostPath::Global,
         };
         assert_eq!(round_trip(&value), value);
     }

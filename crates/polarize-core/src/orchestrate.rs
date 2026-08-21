@@ -38,6 +38,12 @@ use crate::traits::{AccessibilityInspector, InputSynthesizer, ScreenCapture, Win
 ///   wrong point — either because the fraction leaked through
 ///   unconverted, or because it was normalized against the wrong
 ///   target's size, or because the target's screen origin was dropped.
+///
+/// See also PINV-47. This function resolves a target pid and passes it
+/// to [`InputSynthesizer::click_at_pixel`]. The response's
+/// [`crate::schema::PostPath`] always names whichever path the
+/// implementation actually ran. It never names the path this function
+/// merely requested.
 pub fn perform_tap<W, I>(
     window_manager: &W,
     input: &I,
@@ -64,11 +70,17 @@ where
         y: rect.origin.y + local.y,
     };
     let click_count = request.click_count.unwrap_or(1);
-    input.click_at_pixel(pixel, click_count)?;
+    // A pid-resolution failure only loses the pid-post optimization.
+    // The target itself is already resolved (`resolve_target_rect`
+    // above succeeded), so the click still runs on the global fallback
+    // path. See PINV-47.
+    let pid = window_manager.resolve_target_pid(&target).unwrap_or(None);
+    let post_path = input.click_at_pixel(pixel, click_count, pid)?;
     Ok(TapResponse {
         tapped: true,
         pixel_x: pixel.x,
         pixel_y: pixel.y,
+        post_path,
     })
 }
 
@@ -157,7 +169,7 @@ mod tests {
     use super::*;
     use crate::ax::{AxNode, NormalizedFrame};
     use crate::coords::{PixelPoint, PixelRect, PixelSize};
-    use crate::schema::{AppIdentifier, Modifier, NamedKey};
+    use crate::schema::{AppIdentifier, Modifier, NamedKey, PostPath};
     use crate::traits::CapturedImage;
     use std::cell::RefCell;
 
@@ -165,12 +177,17 @@ mod tests {
 
     struct FakeWindowManager {
         rect: PixelRect,
+        /// The pid `resolve_target_pid` reports for every target. `None`
+        /// matches a `Screen` target, or an app this fake pretends is
+        /// not running.
+        pid: Option<i32>,
         activated: RefCell<Vec<AppIdentifier>>,
     }
 
     impl FakeWindowManager {
         /// A target at the global origin — what every existing test
-        /// before PINV-4's origin fix assumed.
+        /// before PINV-4's origin fix assumed. No pid resolves, as if
+        /// every request named the whole screen.
         fn new(size: PixelSize) -> Self {
             Self::with_origin(PixelPoint { x: 0.0, y: 0.0 }, size)
         }
@@ -178,6 +195,20 @@ mod tests {
         fn with_origin(origin: PixelPoint, size: PixelSize) -> Self {
             Self {
                 rect: PixelRect { origin, size },
+                pid: None,
+                activated: RefCell::new(Vec::new()),
+            }
+        }
+
+        /// The same target rect, but `resolve_target_pid` reports `pid`
+        /// — as if the request named a running app.
+        fn with_pid(size: PixelSize, pid: i32) -> Self {
+            Self {
+                rect: PixelRect {
+                    origin: PixelPoint { x: 0.0, y: 0.0 },
+                    size,
+                },
+                pid: Some(pid),
                 activated: RefCell::new(Vec::new()),
             }
         }
@@ -195,13 +226,47 @@ mod tests {
         ) -> Result<PixelRect, PolarizeError> {
             Ok(self.rect)
         }
+
+        fn resolve_target_pid(
+            &self,
+            _target: &ScreenshotTarget,
+        ) -> Result<Option<i32>, PolarizeError> {
+            Ok(self.pid)
+        }
     }
 
-    #[derive(Default)]
     struct FakeInputSynthesizer {
-        clicks: RefCell<Vec<(crate::coords::PixelPoint, u8)>>,
+        clicks: RefCell<Vec<(crate::coords::PixelPoint, u8, Option<i32>)>>,
         typed: RefCell<Vec<String>>,
         pressed: RefCell<Vec<(NamedKey, Vec<Modifier>)>>,
+        /// Simulates whether `skylight_ffi`'s `SLEventPostToPid` symbol
+        /// resolved on this fake macOS. `true` by default: a test that
+        /// only wants to check the pid gets passed through does not
+        /// need to opt in.
+        symbol_available: bool,
+    }
+
+    impl Default for FakeInputSynthesizer {
+        fn default() -> Self {
+            Self {
+                clicks: RefCell::new(Vec::new()),
+                typed: RefCell::new(Vec::new()),
+                pressed: RefCell::new(Vec::new()),
+                symbol_available: true,
+            }
+        }
+    }
+
+    impl FakeInputSynthesizer {
+        /// Simulates a macOS version where `SLEventPostToPid` did not
+        /// resolve — every click falls back to the global path even
+        /// when a pid is available.
+        fn without_pid_symbol() -> Self {
+            Self {
+                symbol_available: false,
+                ..Self::default()
+            }
+        }
     }
 
     impl InputSynthesizer for FakeInputSynthesizer {
@@ -209,9 +274,14 @@ mod tests {
             &self,
             point: crate::coords::PixelPoint,
             click_count: u8,
-        ) -> Result<(), PolarizeError> {
-            self.clicks.borrow_mut().push((point, click_count));
-            Ok(())
+            pid: Option<i32>,
+        ) -> Result<PostPath, PolarizeError> {
+            self.clicks.borrow_mut().push((point, click_count, pid));
+            Ok(if pid.is_some() && self.symbol_available {
+                PostPath::Pid
+            } else {
+                PostPath::Global
+            })
         }
 
         fn type_text(&self, text: &str) -> Result<(), PolarizeError> {
@@ -316,7 +386,8 @@ mod tests {
             TapResponse {
                 tapped: true,
                 pixel_x: 1000.0,
-                pixel_y: 500.0
+                pixel_y: 500.0,
+                post_path: PostPath::Global,
             }
         );
         assert_eq!(
@@ -326,7 +397,8 @@ mod tests {
                     x: 1000.0,
                     y: 500.0
                 },
-                1
+                1,
+                None
             )]
         );
     }
@@ -400,7 +472,8 @@ mod tests {
             TapResponse {
                 tapped: true,
                 pixel_x: 1100.0,
-                pixel_y: 550.0
+                pixel_y: 550.0,
+                post_path: PostPath::Global,
             }
         );
         assert_eq!(
@@ -410,9 +483,88 @@ mod tests {
                     x: 1100.0,
                     y: 550.0
                 },
-                1
+                1,
+                None
             )]
         );
+    }
+
+    #[test]
+    fn perform_tap_posts_by_pid_when_a_target_pid_and_the_symbol_are_both_available() {
+        let wm = FakeWindowManager::with_pid(
+            PixelSize {
+                width: 100.0,
+                height: 100.0,
+            },
+            4242,
+        );
+        let input = FakeInputSynthesizer::default();
+        let request = TapRequest {
+            x: 0.0,
+            y: 0.0,
+            target: Some(ScreenshotTarget::App {
+                app: AppIdentifier {
+                    bundle_id: Some("com.apple.TextEdit".to_string()),
+                    app_name: None,
+                },
+            }),
+            click_count: None,
+        };
+
+        let response = perform_tap(&wm, &input, &request).unwrap();
+
+        assert_eq!(response.post_path, PostPath::Pid);
+        assert_eq!(input.clicks.borrow()[0].2, Some(4242));
+    }
+
+    #[test]
+    fn perform_tap_falls_back_to_global_when_no_target_names_an_app() {
+        let wm = FakeWindowManager::new(PixelSize {
+            width: 100.0,
+            height: 100.0,
+        });
+        let input = FakeInputSynthesizer::default();
+        let request = TapRequest {
+            x: 0.0,
+            y: 0.0,
+            target: None,
+            click_count: None,
+        };
+
+        let response = perform_tap(&wm, &input, &request).unwrap();
+
+        assert_eq!(response.post_path, PostPath::Global);
+        assert_eq!(input.clicks.borrow()[0].2, None);
+    }
+
+    #[test]
+    fn perform_tap_falls_back_to_global_when_the_pid_symbol_is_unavailable() {
+        let wm = FakeWindowManager::with_pid(
+            PixelSize {
+                width: 100.0,
+                height: 100.0,
+            },
+            4242,
+        );
+        let input = FakeInputSynthesizer::without_pid_symbol();
+        let request = TapRequest {
+            x: 0.0,
+            y: 0.0,
+            target: Some(ScreenshotTarget::App {
+                app: AppIdentifier {
+                    bundle_id: Some("com.apple.TextEdit".to_string()),
+                    app_name: None,
+                },
+            }),
+            click_count: None,
+        };
+
+        let response = perform_tap(&wm, &input, &request).unwrap();
+
+        // The pid still reaches the synthesizer — it is the symbol
+        // that is missing, not the pid.
+        assert_eq!(input.clicks.borrow()[0].2, Some(4242));
+        assert_eq!(response.post_path, PostPath::Global);
     }
 
     #[test]
