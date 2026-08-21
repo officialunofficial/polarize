@@ -11,8 +11,8 @@
 use crate::coords::{self, Fraction};
 use crate::error::PolarizeError;
 use crate::schema::{
-    DescribeRequest, DescribeResponse, KeyboardRequest, KeyboardResponse, ScreenshotRequest,
-    ScreenshotResponse, ScreenshotTarget, TapRequest, TapResponse,
+    ActivationPath, DescribeRequest, DescribeResponse, KeyboardRequest, KeyboardResponse,
+    ScreenshotRequest, ScreenshotResponse, ScreenshotTarget, TapRequest, TapResponse,
 };
 use crate::traits::{AccessibilityInspector, InputSynthesizer, ScreenCapture, WindowManager};
 
@@ -131,9 +131,9 @@ where
 /// # PINV-14: a `keyboard` request activates its target app first
 ///
 /// - Always: when `request` names a `target` app, [`perform_keyboard`]
-///   calls [`WindowManager::activate_app`] with it before calling either
-///   [`InputSynthesizer::type_text`] or [`InputSynthesizer::press_key`].
-///   When `target` is `None`, it calls neither.
+///   activates it before calling either [`InputSynthesizer::type_text`]
+///   or [`InputSynthesizer::press_key`]. When `target` is `None`, it
+///   activates nothing.
 /// - Because: `CGEvent` posts to whichever app is currently frontmost,
 ///   not to an app named in the request. Without activating the target
 ///   first, a `target`-scoped `keyboard` call would silently type into
@@ -141,6 +141,12 @@ where
 /// - If violated: text or key presses land in the wrong app, or — if
 ///   `target` is dropped from the schema entirely instead of wired up —
 ///   `polarize` advertises a field its `keyboard` tool never honors.
+///
+/// See also PINV-48: activation itself now has two tiers.
+/// [`perform_keyboard`] tries [`WindowManager::activate_app_without_raise`]
+/// first. It falls back to [`WindowManager::activate_app`] only when the
+/// raise-free path reports itself unavailable. `KeyboardResponse.activation_path`
+/// always names whichever tier actually ran.
 pub fn perform_keyboard<W, I>(
     window_manager: &W,
     input: &I,
@@ -154,14 +160,25 @@ where
         KeyboardRequest::Type { target, .. } => target,
         KeyboardRequest::KeyPress { target, .. } => target,
     };
-    if let Some(app) = target {
-        window_manager.activate_app(app)?;
-    }
+    let activation_path = match target {
+        None => ActivationPath::None,
+        Some(app) => {
+            if window_manager.activate_app_without_raise(app)? {
+                ActivationPath::RaiseFree
+            } else {
+                window_manager.activate_app(app)?;
+                ActivationPath::Raised
+            }
+        }
+    };
     match request {
         KeyboardRequest::Type { text, .. } => input.type_text(text)?,
         KeyboardRequest::KeyPress { key, modifiers, .. } => input.press_key(*key, modifiers)?,
     }
-    Ok(KeyboardResponse { sent: true })
+    Ok(KeyboardResponse {
+        sent: true,
+        activation_path,
+    })
 }
 
 #[cfg(test)]
@@ -182,6 +199,12 @@ mod tests {
         /// not running.
         pid: Option<i32>,
         activated: RefCell<Vec<AppIdentifier>>,
+        raise_free_activated: RefCell<Vec<AppIdentifier>>,
+        /// What `activate_app_without_raise` reports. `false` by
+        /// default, matching the pre-PINV-48 world: a test opts in with
+        /// [`Self::with_raise_free_available`] to exercise the new
+        /// path.
+        raise_free_available: bool,
     }
 
     impl FakeWindowManager {
@@ -197,6 +220,8 @@ mod tests {
                 rect: PixelRect { origin, size },
                 pid: None,
                 activated: RefCell::new(Vec::new()),
+                raise_free_activated: RefCell::new(Vec::new()),
+                raise_free_available: false,
             }
         }
 
@@ -210,7 +235,15 @@ mod tests {
                 },
                 pid: Some(pid),
                 activated: RefCell::new(Vec::new()),
+                raise_free_activated: RefCell::new(Vec::new()),
+                raise_free_available: false,
             }
+        }
+
+        /// Makes `activate_app_without_raise` report success (PINV-48).
+        fn with_raise_free_available(mut self) -> Self {
+            self.raise_free_available = true;
+            self
         }
     }
 
@@ -232,6 +265,13 @@ mod tests {
             _target: &ScreenshotTarget,
         ) -> Result<Option<i32>, PolarizeError> {
             Ok(self.pid)
+        }
+
+        fn activate_app_without_raise(&self, app: &AppIdentifier) -> Result<bool, PolarizeError> {
+            if self.raise_free_available {
+                self.raise_free_activated.borrow_mut().push(app.clone());
+            }
+            Ok(self.raise_free_available)
         }
     }
 
@@ -696,7 +736,13 @@ mod tests {
 
         let response = perform_keyboard(&wm, &input, &request).unwrap();
 
-        assert_eq!(response, KeyboardResponse { sent: true });
+        assert_eq!(
+            response,
+            KeyboardResponse {
+                sent: true,
+                activation_path: ActivationPath::None,
+            }
+        );
         assert_eq!(input.typed.borrow().as_slice(), &["hi".to_string()]);
         assert!(input.pressed.borrow().is_empty());
     }
@@ -744,10 +790,11 @@ mod tests {
             target: Some(target.clone()),
         };
 
-        perform_keyboard(&wm, &input, &request).unwrap();
+        let response = perform_keyboard(&wm, &input, &request).unwrap();
 
         assert_eq!(wm.activated.borrow().as_slice(), &[target]);
         assert_eq!(input.typed.borrow().as_slice(), &["hi".to_string()]);
+        assert_eq!(response.activation_path, ActivationPath::Raised);
     }
 
     #[test]
@@ -767,9 +814,37 @@ mod tests {
             target: Some(target.clone()),
         };
 
-        perform_keyboard(&wm, &input, &request).unwrap();
+        let response = perform_keyboard(&wm, &input, &request).unwrap();
 
         assert_eq!(wm.activated.borrow().as_slice(), &[target]);
+        assert_eq!(response.activation_path, ActivationPath::Raised);
+    }
+
+    #[test]
+    fn perform_keyboard_prefers_raise_free_activation_when_available() {
+        let wm = FakeWindowManager::new(PixelSize {
+            width: 100.0,
+            height: 100.0,
+        })
+        .with_raise_free_available();
+        let input = FakeInputSynthesizer::default();
+        let target = AppIdentifier {
+            bundle_id: Some("com.apple.TextEdit".to_string()),
+            app_name: None,
+        };
+        let request = KeyboardRequest::Type {
+            text: "hi".to_string(),
+            target: Some(target.clone()),
+        };
+
+        let response = perform_keyboard(&wm, &input, &request).unwrap();
+
+        assert_eq!(wm.raise_free_activated.borrow().as_slice(), &[target]);
+        assert!(
+            wm.activated.borrow().is_empty(),
+            "activate_app must not run when the raise-free path already succeeded"
+        );
+        assert_eq!(response.activation_path, ActivationPath::RaiseFree);
     }
 
     #[test]
@@ -784,8 +859,10 @@ mod tests {
             target: None,
         };
 
-        perform_keyboard(&wm, &input, &request).unwrap();
+        let response = perform_keyboard(&wm, &input, &request).unwrap();
 
         assert!(wm.activated.borrow().is_empty());
+        assert!(wm.raise_free_activated.borrow().is_empty());
+        assert_eq!(response.activation_path, ActivationPath::None);
     }
 }

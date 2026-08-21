@@ -42,6 +42,9 @@ pub mod app_lookup;
 pub mod applescript;
 mod ax_ffi;
 pub mod capture;
+/// Resolves a `pid` to a `ProcessSerialNumber` by walking Carbon's
+/// deprecated-but-present Process Manager. See PINV-48.
+mod carbon_process;
 pub mod clipboard;
 mod content;
 /// Flow recording over a listen-only `CGEventTap`. See PINV-39 and
