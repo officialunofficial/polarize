@@ -1261,6 +1261,24 @@ claim automated coverage they don't have.
   `post_path` before relying on "the cursor did not move" would then
   trust a claim the platform did not back up.
 
+**Live-verified limitation: a sandboxed app's own Open/Save panel.**
+Confirmed against TextEdit: a pid-posted `tap` reaches an ordinary
+document window every time. It never reaches TextEdit's own
+`NSOpenPanel`. The panel is not really TextEdit's window. Since macOS
+10.15, a sandboxed app's Open/Save panel is hosted by a separate XPC
+service, `com.apple.appkit.xpc.openAndSavePanelService`. That service
+holds file-access entitlements the sandboxed app itself does not have.
+`SLEventPostToPid` posts into the pid the caller named. That pid is
+TextEdit's, not the panel service's. An event aimed at the panel never
+reaches the process that actually owns it. This is a property of any
+sandboxed app's file panel, not a TextEdit-specific bug. It does not
+extend to ordinary in-process sheets, the system color/font panel, or
+`NSAlert`. A caller who hits this can force the global path today, by
+scoping the `tap` to `Screen` instead of the app or window. No code
+change is proposed here: there is no cheap, reliable way to detect
+"this window belongs to an out-of-process panel" from inside
+`polarize-macos`.
+
 ### PINV-48: a `keyboard` target activates without raising, or falls back
 
 - Always: for a request that names a `target`,
