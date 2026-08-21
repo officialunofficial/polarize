@@ -808,8 +808,10 @@ claim automated coverage they don't have.
   No string value is required for a banner to be found, so a tree shape
   this code has never seen still yields every banner it can identify.
   A control becomes the dismiss control only when it publishes an action
-  **and** names itself: subrole `AXCloseButton`, or a label, identifier,
-  help string, or subrole that holds "close", "dismiss", or "clear". A
+  **and** names itself: subrole `AXCloseButton`; a label, identifier,
+  help string, or subrole that holds "close", "dismiss", or "clear"; or
+  — added by PINV-43, for the case none of those fields exist at all —
+  one of the control's own raw action names holding the same word. A
   plain pressable button is never enough.
   `notifications::perform_dismiss_notification` reads the tree again
   after the press, and reports `dismissed` from that second read alone.
@@ -1036,6 +1038,178 @@ claim automated coverage they don't have.
   slot held an error. An element reports another element's identifier.
   A caller then selects on that identifier and acts on the wrong
   control.
+
+### PINV-42: the main thread pumps a `CFRunLoop`, and a persistent observer keeps `NSWorkspace` live
+
+- Always: `apps/polarize` keeps the process's real main thread free for
+  `polarize_macos::runloop::run_main_until_stopped`, for as long as the
+  server runs. Its own async server logic runs on a separately-built
+  `tokio` runtime instead, through `runtime.spawn`. Before the run loop
+  starts, `polarize_macos::workspace_activation::activate` registers
+  one `NSWorkspace` notification observer, for the process's whole
+  lifetime, watching `NSWorkspaceDidLaunchApplicationNotification`,
+  `NSWorkspaceDidTerminateApplicationNotification`,
+  `NSWorkspaceDidActivateApplicationNotification`, and
+  `NSWorkspaceDidDeactivateApplicationNotification`. It does nothing
+  with what it receives; registering it is the whole point.
+- Because: `NSWorkspace.runningApplications` and `.frontmostApplication`
+  are not live queries. Apple documents both as a cache. It "persist[s]
+  until the next turn of the main run loop in a common mode"
+  (`NSRunningApplication`'s class overview). `NSWorkspace
+  .runningApplications`'s own discussion states the same policy. A
+  `#[tokio::main]` binary parks the real main thread inside tokio's own
+  executor. It never turns a `CFRunLoop` there. So every tool that
+  resolves an app by name, or defaults to the frontmost app, freezes.
+  It freezes at whatever that cache held the moment the process first
+  read it. Confirmed live: an externally-launched app stayed invisible
+  to `list_windows` for 25+ seconds in a long-lived process.
+  `frontmost_app` ignored a real, OS-confirmed app switch for the same
+  span. A fresh process always saw the current state immediately. That
+  points at the cache, not the app, as the real cause.
+
+  Pumping the run loop alone is not enough either. Confirmed with a
+  minimal native probe outside Rust entirely. A bare `CFRunLoopRun()`,
+  with no `NSApplication` and no registered observer, never refreshed
+  `runningApplications`. It stayed stale even 14 seconds after a real
+  external launch. The same probe registered one
+  `NSWorkspace.notificationCenter` observer instead, for
+  `didLaunchApplicationNotification` alone. It refreshed within the
+  next run-loop turn. Registering an observer activates the underlying
+  tracking. Running the loop lets the registration deliver.
+- If violated: `app_launch`, `list_windows`, `describe`, `tap`,
+  `keyboard`, `perform_action`, `set_value`, `hit_test_at_point`,
+  `set_window_frame`, `window_action`, and `app_quit` all fail or time
+  out against any app that started after the server did. The reason:
+  `AppIdentifier` resolution and the `app: None` "frontmost" default
+  both read this same frozen state. `frontmost_app` reports a stale
+  app indefinitely. `await_workspace_event`'s notification channel
+  still may not fire. `crates/polarize-macos/src/workspace_events.rs`
+  registers its own ephemeral, per-call observer on a fresh worker
+  thread, not the main thread this invariant governs. That is a
+  separate, still-open question its own doc comment already flags.
+  Its poll channel now succeeds anyway, because polling reads the same
+  `frontmost_app` state this invariant keeps live.
+
+### PINV-43: a banner is found inside a real banner window, never the whole notification-centre tree
+
+- Always: `notifications::extract_banners_from_notification_center`
+  only walks the notification centre's `AXWindow` children whose
+  subrole is `AXSystemDialog`. That applies when at least one such
+  window exists. When none does, it walks every `AXWindow` child
+  instead. It never walks the process's `AXMenuBar` or any non-window
+  child, whatever the fallback. `notifications::extract_banners` — the
+  structure-matching PINV-35 describes — still runs unchanged inside
+  whichever window this selects. Separately, `dismiss_evidence` now
+  also treats one of a control's own raw action names as dismiss
+  evidence. That action name must hold "close", "dismiss", or "clear".
+  This ranks between the label/identifier match and the
+  `AXCloseButton` subrole match. It exists for a control that
+  publishes neither a subrole nor a recognizable label at all. A real
+  banner's own dismiss action does exactly that.
+- Because: confirmed live, twice. First, the failure. The notification
+  centre process's `AXApplication` element carries an `AXMenuBar`.
+  That is the frontmost app's own Apple menu, oddly attributed to this
+  process. It also carries one `AXWindow` per desktop widget, subrole
+  `AXUnknown`. This code used to walk the whole tree. That found
+  Apple-menu items ("Force Quit…", "Shut Down…") and widget text (a
+  weather forecast, a calendar date). It reported both kinds as
+  banners. A real, screenshot-confirmed on-screen banner was never
+  once among them. So `dismiss_notification` could never find
+  anything real to press either.
+
+  Second, the fix. A real banner sits under exactly one `AXWindow`
+  with subrole `AXSystemDialog`. It was posted through
+  `terminal-notifier`'s own first-run permission alert.
+  `osascript -e 'display notification'` throttles its own banner
+  after enough calls in one session. Past some point, it stops
+  rendering one at all. `describe_notifications` against that window,
+  after this fix, returned that one banner alone. No widget or menu
+  content came with it. Its own dismiss action published no subrole
+  or label at all. It published only a raw action name, reading
+  `"Name:Close\nTarget:0x0\nSelector:(null)"`. `dismiss_notification`
+  pressed exactly that action. A second `describe_notifications` read
+  then confirmed `count: 0`. The banner was really gone, not merely
+  reported gone.
+- If violated: `describe_notifications` returns Apple-menu items and
+  desktop-widget text as "banners." That happens on any Mac showing
+  either — most of them, most of the time. `dismiss_notification`
+  then reports "no notification banner matches," even while a real
+  one sits on screen, because the walk never found it to begin with.
+  A future regression here is easy to miss. Unit tests built from a
+  tree shape that already includes the `AXWindow` wrapper
+  (`todays_tree` and similar) keep passing even if the window-scoping
+  itself breaks. They never exercise
+  `extract_banners_from_notification_center` against a tree carrying
+  an `AXMenuBar` or a widget window. Only the tests that build that
+  fuller shape catch it.
+
+### PINV-44: an Automation grant is requested with a real script send, per target app, never with the prompting preflight call
+
+- Always: `polarize --request-permissions` calls
+  `polarize_macos::applescript::request_automation` once, for Finder.
+  That function launches (or activates) the target. It sends one
+  real, harmless script through the same `osascript` path
+  `run_applescript` uses. It deliberately skips
+  `MacAppleScriptRunner::preflight_automation`, the check that would
+  otherwise refuse it. It reports the resulting
+  `polarize_core::script::AutomationCheck`. It never calls
+  `AEDeterminePermissionToAutomateTarget` with
+  `ask_user_if_needed: true`.
+- Because: Automation access is granted per (this process, target app)
+  pair. Apple's own documentation of
+  `AEDeterminePermissionToAutomateTarget` confirms this. Apple's own
+  developer forums corroborate it too (Scripting OS X's writeup on
+  avoiding AppleScript privacy prompts). There is no single, blanket
+  grant. A bootstrap cannot request one grant that covers every app
+  `run_applescript` might later address. Accessibility and Screen
+  Recording allow exactly that. Automation does not. A real script
+  send is what macOS documents as raising the consent dialog.
+  `AEDeterminePermissionToAutomateTarget(ask_user_if_needed: true)`
+  also documents raising it. But it carries a long-standing,
+  Apple-acknowledged hang bug, with no fix as of this writing (Apple
+  Developer Forums thread 666528). That bug is worse against a target
+  that is not already running. That is exactly the state a bootstrap
+  starts from. Preflighting the bootstrap's own script send would be
+  circular. The whole point of calling it is to move a `NotDetermined`
+  state forward. The preflight refuses on exactly that state.
+- If violated: `run_applescript` reports "Automation permission is
+  NotDetermined, not granted" on every fresh install, forever. Nothing
+  ever asks macOS to show the one dialog that could change that.
+  Confirmed live before this fix: the very first `run_applescript`
+  call against Finder failed exactly this way. Nothing in the
+  codebase's `--request-permissions` flow addressed Automation at all.
+  A caller that reaches for `AEDeterminePermissionToAutomateTarget`'s
+  prompting form instead risks the hang bug. That bug blocks the whole
+  bootstrap, not just one target.
+
+### PINV-45: a `describe` walk stops at a total node budget, not only a depth limit
+
+- Always: `accessibility::build_node` shares one `budget: &mut usize`
+  across the whole call, starting at `MAX_AX_NODES` (4,000). It
+  decrements once for every node the walk visits anywhere in the
+  tree, and stops descending — returning no further children, exactly
+  as [`MAX_AX_DEPTH`] already does — the moment it reaches zero,
+  wherever in the tree that happens.
+- Because: [`MAX_AX_DEPTH`] (PINV-13) bounds a *deep* tree. It does
+  nothing for a *wide* one. A file list a thousand rows long is only
+  two or three levels deep. Confirmed live: `describe` against
+  TextEdit's own "Open" file panel was still running after 26 seconds.
+  That panel is an ordinary `NSOpenPanel`, not a pathological case. It
+  had no node-count bound at all. `sample` confirmed real work the
+  whole time, not a deadlock: repeated
+  `AXUIElementCopyAttributeValue`/`AXUIElementCopyActionNames`/
+  `AXUIElementCopyMultipleAttributeValues` calls, one set per node.
+  Nothing bounded how many nodes there were to visit. Any real app
+  with a large table, outline, or web-mirrored DOM can stall the same
+  way. A file picker, a long chat history, and a big spreadsheet are
+  three examples. `describe` also takes no `timeout_ms` parameter.
+  Every other long-running tool has one. So a caller cannot bound the
+  cost from outside either.
+- If violated: `describe` runs for as long as a wide view has elements
+  to visit. A caller cannot bound or even predict the cost. This exact
+  failure stayed open for 26+ seconds against an everyday file panel.
+  It was not a contrived, pathological input.
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -1512,22 +1686,49 @@ claim automated coverage they don't have.
   presses nothing, and every filter and clamp. All of it runs against
   hand-built trees, so it needs no macOS session.
   What is **not** automated, and cannot be: whether any of those tree
-  shapes matches what
-  `com.apple.notificationcenterui` really publishes. **Every banner tree
-  in these tests is an informed guess.** Nobody has recorded a real
-  one. A human on a real macOS session with Accessibility permission
-  granted must: post a notification (`osascript -e 'display
-  notification "body" with title "title"'`), run `describe` against
-  `com.apple.notificationcenterui` and read the raw tree, then run
-  `describe_notifications` and compare the two. Then run
-  `dismiss_notification` and watch the banner leave the screen while the
-  response reports `dismissed: true`. Repeat on a banner that carries
-  action buttons, such as a Messages notification, and confirm the tool
-  presses the close control and not "Reply". Repeat on the notification
-  centre panel opened from the menu bar, which is a different shape
-  again. The macOS code is type-checked against `aarch64-apple-darwin`,
-  and `polarize-macos/src/notifications.rs` holds nothing but wiring and
-  one error message.
+  shapes matches what `com.apple.notificationcenterui` really publishes.
+  This much now is live-verified, not guessed — see PINV-43's
+  enforcement entry for the real tree, the real dismiss action, and the
+  real re-read that confirmed a real banner actually left the screen.
+  What that pass did not cover, and still needs a human: a banner that
+  carries action buttons, such as a Messages notification, confirming
+  the tool presses the close control and not "Reply"; and the
+  notification centre panel opened deliberately from the menu bar,
+  which is a different shape again from a transient banner. The macOS
+  code is type-checked against `aarch64-apple-darwin`, and
+  `polarize-macos/src/notifications.rs` holds nothing but wiring and one
+  error message.
+
+- **PINV-43** — split, matching PINV-35. The window-scoping decision
+  (`banner_window_indices`) and the action-name dismiss-evidence tier
+  are fully covered by automated `cargo test -p polarize-core`
+  (`notifications::tests`, 5 new tests): the Apple menu and both widget
+  windows proved to never read as a banner even though they sit
+  alongside a real one, the fallback to every `AXWindow` when none
+  carries `AXSystemDialog`, an empty result when no window exists at
+  all, a banner's own action-name evidence chosen over two unrelated
+  actions on the same element, and that same evidence still refused
+  when the action itself reads as a "clear everything" control.
+  The native half is live-verified, not guessed, unlike most of this
+  document's untestable halves. Run `python3` against the MCP stdio
+  transport directly (see the PR's own verification harness). Post a
+  real notification. Compare `describe_notifications`'s result against
+  a raw `describe` dump of `com.apple.notificationcenterui`. That is
+  exactly what the fixture
+  `extract_banners_from_notification_center_ignores_the_apple_menu_and_widget_windows`
+  now encodes. Confirmed on a real macOS 26 (arm64) session: before
+  this fix, a screenshot-confirmed on-screen banner was never found.
+  `describe_notifications` returned Apple-menu items and widget text
+  instead. After the fix, `describe_notifications` returned exactly
+  the one real banner. `dismiss_notification` pressed its real raw
+  action (`"Name:Close\nTarget:0x0\nSelector:(null)"`). A second
+  `describe_notifications` read confirmed `count: 0`. A human should
+  still repeat this after any future change to `banner_window_indices`,
+  `dismiss_evidence`, or the constants they read. This is exactly the
+  kind of fix a plausible-looking refactor can silently break without
+  a live re-check. The unit tests above only prove the logic is
+  internally consistent with the tree shapes they build. They do not
+  prove a real Mac still builds that shape.
 - **PINV-36** — split. The whole decision half is fully covered by
   automated `cargo test -p polarize-core` (`workspace_events::tests`, 32
   tests): the notification-name table in both directions, an unknown
@@ -1734,3 +1935,74 @@ claim automated coverage they don't have.
   therefore copies more text than it used to. The tree is identical
   either way, so only a timing run against a text-heavy app can show
   it.
+
+- **PINV-42** — not automatable by construction. It is a claim about
+  `CFRunLoop` scheduling and `NSWorkspace`'s undocumented internal
+  cache. Neither one a headless test can observe. Live-verified twice
+  on a real macOS session.
+
+  First, against the fix itself. With the fix absent, an
+  externally-launched app stayed invisible to `list_windows` for 25+
+  seconds. `frontmost_app` ignored a real, OS-confirmed app switch
+  indefinitely. With the fix present, the same two scripts saw the
+  launch within 3 seconds and the switch within 2. `sample` confirms
+  the main thread sits in real `CFRunLoopRunInMode` → `mach_msg`, not
+  tokio's executor.
+
+  Second, against the mechanism, with a minimal native Swift probe
+  outside Rust and outside this binary entirely. A bare
+  `CFRunLoopRun()` alone never refreshed `runningApplications`, even
+  14 seconds after a real launch. The same probe, with one
+  notification observer registered, refreshed within the next turn.
+
+  A human on a real macOS session should re-run this after any future
+  change to `apps/polarize`'s startup sequence, or to
+  `workspace_activation::activate`'s registration list. This is
+  exactly the kind of fix that silently stops working if the observer
+  registration moves after the run loop starts, or is dropped instead
+  of leaked.
+
+- **PINV-44** — not automatable. A real TCC grant, and the system
+  dialog that produces one, cannot exist in CI. Live-verified on a
+  real macOS session. Before this fix, the very first
+  `run_applescript` call against Finder failed with "Automation
+  permission is NotDetermined, not granted." Nothing in
+  `--request-permissions` addressed Automation at all. After adding
+  `request_automation` and wiring it into `--request-permissions`, the
+  same `run_applescript` call against Finder succeeded. It returned
+  real data (`get name of every disk`).
+
+  One caveat this pass could not cleanly isolate. TCC's Automation
+  grant is keyed to a "responsible process." That identity can be
+  inherited up a parent chain (Scripting OS X's writeup on avoiding
+  AppleScript privacy prompts documents this). This session had
+  already sent a real, unrelated `osascript` call to Finder directly
+  from the same shell, hours earlier. That call may have granted the
+  same underlying identity before this fix's own bootstrap ever ran.
+  `tccutil reset AppleEvents` would isolate this cleanly. But it
+  resets every Automation grant on the machine, not just this
+  binary's, so this pass did not run it. A human re-verifying this
+  invariant on a genuinely clean machine (or after `tccutil reset
+  AppleEvents`) should confirm one thing: `--request-permissions`
+  alone, with no prior `osascript` call from any process, is what
+  raises the dialog and moves the state to `Permitted`.
+
+- **PINV-45** — not automatable. It is a claim about real wall-clock
+  cost against a real, wide AX tree, which does not exist in CI. The
+  budget mechanism itself is a simple, code-inspectable bound — a
+  `usize` that only ever decreases, checked before every recursive
+  step. Live-verified, both halves.
+
+  The failure this fix closes: 26+ seconds against TextEdit's real
+  "Open" panel, `sample`-confirmed as genuine work, not a hang.
+
+  The fix itself, against a Finder window on `/usr/bin`: 934 real
+  files, in list view. File name, kind, size, and date columns each
+  add their own `AXCell`/`AXStaticText` nodes, so the real tree
+  carries several times 934 nodes. `describe` returned in 4.8 seconds,
+  not 26+ and counting. The returned tree carried exactly 4,001 lines
+  — the root plus exactly `MAX_AX_NODES`. It ended mid-row on a
+  truncated `AXCell`, rather than reaching the window's real last row.
+  Both the bound (it stopped at exactly the configured number) and the
+  behavior (bounded time instead of an open-ended stall) are confirmed
+  as designed.

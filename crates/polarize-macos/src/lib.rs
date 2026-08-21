@@ -54,10 +54,15 @@ pub mod keymap;
 pub mod notifications;
 pub mod observer;
 pub mod permission_bootstrap;
+/// Pumps the real main-thread `CFRunLoop`. See PINV-42.
+pub mod runloop;
 pub mod session;
 pub mod set_value;
 pub mod vision;
 pub mod window;
 pub mod window_control;
 pub mod workspace;
+/// Keeps `NSWorkspace`'s live-application tracking active. See
+/// PINV-42.
+pub mod workspace_activation;
 pub mod workspace_events;

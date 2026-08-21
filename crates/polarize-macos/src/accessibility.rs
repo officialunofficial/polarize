@@ -31,6 +31,24 @@ use crate::window::resolve_running_app;
 /// left as an unexplained magic number.
 const MAX_AX_DEPTH: usize = 64;
 
+/// Hard cap on the total number of nodes one `describe` call may
+/// visit, across the whole tree — not per level, and not per depth.
+///
+/// [`MAX_AX_DEPTH`] alone does not bound a *wide* tree. A file list a
+/// thousand rows long is only two or three levels deep. Confirmed
+/// live: `describe` against TextEdit's own "Open" file panel was
+/// still walking after 26 seconds. That panel is an ordinary
+/// `NSOpenPanel`, not a pathological case. It had no node-count bound
+/// at all. It made real
+/// `AXUIElementCopyAttributeValue`/`AXUIElementCopyActionNames`/
+/// `AXUIElementCopyMultipleAttributeValues` calls the whole time; see
+/// PINV-45. 4,000 nodes covers even a busy app's whole UI — a few
+/// hundred elements is typical — with headroom. It still turns a file
+/// browser, a long outline, or a big spreadsheet into a bounded
+/// truncation. The alternative is an effectively unbounded wall-clock
+/// cost.
+const MAX_AX_NODES: usize = 4_000;
+
 /// `AccessibilityInspector` implementation over `AXUIElement`.
 #[derive(Debug, Default)]
 pub struct MacAccessibilityInspector;
@@ -75,7 +93,8 @@ impl AccessibilityInspector for MacAccessibilityInspector {
             height: bounds.size.height,
         };
 
-        let root = build_node(&element, screen_size, 0);
+        let mut budget = MAX_AX_NODES;
+        let root = build_node(&element, screen_size, 0, &mut budget);
         Ok((resolved, root))
     }
 }
@@ -86,10 +105,21 @@ impl AccessibilityInspector for MacAccessibilityInspector {
 /// call (PINV-41), with a one-at-a-time fallback. Three round trips
 /// stay: the settable-`AXFocused` check, the action list, and
 /// `AXChildren`. See also PINV-12 (a single unreadable attribute
-/// degrades to a default, never aborts the walk) and PINV-13
-/// (recursion stops at [`MAX_AX_DEPTH`], truncating rather than
-/// erroring) in `docs/INVARIANTS.md`.
-fn build_node(element: &AxElement, screen_size: PixelSize, depth: usize) -> AxNode {
+/// degrades to a default, never aborts the walk), PINV-13 (recursion
+/// stops at [`MAX_AX_DEPTH`], truncating rather than erroring), and
+/// PINV-45 (the whole walk stops at [`MAX_AX_NODES`] total, truncating
+/// a wide tree the same way) in `docs/INVARIANTS.md`.
+///
+/// `budget` is shared across the whole call. It is not reset per
+/// level or per sibling. It decrements once for every node this
+/// function visits, anywhere in the tree. So a thousand siblings at
+/// one level exhausts it exactly as a thousand-deep chain would.
+fn build_node(
+    element: &AxElement,
+    screen_size: PixelSize,
+    depth: usize,
+    budget: &mut usize,
+) -> AxNode {
     let attributes = element.node_attributes();
     let frame = safe_normalize_frame(attributes.position, attributes.size, screen_size);
 
@@ -99,14 +129,18 @@ fn build_node(element: &AxElement, screen_size: PixelSize, depth: usize) -> AxNo
     let focusable = element.is_attribute_settable("AXFocused");
     let actions = element.action_names();
 
-    let children = if depth >= MAX_AX_DEPTH {
+    let children = if depth >= MAX_AX_DEPTH || *budget == 0 {
         Vec::new()
     } else {
-        element
-            .children()
-            .iter()
-            .map(|child| build_node(child, screen_size, depth + 1))
-            .collect()
+        let mut nodes = Vec::new();
+        for child in element.children().iter() {
+            if *budget == 0 {
+                break;
+            }
+            *budget -= 1;
+            nodes.push(build_node(child, screen_size, depth + 1, budget));
+        }
+        nodes
     };
 
     attributes.into_node(frame, focusable, actions, children)

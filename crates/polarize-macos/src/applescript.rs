@@ -197,6 +197,53 @@ impl MacAppleScriptRunner {
     }
 }
 
+/// Shows the system Automation consent dialog for one target app. It
+/// reports the resulting permission state. Behind
+/// `polarize --request-permissions`; see PINV-44.
+///
+/// Deliberately does **not** call [`preflight_automation`] first. A
+/// `NotDetermined` refusal there is exactly the state this function
+/// exists to move past. It also does not call
+/// `AEDeterminePermissionToAutomateTarget` with
+/// `ask_user_if_needed: true`. That call has a long-standing,
+/// Apple-acknowledged hang bug (Apple Developer Forums thread 666528).
+/// It is worse against a target that is not already running. A real,
+/// harmless script send is what reliably raises the same dialog
+/// instead.
+///
+/// [`preflight_automation`]: MacAppleScriptRunner::preflight_automation
+///
+/// How long to give `open -g -a` before the script send below. A
+/// freshly-launched app is not always ready to receive an Apple Event
+/// the instant `open` returns; one second is a generous, arbitrary
+/// margin, not a measured minimum.
+const AUTOMATION_BOOTSTRAP_LAUNCH_SETTLE_MS: u64 = 1_000;
+
+pub fn request_automation(target_app_name: &str) -> AutomationCheck {
+    // Best-effort: an app already running just gets activated again,
+    // and a script send to one that never launches still surfaces as
+    // `procNotFound`, which `automation_check` below reports honestly.
+    let _ = std::process::Command::new("open")
+        .args(["-g", "-a", target_app_name])
+        .status();
+    std::thread::sleep(Duration::from_millis(AUTOMATION_BOOTSTRAP_LAUNCH_SETTLE_MS));
+
+    let script = format!("tell application \"{target_app_name}\" to get its name");
+    let _ = run("osascript", &[], Some(script.as_str()), 15_000);
+
+    let identifier = AppIdentifier {
+        bundle_id: Some(target_app_name.to_string()),
+        app_name: Some(target_app_name.to_string()),
+    };
+    let Ok(running) = crate::window::resolve_running_app(Some(&identifier)) else {
+        return AutomationCheck::Inconclusive;
+    };
+    let Some(bundle_id) = running.bundleIdentifier() else {
+        return AutomationCheck::Inconclusive;
+    };
+    automation_check(&bundle_id.to_string())
+}
+
 impl AppleScriptRunner for MacAppleScriptRunner {
     fn run_script(
         &self,

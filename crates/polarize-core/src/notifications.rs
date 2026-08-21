@@ -194,11 +194,20 @@ fn has_text(node: &AxNode) -> bool {
 enum DismissEvidence {
     /// A label or identifier that names a close control.
     Named,
+    /// One of the node's own actions names itself a close action.
+    ///
+    /// Confirmed live: a real banner's own dismiss action publishes no
+    /// subrole, label, or identifier a caller would recognize. The
+    /// banner group itself carries none of those. But
+    /// `AXUIElementCopyActionNames` still returns a raw name like
+    /// `"Name:Close\nTarget:0x0\nSelector:(null)"` for it. See
+    /// PINV-43.
+    ActionName,
     /// `AXSubrole` is `AXCloseButton`. macOS itself said so.
     Subrole,
 }
 
-fn dismiss_evidence(node: &AxNode) -> Option<DismissEvidence> {
+fn dismiss_evidence(node: &AxNode) -> Option<(DismissEvidence, Option<String>)> {
     if node.actions.is_empty() {
         return None;
     }
@@ -208,7 +217,7 @@ fn dismiss_evidence(node: &AxNode) -> Option<DismissEvidence> {
         return None;
     }
     if node.subrole.as_deref() == Some(CLOSE_BUTTON_SUBROLE) {
-        return Some(DismissEvidence::Subrole);
+        return Some((DismissEvidence::Subrole, None));
     }
     let named = [&node.identifier, &node.label, &node.help]
         .into_iter()
@@ -222,19 +231,38 @@ fn dismiss_evidence(node: &AxNode) -> Option<DismissEvidence> {
             .subrole
             .as_deref()
             .is_some_and(|subrole| contains_hint(subrole, &DISMISS_HINTS));
-    named.then_some(DismissEvidence::Named)
+    if named {
+        return Some((DismissEvidence::Named, None));
+    }
+    // The real banner's own case: no subrole, label, or identifier
+    // evidence at all, only this. `clears_everything` above already
+    // rules out an action naming both a dismiss word and an
+    // all-of-them word. So a hint match here is exactly as safe as a
+    // label match is.
+    node.actions
+        .iter()
+        .find(|action| contains_hint(action, &DISMISS_HINTS))
+        .map(|action| (DismissEvidence::ActionName, Some(action.clone())))
 }
 
 /// Whether a control's own name says it acts on every notification.
 ///
 /// This asks for both halves: a dismiss word and an all-of-them word.
 /// "Clear All" and "Close all notifications" match; "Close" does not,
-/// and neither does an unrelated control that merely says "all".
+/// and neither does an unrelated control that merely says "all". Also
+/// checks the node's own action names, for the same reason
+/// [`dismiss_evidence`] does.
 fn clears_everything(node: &AxNode) -> bool {
-    [&node.identifier, &node.label, &node.help]
+    let named = [&node.identifier, &node.label, &node.help]
         .into_iter()
         .flatten()
-        .any(|value| contains_hint(value, &DISMISS_HINTS) && contains_hint(value, &CLEAR_ALL_HINTS))
+        .any(|value| {
+            contains_hint(value, &DISMISS_HINTS) && contains_hint(value, &CLEAR_ALL_HINTS)
+        });
+    named
+        || node.actions.iter().any(|action| {
+            contains_hint(action, &DISMISS_HINTS) && contains_hint(action, &CLEAR_ALL_HINTS)
+        })
 }
 
 fn contains_hint(value: &str, hints: &[&str]) -> bool {
@@ -247,7 +275,7 @@ fn direct_dismiss_child(node: &AxNode) -> Option<usize> {
     node.children
         .iter()
         .enumerate()
-        .filter_map(|(index, child)| dismiss_evidence(child).map(|evidence| (evidence, index)))
+        .filter_map(|(index, child)| dismiss_evidence(child).map(|(evidence, _)| (evidence, index)))
         .max_by_key(|(evidence, _)| *evidence)
         .map(|(_, index)| index)
 }
@@ -297,6 +325,86 @@ pub fn extract_banners(root: &AxNode) -> Vec<NotificationBanner> {
         .enumerate()
         .filter_map(|(index, path)| build_banner(root, path, index))
         .collect()
+}
+
+/// Finds every banner in the notification centre's *whole* tree.
+/// That is the tree `describe` returns, rooted at its `AXApplication`
+/// element. It carries an `AXMenuBar` and a widget `AXWindow`
+/// alongside any real banner window.
+///
+/// Unlike [`extract_banners`], this looks only inside the child
+/// windows [`banner_window_indices`] identifies as able to hold a
+/// banner. So an unrelated container that merely looks banner-shaped
+/// never counts — an Apple-menu item, a desktop widget's own text.
+/// [`extract_banners`] alone would still find one, if handed that
+/// whole tree directly. See PINV-43.
+///
+/// `perform_describe_notifications` and `perform_dismiss_notification`
+/// use this. `extract_banners` stays the primitive both this function
+/// and its own tests build on. It still expects to be handed a
+/// subtree that is already known to be "the area banners live in."
+fn extract_banners_from_notification_center(root: &AxNode) -> Vec<NotificationBanner> {
+    let mut roots: Vec<ElementPath> = Vec::new();
+    for window_index in banner_window_indices(root) {
+        let mut window_roots: Vec<ElementPath> = Vec::new();
+        collect_banner_roots(
+            &root.children[window_index],
+            &mut Vec::new(),
+            &mut window_roots,
+        );
+        for mut path in window_roots {
+            path.insert(0, window_index);
+            roots.push(path);
+        }
+    }
+    roots
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, path)| build_banner(root, path, index))
+        .collect()
+}
+
+/// The `AXSubrole` a real banner's own window carries.
+///
+/// Confirmed live against a real, on-screen banner on macOS 26
+/// (arm64): every currently-visible banner sits under one `AXWindow`
+/// whose subrole is `AXSystemDialog`. See PINV-43.
+const BANNER_WINDOW_SUBROLE: &str = "AXSystemDialog";
+
+/// Which of the root's children could hold a real banner.
+///
+/// Only `AXWindow` children ever hold one. The notification centre
+/// process also publishes an `AXMenuBar` at the root. Confirmed live:
+/// this is the frontmost app's own Apple menu, oddly attributed to
+/// this process. It also publishes one `AXWindow` per desktop widget
+/// (Weather, Calendar, …), which carries no `AXSystemDialog` subrole.
+/// This code once walked the whole root as one tree. That finds
+/// Apple-menu items and widget text, never a banner. See PINV-43.
+///
+/// A window carrying [`BANNER_WINDOW_SUBROLE`] is used alone when at
+/// least one exists. Scoping to it is what keeps a widget's window
+/// out of the walk. When none carries it — a future macOS renamed the
+/// subrole — every `AXWindow` is walked instead, exactly as before
+/// this fix. Reporting zero banners on a Mac that has one is worse
+/// than occasionally over-including.
+fn banner_window_indices(root: &AxNode) -> Vec<usize> {
+    let windows: Vec<usize> = root
+        .children
+        .iter()
+        .enumerate()
+        .filter(|(_, child)| child.role == "AXWindow")
+        .map(|(index, _)| index)
+        .collect();
+    let system_dialogs: Vec<usize> = windows
+        .iter()
+        .copied()
+        .filter(|&index| root.children[index].subrole.as_deref() == Some(BANNER_WINDOW_SUBROLE))
+        .collect();
+    if system_dialogs.is_empty() {
+        windows
+    } else {
+        system_dialogs
+    }
 }
 
 /// Walks down to each banner container.
@@ -434,16 +542,18 @@ fn walk_dismiss(
     relative: &mut ElementPath,
     best: &mut Option<(DismissEvidence, ElementPath, String, Option<String>)>,
 ) {
-    if let Some(evidence) = dismiss_evidence(node) {
+    if let Some((evidence, matched_action)) = dismiss_evidence(node) {
         let better = best
             .as_ref()
             .is_none_or(|(found, _, _, _)| evidence > *found);
         if better {
-            let action = if node.actions.iter().any(|name| name == "AXPress") {
-                "AXPress".to_string()
-            } else {
-                node.actions[0].clone()
-            };
+            let action = matched_action.unwrap_or_else(|| {
+                if node.actions.iter().any(|name| name == "AXPress") {
+                    "AXPress".to_string()
+                } else {
+                    node.actions[0].clone()
+                }
+            });
             *best = Some((evidence, relative.clone(), action, node.label.clone()));
         }
     }
@@ -540,7 +650,7 @@ fn filtered_banners(
     from_app: Option<&str>,
     title_contains: Option<&str>,
 ) -> Vec<NotificationBanner> {
-    extract_banners(root)
+    extract_banners_from_notification_center(root)
         .into_iter()
         .filter(|banner| {
             from_app.is_none_or(|needle| {
@@ -701,7 +811,7 @@ where
 {
     let app = notification_center_app();
     let (_, root) = inspector.describe(Some(&app))?;
-    let all = extract_banners(&root);
+    let all = extract_banners_from_notification_center(&root);
     if all.is_empty() {
         return Err(NotificationError::NoBanners.into());
     }
@@ -1141,6 +1251,165 @@ mod tests {
         tree.children[0].children[0].frame = frame;
         let banners = extract_banners(&tree);
         assert_eq!(banners[0].frame, frame);
+    }
+
+    // ---- extraction from the whole notification-centre tree (PINV-43) ---
+
+    /// The shape confirmed live on a real Mac: the notification centre
+    /// process's `AXApplication` element carries an `AXMenuBar` (the
+    /// frontmost app's own Apple menu, oddly attributed to this
+    /// process), one `AXWindow` per desktop widget (subrole
+    /// `AXUnknown`), and — only when a banner is really on screen —
+    /// one `AXWindow` with subrole `AXSystemDialog` holding it.
+    fn menu_bar() -> AxNode {
+        AxNode {
+            role: "AXMenuBar".to_string(),
+            children: vec![AxNode {
+                role: "AXMenuBarItem".to_string(),
+                children: vec![AxNode {
+                    role: "AXMenu".to_string(),
+                    children: vec![
+                        text("About This Mac"),
+                        text("System Settings…"),
+                        text("Force Quit…"),
+                        text("Shut Down…"),
+                    ],
+                    ..AxNode::default()
+                }],
+                ..AxNode::default()
+            }],
+            ..AxNode::default()
+        }
+    }
+
+    fn widget_window(title: &str, body: &str) -> AxNode {
+        AxNode {
+            role: "AXWindow".to_string(),
+            label: Some(title.to_string()),
+            subrole: Some("AXUnknown".to_string()),
+            children: vec![text(body)],
+            ..AxNode::default()
+        }
+    }
+
+    fn system_dialog_window(children: Vec<AxNode>) -> AxNode {
+        AxNode {
+            role: "AXWindow".to_string(),
+            label: Some("Notification Center".to_string()),
+            subrole: Some("AXSystemDialog".to_string()),
+            children,
+            ..AxNode::default()
+        }
+    }
+
+    #[test]
+    fn extract_banners_from_notification_center_ignores_the_apple_menu_and_widget_windows() {
+        let real_banner = group(
+            Some("AXNotificationCenterBanner"),
+            vec![
+                text("Messages"),
+                text("Ada Lovelace"),
+                text("The engine is ready."),
+                close_button(),
+            ],
+        );
+        let tree = app_root(vec![
+            menu_bar(),
+            widget_window("Forecast", "New York, 71° Fahrenheit, Heavy Rain"),
+            widget_window("Month", "THURSDAY, AUGUST 20"),
+            system_dialog_window(vec![real_banner]),
+        ]);
+
+        let banners = extract_banners_from_notification_center(&tree);
+
+        assert_eq!(
+            banners.len(),
+            1,
+            "the Apple menu and the widget windows must never read as banners: {banners:#?}"
+        );
+        assert_eq!(banners[0].app.as_deref(), Some("Messages"));
+        assert_eq!(banners[0].title.as_deref(), Some("Ada Lovelace"));
+    }
+
+    #[test]
+    fn extract_banners_from_notification_center_falls_back_to_every_window_when_none_is_a_system_dialog()
+     {
+        // No window carries `AXSystemDialog` — as if a future macOS
+        // renamed it. The Apple menu must still never count, because
+        // it is not an `AXWindow` at all; every actual window is
+        // walked instead of reporting nothing.
+        let tree = app_root(vec![
+            menu_bar(),
+            AxNode {
+                role: "AXWindow".to_string(),
+                label: Some("Notification Center".to_string()),
+                children: vec![group(
+                    Some("AXNotificationCenterBanner"),
+                    vec![text("Messages"), text("Hello"), close_button()],
+                )],
+                ..AxNode::default()
+            },
+        ]);
+
+        let banners = extract_banners_from_notification_center(&tree);
+
+        assert_eq!(banners.len(), 1);
+        assert_eq!(banners[0].app.as_deref(), Some("Messages"));
+    }
+
+    #[test]
+    fn extract_banners_from_notification_center_reports_nothing_with_no_window_at_all() {
+        let tree = app_root(vec![menu_bar()]);
+        assert!(extract_banners_from_notification_center(&tree).is_empty());
+    }
+
+    // ---- dismiss: a banner's own action-name evidence (PINV-43) ---------
+
+    /// Confirmed live: a real banner's own container publishes no
+    /// subrole, label, or identifier a caller would recognize as a
+    /// close control — only its raw action names do, e.g.
+    /// `"Name:Close\nTarget:0x0\nSelector:(null)"`. The banner also
+    /// offers unrelated actions ("Show", "Show Details"); only the one
+    /// whose name contains a dismiss hint may be chosen.
+    #[test]
+    fn a_banner_own_action_names_close_action_is_used_as_its_dismiss_control() {
+        let close_action = "Name:Close\nTarget:0x0\nSelector:(null)";
+        let tree = app_root(vec![system_dialog_window(vec![AxNode {
+            role: "AXGroup".to_string(),
+            actions: vec![
+                "Name:Show\nTarget:0x0\nSelector:(null)".to_string(),
+                close_action.to_string(),
+                "Name:Show Details\nTarget:0x0\nSelector:(null)".to_string(),
+            ],
+            children: vec![text("Messages"), text("Ada Lovelace")],
+            ..AxNode::default()
+        }])]);
+
+        let banners = extract_banners_from_notification_center(&tree);
+
+        assert_eq!(banners.len(), 1);
+        assert_eq!(banners[0].dismiss_action.as_deref(), Some(close_action));
+        // The banner's own container is the dismiss target — path
+        // `[0, 0]` is the window's first (and only) child.
+        assert_eq!(banners[0].dismiss_path, Some(vec![0, 0]));
+    }
+
+    #[test]
+    fn a_banner_own_action_that_clears_everything_is_still_never_its_dismiss_control() {
+        let tree = app_root(vec![system_dialog_window(vec![AxNode {
+            role: "AXGroup".to_string(),
+            actions: vec!["Name:Clear All\nTarget:0x0\nSelector:(null)".to_string()],
+            children: vec![text("Messages"), text("Ada Lovelace")],
+            ..AxNode::default()
+        }])]);
+
+        let banners = extract_banners_from_notification_center(&tree);
+
+        assert_eq!(banners.len(), 1);
+        assert_eq!(
+            banners[0].dismiss_path, None,
+            "a dismiss would press an action that clears every notification"
+        );
     }
 
     #[test]
