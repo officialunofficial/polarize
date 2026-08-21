@@ -27,14 +27,13 @@ hosting = "github"
 install-updater = false
 # Whether to sign released macOS binaries with a Developer ID identity.
 #
-# Off until the repo owner adds three GitHub Actions secrets:
-# `CODESIGN_IDENTITY`, `CODESIGN_CERTIFICATE_PASSWORD`,
-# `CODESIGN_CERTIFICATE` (see docs/RELEASING.md). Those are `dist`'s own
-# secret names, read by its signing step. It skips signing gracefully
-# when any one is absent. Flipping this to `true` needs no other file
-# change once the secrets exist. Just run `dist generate --mode ci`
-# again — it adds the signing step on its own.
-macos-sign = false
+# Needs three GitHub Actions secrets: `CODESIGN_IDENTITY`,
+# `CODESIGN_CERTIFICATE_PASSWORD`, `CODESIGN_CERTIFICATE` (see
+# docs/RELEASING.md). Those are `dist`'s own secret names, read by its
+# signing step. It skips signing gracefully when any one is absent, so
+# turning this on before all three secrets exist just keeps releases
+# ad-hoc-signed a while longer — it does not break the build.
+macos-sign = true
 # Attach a signed build-provenance attestation to every release artifact,
 # via GitHub's native `actions/attest-build-provenance`. This proves an
 # artifact really came from this repo's CI, not a tampered copy. It costs

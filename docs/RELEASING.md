@@ -90,26 +90,26 @@ have yet — see "What this doesn't do" below.
 
 ## Signing
 
-`dist-workspace.toml` sets `macos-sign = false`. Every released binary
-is ad-hoc-signed until this flips to `true`, and three GitHub Actions
-secrets exist:
+`dist-workspace.toml` sets `macos-sign = true`. A release stays
+ad-hoc-signed until three GitHub Actions secrets all exist:
 
-| Secret | Purpose |
-|---|---|
-| `CODESIGN_IDENTITY` | The Developer ID Application identity string, e.g. `Developer ID Application: Name (TEAMID)`. |
-| `CODESIGN_CERTIFICATE_PASSWORD` | Password for the `.p12` export below. |
-| `CODESIGN_CERTIFICATE` | Base64-encoded `.p12` export of a Developer ID Application certificate. |
+| Secret | Purpose | Present? |
+|---|---|---|
+| `CODESIGN_IDENTITY` | The Developer ID Application identity string, e.g. `Developer ID Application: Name (TEAMID)`. | Yes |
+| `CODESIGN_CERTIFICATE_PASSWORD` | Password for the `.p12` export below. | Not yet |
+| `CODESIGN_CERTIFICATE` | Base64-encoded `.p12` export of a Developer ID Application certificate. | Yes |
 
 These are `dist`'s own three signing secret names. Its `Codesign::new`
 function reads exactly these three environment variables. This repo
 did not invent them. All three need a paid Apple Developer Program
 membership, held by the repo owner, before they can exist. `dist`
-signs with them when present. It falls back to an ad-hoc signature,
-with no hard failure, when any secret is missing.
-
-Flipping `macos-sign = true` needs no other change here. Run `dist
-generate --mode ci` again, and it adds the signing step to
-`.github/workflows/release.yml` on its own.
+signs with them when present. It falls back to an ad-hoc signature
+when any secret is missing, with no hard failure. The current gap —
+`CODESIGN_CERTIFICATE_PASSWORD` still missing — keeps releases
+ad-hoc-signed. It does not break them.
+`.github/workflows/release.yml`'s build job already maps all three
+secrets into `dist`'s environment, ready for the moment the last one
+lands. No further workflow change is needed then.
 
 ## Why an unsigned release still matters
 
