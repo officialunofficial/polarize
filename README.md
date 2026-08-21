@@ -5,34 +5,12 @@ Context Protocol) server that automates real, native macOS AppKit
 applications: screenshot capture, accessibility-tree inspection, and
 synthetic mouse/keyboard input.
 
-It is the native-macOS analog of
-[Argent](https://github.com/software-mansion/argent), which drives iOS
-Simulator, Android Emulator, Chromium, and Vega — but explicitly does
-not support plain native macOS windows. `polarize` fills that gap.
-
 ## Status
 
-All 25 tools are implemented and wired into a real `rmcp` stdio MCP
-server (`apps/polarize`), backed by real macOS framework bindings
-(`crates/polarize-macos`). The workspace builds, lints, and tests
-cleanly.
-
-The first four tools have been driven end to end over stdio on a real
-macOS session: `initialize`, `tools/list`, and a `tools/call` for each
-all round-trip real JSON-RPC, and each tool's permission preflight fires
-correctly with no permission granted (see "Permissions"). This machine
-has no granted Screen Recording or Accessibility TCC authorization, so
-one thing stays unverified: a tool call actually *succeeding* against a
-real screen or app. A human on a macOS session with both permissions
-granted still needs to confirm a `screenshot` returns real pixels,
-`describe` returns a real AX tree, and `tap`/`keyboard` visibly land —
-see [`docs/INVARIANTS.md`](docs/INVARIANTS.md)'s "Testing harness"
-section.
-
-The other 21 tools have **not** been run on a real macOS session at all.
-Their pure logic is unit-tested, and their native halves compile and
-link only. Read each tool's enforcement-checklist entry in
-[`docs/INVARIANTS.md`](docs/INVARIANTS.md) before you trust one.
+The workspace builds, lints, and tests cleanly. Native-API behavior
+cannot be exercised in CI — see [`docs/INVARIANTS.md`](docs/INVARIANTS.md)
+for exactly what's live-verified versus compile-checked only, per
+tool.
 
 ## Tools
 
@@ -46,9 +24,7 @@ link only. Read each tool's enforcement-checklist entry in
    plus a ready-to-read indented text rendering of the whole tree.
 3. **`tap`** — post a synthetic mouse click via `CGEvent` at a screen
    position. Coordinates are normalized `[0, 1]` fractions of the
-   target screen or window's width/height, not raw pixels — matching
-   Argent's own gesture-tap contract so the same mental model transfers
-   across both tools.
+   target screen or window's width/height, not raw pixels.
 4. **`keyboard`** — post synthetic key events via `CGEvent`: type a
    string, or press a named key. Naming a `target` app activates it
    first, so the input reaches that app even without prior focus.
@@ -159,9 +135,8 @@ Every install path below is built and published by
 [`dist`](https://opensource.axo.dev/cargo-dist/) — see
 [`docs/RELEASING.md`](docs/RELEASING.md) for how.
 
-The recommended path is npm, matching Argent's own install command.
-The package is scoped, not `polarize` — that name is already taken on
-the public npm registry:
+The recommended path is npm. The package is scoped, not `polarize` —
+that name is already taken on the public npm registry:
 
 ```sh
 npx @officialunofficial/polarize@latest
@@ -219,16 +194,11 @@ expect.
   (`CGEvent` synthetic input), and `objc2-app-kit` (window/app
   enumeration and activation).
 
-  Accessibility-tree inspection is **not** built on `objc2-accessibility`,
-  despite that crate's name. It binds Apple's newer, unrelated
-  content-authoring "Accessibility" framework (`AXCustomContent`,
-  `AXChart`, …), not the classic `AXUIElement` inspection API every
-  screen reader and UI-automation tool actually walks. No
-  `objc2-application-services` crate exists in the `objc2` umbrella
-  either. `polarize-macos` fills that gap with a small, hand-written
-  `extern "C"` binding to `ApplicationServices` directly
-  (`src/ax_ffi.rs`) — see that file's doc comment for the full
-  reasoning.
+  Accessibility-tree inspection (`AXUIElement`) binds
+  `ApplicationServices` directly via a small `extern "C"` layer
+  (`src/ax_ffi.rs`) — not `objc2-accessibility`, which despite its name
+  binds a different, newer Apple framework
+  (`AXCustomContent`/`AXChart`, for content authoring).
 
   This crate is macOS-only. Its real native-API behavior cannot be
   exercised in CI — see [`docs/INVARIANTS.md`](docs/INVARIANTS.md) for
@@ -248,42 +218,19 @@ cargo build --release
 The release binary is at `target/release/polarize`. This project only
 builds on macOS, since `polarize-macos` links real macOS frameworks.
 
-### Fixed runtime issue: `libswift_Concurrency.dylib` not found
-
-Every built binary used to fail to launch:
-
-```
-dyld[...]: Library not loaded: @rpath/libswift_Concurrency.dylib
-  Reason: no LC_RPATH's found
-```
-
-The root cause was a Cargo link-arg propagation gap. It was not a
-machine-specific toolchain quirk. `screencapturekit`'s own `build.rs`
-emits `cargo:rustc-link-arg=-Wl,-rpath,...` for the Swift Concurrency
-runtime. But Cargo only applies a plain `rustc-link-arg` to targets
-built by the *emitting* package. `polarize-macos` and `apps/polarize`
-only depend on `screencapturekit`. They never build its own targets. So
-that rpath never reached `polarize`'s binary or `polarize-macos`'s test
-binary.
-
-`crates/polarize-macos/build.rs` and `apps/polarize/build.rs` now
-re-emit the same rpath flags for their own package, using
-`rustc-link-arg-bins` for the `polarize` binary. A plain `cargo build`
-or `cargo test` fixes this with no environment variable needed.
-
 ## Running tests
 
 ```sh
 cargo test --workspace
 ```
 
-This runs `polarize-core`'s full unit-test suite (631 tests covering
-coordinate math, the AX-tree model, MCP schemas, permission logic, and
-orchestration), plus `polarize-macos`'s tests for the pure sub-logic it
-factors out of its native calls (22 tests covering app-identity
-matching, modifier/keycode/click-sequence mapping, and pixel-to-fraction
-frame clamping). None of these touch a real window server, screen, or
-AX tree. `polarize-macos`'s actual native-API behavior has no automated
+This runs `polarize-core`'s full unit-test suite (coordinate math, the
+AX-tree model, MCP schemas, permission logic, and orchestration), plus
+`polarize-macos`'s tests for the pure sub-logic it factors out of its
+native calls (app-identity matching, modifier/keycode/click-sequence
+mapping, pixel-to-fraction frame clamping, and private-symbol
+resolution). None of these touch a real window server, screen, or AX
+tree. `polarize-macos`'s actual native-API behavior has no automated
 coverage anywhere, in this repo or in CI — see
 [`docs/INVARIANTS.md`](docs/INVARIANTS.md).
 
@@ -382,16 +329,6 @@ supports a Streamable HTTP transport, for a real shared server process
 multiple clients or machines could reach. Nothing in this repository
 builds or wires up that transport yet — it stays a possible future
 addition, not a v1 requirement.
-
-## Design notes
-
-`apps/polarize` depends on `rmcp` with its `"macros"` feature enabled,
-not on the separate `rmcp-macros` crate directly. `rmcp`'s `"macros"`
-feature already re-exports `rmcp-macros`'s `#[tool]`/`#[tool_router]`/
-`#[tool_handler]` attributes. A direct `rmcp-macros` dependency resolved
-a second, version-mismatched copy of that proc-macro crate alongside
-the one `rmcp` pulls in itself — see `apps/polarize/Cargo.toml`'s
-comment for the detail.
 
 ## License
 
