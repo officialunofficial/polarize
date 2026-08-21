@@ -1,12 +1,14 @@
 //! Runtime symbol resolution for `SkyLight.framework`, macOS's private,
 //! undocumented layer between AppKit and the HID event stream.
 //!
-//! `tap` and `keyboard` need two things only this framework provides.
-//! See `docs/INVARIANTS.md`, PINV-46. One is posting an event straight
-//! into one process's queue (`SLEventPostToPid`). The other is
-//! activating a process without raising its window
-//! (`SLPSPostEventRecordTo`, `_SLPSSetFrontProcessWithOptions`,
-//! `_SLPSGetFrontProcess`). No public header ships any of the four.
+//! `keyboard`'s raise-free activation needs the three symbols this
+//! module resolves. See `docs/INVARIANTS.md`, PINV-46 and PINV-48:
+//! `SLPSPostEventRecordTo`, `_SLPSSetFrontProcessWithOptions`, and
+//! `_SLPSGetFrontProcess`. No public header ships any of the three.
+//! `tap`/`keyboard`'s pid-post path (PINV-47/PINV-49) does not need
+//! this module at all — it posts through the public
+//! `CGEventPostToPid` instead (issue #36), which needs no runtime
+//! resolution.
 //!
 //! This module differs from [`crate::ax_ffi`] on purpose. `ax_ffi`
 //! links `ApplicationServices` statically, with
@@ -14,16 +16,15 @@
 //! Apple-documented, and stable. A missing one would mean this crate
 //! itself is broken, so a build failure is the right result there.
 //!
-//! These four SkyLight symbols carry none of those guarantees. They
+//! These three SkyLight symbols carry none of those guarantees. They
 //! are private. They are only informally documented: `yabai`
 //! (github.com/koekeishiya/yabai)'s `extern.h` is the source for the
 //! `_`-prefixed names below, not Apple. Apple could rename or drop any
 //! of them in a future release, without notice. A static link would
 //! then fail this whole binary to load. Resolving each one with
 //! `dlopen`/`dlsym` at runtime avoids that. A name that disappears
-//! yields `None` instead. Every caller in [`crate::input`] and
-//! [`crate::window`] treats `None` as "fall back to the public API,"
-//! not as a startup crash.
+//! yields `None` instead. [`crate::window`] treats `None` as "fall
+//! back to the public API," not as a startup crash.
 //!
 //! Nothing here has been exercised against a real accessibility
 //! session. See the crate-level docs and `docs/INVARIANTS.md`.
@@ -62,22 +63,6 @@ pub struct ProcessSerialNumber {
     pub low: u32,
 }
 
-/// Posts one `CGEventRef` straight into `pid`'s own event queue. This
-/// bypasses the global HID stream, and the shared cursor move that
-/// comes with it.
-///
-/// The real return type is unread either way: the calling convention
-/// (System V on x86_64, AAPCS64 on arm64) leaves an unread return value
-/// sitting in a register, so `()` is safe even if the real symbol
-/// returns a status code.
-///
-/// This signature is unverified at the header level. No symbol of this
-/// name appears in `yabai`'s reverse-engineered headers. It mirrors the
-/// public `CGEventPostToPid`'s shape as the closest documented analog,
-/// since both post one event to one process. The first real-session
-/// probe is this signature's real verification. See PINV-46.
-pub type SlEventPostToPidFn = unsafe extern "C" fn(pid: i32, event: *const c_void);
-
 /// Posts a raw SkyLight event record to the process named by `psn`.
 /// `bytes` is a buffer the caller builds.
 ///
@@ -104,8 +89,9 @@ pub type SlpsSetFrontProcessWithOptionsFn =
 /// deactivate record names the right one.
 pub type SlpsGetFrontProcessFn = unsafe extern "C" fn(psn: *mut ProcessSerialNumber) -> i32;
 
-/// The four SkyLight symbols this crate's raise-free input path needs.
-/// Each resolves once and stays cached for the life of the process.
+/// The three SkyLight symbols this crate's raise-free activation path
+/// needs. Each resolves once and stays cached for the life of the
+/// process.
 ///
 /// A `None` field means the name did not resolve on this macOS
 /// version. Apple may have renamed it, dropped it, or an entitlement
@@ -113,23 +99,21 @@ pub type SlpsGetFrontProcessFn = unsafe extern "C" fn(psn: *mut ProcessSerialNum
 /// as a bug. See PINV-46.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SkylightSymbols {
-    pub event_post_to_pid: Option<SlEventPostToPidFn>,
     pub post_event_record_to: Option<SlpsPostEventRecordToFn>,
     pub set_front_process_with_options: Option<SlpsSetFrontProcessWithOptionsFn>,
     pub get_front_process: Option<SlpsGetFrontProcessFn>,
 }
 
 impl SkylightSymbols {
-    /// This struct's four fields, each paired with its symbol name and
+    /// This struct's three fields, each paired with its symbol name and
     /// whether it resolved.
     ///
     /// A caller that only wants to log or report resolution state reads
     /// this instead of naming each field itself. `apps/polarize`'s
     /// startup log uses this, so it never pokes `SkylightSymbols`'s
     /// fields directly.
-    pub fn resolution_summary(&self) -> [(&'static str, bool); 4] {
+    pub fn resolution_summary(&self) -> [(&'static str, bool); 3] {
         [
-            ("SLEventPostToPid", self.event_post_to_pid.is_some()),
             ("SLPSPostEventRecordTo", self.post_event_record_to.is_some()),
             (
                 "_SLPSSetFrontProcessWithOptions",
@@ -157,7 +141,6 @@ fn resolve() -> SkylightSymbols {
         return SkylightSymbols::default();
     };
     SkylightSymbols {
-        event_post_to_pid: unsafe { resolve_symbol(handle, "SLEventPostToPid") },
         post_event_record_to: unsafe { resolve_symbol(handle, "SLPSPostEventRecordTo") },
         set_front_process_with_options: unsafe {
             resolve_symbol(handle, "_SLPSSetFrontProcessWithOptions")
@@ -221,7 +204,7 @@ mod tests {
     #[test]
     fn unresolvable_symbol_name_yields_none() {
         let handle = open_framework().expect("SkyLight.framework should open");
-        let resolved: Option<SlEventPostToPidFn> =
+        let resolved: Option<SlpsGetFrontProcessFn> =
             unsafe { resolve_symbol(handle, "PolarizeDefinitelyNotARealSymbolXYZ") };
         assert!(resolved.is_none());
     }

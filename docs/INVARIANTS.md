@@ -1212,15 +1212,18 @@ claim automated coverage they don't have.
 
 ### PINV-46: a SkyLight symbol miss degrades to `None`, never a crash
 
-- Always: `skylight_ffi::symbols` resolves `SLEventPostToPid`,
-  `SLPSPostEventRecordTo`, `_SLPSSetFrontProcessWithOptions`, and
-  `_SLPSGetFrontProcess` with `dlopen`/`dlsym` at runtime. It reads them
-  from `/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight`.
-  A `dlopen` failure leaves every field `None`. Any single `dlsym` miss
+- Always: `skylight_ffi::symbols` resolves `SLPSPostEventRecordTo`,
+  `_SLPSSetFrontProcessWithOptions`, and `_SLPSGetFrontProcess` with
+  `dlopen`/`dlsym` at runtime. It reads them from
+  `/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight`. A
+  `dlopen` failure leaves every field `None`. Any single `dlsym` miss
   leaves only that field `None`. Nothing in the resolution path panics
   or aborts. `apps/polarize`'s startup log names each symbol and its
-  resolution state, one line per symbol.
-- Because: these four symbols are private and undocumented. No public
+  resolution state, one line per symbol. These three back only
+  `keyboard`'s raise-free activation (PINV-48). `tap`/`keyboard`'s
+  pid-post path (PINV-47/PINV-49) does not use this module at all — it
+  posts through the public `CGEventPostToPid` instead (issue #36).
+- Because: these three symbols are private and undocumented. No public
   header ships them. This crate's own knowledge of their names and
   shapes comes from cross-referencing `yabai`
   (github.com/koekeishiya/yabai), not from Apple. Apple can rename or
@@ -1232,30 +1235,27 @@ claim automated coverage they don't have.
   one of these names.
 - If violated: a dropped or renamed symbol on some future macOS release
   would fail this binary to load, if it were linked statically instead.
-  Or it would crash a `tap`/`keyboard` call outright, through an
-  unchecked call to a null function pointer. Either way, `polarize`
-  would lose the global `CGEvent` post and real activation it already
-  had before this work. It would not fall back to them.
+  Or it would crash a `keyboard` call outright, through an unchecked
+  call to a null function pointer. Either way, `polarize` would lose
+  raise-free activation. `keyboard` would fall back to `activate_app`
+  instead of failing.
 
 ### PINV-47: a `tap` reports which native path actually posted its click
 
 - Always: `orchestrate::perform_tap` resolves the target's pid through
   `WindowManager::resolve_target_pid`. It passes that pid to
   `InputSynthesizer::click_at_pixel`. `MacInputSynthesizer` posts
-  through `SLEventPostToPid` only when two things both hold. A pid
-  resolved. `skylight_ffi::symbols` resolved `SLEventPostToPid` too.
-  Every other case posts through the global
-  `CGEvent` stream, exactly as `tap` always did before this work.
-  `click_at_pixel` returns which path it took. `TapResponse.post_path`
-  always carries that real answer, never a path `perform_tap` merely
-  requested.
-- Because: a pid alone does not guarantee the pid-post path runs. The
-  symbol can be missing on an older or newer macOS release (PINV-46).
-  A caller cannot see the screen. It cannot tell which path ran by
-  watching the click land — both paths click the same point. Without
-  `post_path`, a caller could not tell whether this exact call left the
-  shared cursor alone. That property is the whole reason PINV-46 and
-  this invariant exist.
+  through the public `CGEventPostToPid` whenever a pid resolved. Every
+  other case posts through the global `CGEvent` stream, exactly as
+  `tap` always did before this work. `click_at_pixel` returns which
+  path it took. `TapResponse.post_path` always carries that real
+  answer, never a path `perform_tap` merely requested.
+- Because: `CGEventPostToPid` needs no runtime symbol resolution (issue
+  #36) — a pid alone decides the path. A caller still cannot see the
+  screen, and still cannot tell which path ran by watching the click
+  land — both paths click the same point. Without `post_path`, a
+  caller could not tell whether this exact call left the shared cursor
+  alone. That property is the whole reason this invariant exists.
 - If violated: `post_path` could report "pid" when the click actually
   ran through the global path, or the reverse. A caller checking
   `post_path` before relying on "the cursor did not move" would then
@@ -1379,8 +1379,7 @@ Accessibility permission now, matching every other `keyboard` path.
   through `WindowManager::resolve_app_pid`. It passes that pid to
   `InputSynthesizer::type_text` or `InputSynthesizer::press_key`,
   whichever the request calls for. `MacInputSynthesizer` posts through
-  `SLEventPostToPid` only when two things both hold. A pid resolved.
-  `skylight_ffi::symbols` resolved `SLEventPostToPid` too. Every other
+  the public `CGEventPostToPid` whenever a pid resolved. Every other
   case posts through the global `CGEvent` stream, exactly as
   `keyboard` always did before this work.
   `type_text`/`press_key` return which path they took.
@@ -1397,12 +1396,21 @@ Accessibility permission now, matching every other `keyboard` path.
   `post_path` to know whether this call touched anything outside the
   target would trust a claim the platform did not back up.
 
-**Open question this slice does not resolve.** Whether a pid-posted key
-event reaches the target app's first responder when that app is not
-AppKit-active. PINV-48's raise-free activation already flips
-AppKit-active state before `keyboard` posts anything. Today's
-`perform_keyboard` order — activate, then post — may make this
-question moot in practice. Confirming that needs a real macOS session.
+**Open question this slice does not resolve, now partly answered live.**
+Whether a pid-posted key event reaches the target app's first responder
+when that app is not AppKit-active. PINV-48's raise-free activation
+flips AppKit-active state before `keyboard` posts anything, which is
+why `perform_keyboard` always activates a named target regardless of
+whether the pid-post path needs it. A live session surfaced the cost of
+that order: `_SLPSSetFrontProcessWithOptions` genuinely changes which
+process is OS-level key, even though it never raises a window. A
+`keyboard` call aimed at a background app moves real keyboard focus
+away from whatever the person at the machine was doing, then back,
+every time it runs. `activation_path: raise_free` correctly reports
+"did not raise a window." It does not mean "did not disturb the
+person at the machine." Whether `CGEventPostToPid` alone, with no
+activation step at all, reaches a target app's first responder reliably
+enough to drop the activation call in the pid-post case is still open.
 See the enforcement checklist entry below.
 
 ## Enforcement checklist
@@ -2212,27 +2220,23 @@ See the enforcement checklist entry below.
   and `symbols_is_idempotent_and_does_not_panic` confirm this.
 
   What is **not** automated, and not yet live-verified in this pass:
-  whether each of the four symbols resolves to a *working*
-  implementation, not merely to some code address. Also unverified:
-  whether `SLEventPostToPid`'s guessed signature is correct. It mirrors
-  the public `CGEventPostToPid`'s shape. A human on a real macOS session
-  needs to confirm both. This repo's policy is that native-API behavior
-  has no CI coverage.
+  whether each of the three symbols resolves to a *working*
+  implementation, not merely to some code address. A human on a real
+  macOS session needs to confirm this. This repo's policy is that
+  native-API behavior has no CI coverage.
 
 - **PINV-47** — the decision logic is fully covered by automated `cargo
   test -p polarize-core` (`orchestrate::tests`), against fakes: target
-  with pid and symbol available → pid path
-  (`perform_tap_posts_by_pid_when_a_target_pid_and_the_symbol_are_both_available`);
-  no target → global path
-  (`perform_tap_falls_back_to_global_when_no_target_names_an_app`);
-  symbol unavailable → global path
-  (`perform_tap_falls_back_to_global_when_the_pid_symbol_is_unavailable`).
+  with pid available → pid path
+  (`perform_tap_posts_by_pid_when_a_target_pid_is_available`); no
+  target → global path
+  (`perform_tap_falls_back_to_global_when_no_target_names_an_app`).
   Each case asserts `TapResponse.post_path` names the path the fake
   actually took, not the path `perform_tap` requested.
 
   What is **not** automated: whether `MacInputSynthesizer`'s real
   `click_at_pixel` reports `post_path` correctly against the real
-  `SLEventPostToPid` call. Also unverified: whether a pid-posted click
+  `CGEventPostToPid` call. Also unverified: whether a pid-posted click
   really leaves the cursor untouched on a real screen. Neither is
   live-verified in this pass. A human on a real macOS session needs to
   confirm both.
@@ -2275,20 +2279,28 @@ See the enforcement checklist entry below.
 
 - **PINV-49** — the decision logic is fully covered by automated `cargo
   test -p polarize-core` (`orchestrate::tests`), against fakes: target
-  with pid and symbol available → pid path
-  (`perform_keyboard_posts_by_pid_when_a_target_pid_and_the_symbol_are_both_available`);
-  no target → global path
-  (`perform_keyboard_falls_back_to_global_when_no_target_names_an_app`);
-  symbol unavailable → global path
-  (`perform_keyboard_falls_back_to_global_when_the_pid_symbol_is_unavailable`).
+  with pid available → pid path
+  (`perform_keyboard_posts_by_pid_when_a_target_pid_is_available`); no
+  target → global path
+  (`perform_keyboard_falls_back_to_global_when_no_target_names_an_app`).
   Each case asserts `KeyboardResponse.post_path` names the path the
   fake actually took. `keymap`'s pure logic is untouched by this slice,
   and stays covered by its own existing `cargo test` cases.
 
-  What is **not** automated, and not yet live-verified in this pass:
-  whether `MacInputSynthesizer`'s real `type_text`/`press_key` report
-  `post_path` correctly against the real `SLEventPostToPid` call. Also
-  unverified: whether a pid-posted key event really reaches the target
-  app's first responder when it is not AppKit-active — the open
-  question this invariant's text states above. A human on a real macOS
-  session needs to confirm both.
+  What is **not** automated: whether `MacInputSynthesizer`'s real
+  `type_text`/`press_key` report `post_path` correctly against the real
+  `CGEventPostToPid` call.
+
+  **Live-verified finding, not fully favorable**: a real session
+  confirmed `keyboard` reaches a background app's text field through
+  the raise-free-activation-then-pid-post order. It also confirmed a
+  cost the earlier open question did not anticipate:
+  `activate_app_without_raise` moves real OS keyboard focus away from
+  whatever app the person at the machine was using, even though it
+  never raises a window. Two live `keyboard` calls in a row, each
+  targeting a backgrounded app while the person was actively working
+  in a different app, visibly pulled focus back to the target each
+  time. Whether `CGEventPostToPid` alone — no activation step — reaches
+  a target's first responder reliably enough to drop the activation
+  call for the pid-post case is still unverified, and is now the
+  subject of a follow-up issue.
