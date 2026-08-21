@@ -29,9 +29,10 @@ use objc2_core_foundation::{
 };
 use polarize_core::ax_batch::{AxAttributeSlot, AxAttributes, BATCHED_ATTRIBUTES};
 use polarize_core::coords::{PixelPoint, PixelSize};
-use std::ffi::c_void;
+use std::ffi::{CString, c_void};
 use std::ptr;
 use std::ptr::NonNull;
+use std::sync::OnceLock;
 
 /// Opaque handle matching the C `AXUIElementRef` typedef.
 #[repr(C)]
@@ -152,6 +153,50 @@ unsafe extern "C" {
     fn CFRetain(cf: *const c_void) -> *const c_void;
     fn CFGetTypeID(cf: *const c_void) -> usize;
     fn CFRelease(cf: *const c_void);
+}
+
+// `dlsym`/`RTLD_DEFAULT` live in libSystem, linked implicitly into
+// every macOS binary — no `#[link(...)]` attribute needed, mirroring
+// `crate::skylight_ffi`'s own `dlopen`/`dlsym` declarations.
+unsafe extern "C" {
+    fn dlsym(handle: *mut c_void, symbol: *const std::os::raw::c_char) -> *mut c_void;
+}
+
+/// `RTLD_DEFAULT` (`dlfcn.h`): search every image already loaded into
+/// this process, in load order, rather than one specific handle from
+/// `dlopen`. `ApplicationServices` is already loaded — this module's
+/// own `#[link]` block above put it there — so this is enough to find
+/// [`GET_WINDOW`]'s symbol without a separate `dlopen` call.
+const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+
+/// `_AXUIElementGetWindow(AXUIElementRef, CGWindowID *) -> AXError`.
+/// `CGWindowID` is `u32`.
+type GetWindowFn = unsafe extern "C" fn(AXUIElementRef, *mut u32) -> AXError;
+
+static GET_WINDOW: OnceLock<Option<GetWindowFn>> = OnceLock::new();
+
+/// Resolves `_AXUIElementGetWindow` once, and caches the result.
+///
+/// No public header declares this function. Every independent
+/// reference to it — `yabai`'s `extern.h`, `jmgao/metamove`'s
+/// `window.mm` — declares it with `__attribute__((weak_import))`, and
+/// checks it resolves before calling it. That is the same "private,
+/// can vanish without notice" posture PINV-46 already established for
+/// `SkyLight.framework`'s symbols. This resolves it the same way, at
+/// runtime, instead of a static `#[link]` extern. A missing symbol
+/// yields `None`, never a panic — see [`AxElement::window_id`].
+fn get_window_fn() -> Option<GetWindowFn> {
+    *GET_WINDOW.get_or_init(|| {
+        let name = CString::new("_AXUIElementGetWindow").expect("no interior NUL");
+        let sym = unsafe { dlsym(RTLD_DEFAULT, name.as_ptr()) };
+        if sym.is_null() {
+            return None;
+        }
+        // `dlsym` gave back a real code address for `name`; the
+        // fixed, hand-verified `GetWindowFn` signature above is what
+        // makes reinterpreting it as one sound.
+        Some(unsafe { std::mem::transmute::<*mut c_void, GetWindowFn>(sym) })
+    })
 }
 
 /// Calls `AXIsProcessTrustedWithOptions` with the prompt option set,
@@ -562,6 +607,21 @@ impl AxElement {
         (err == AX_ERROR_SUCCESS && pid > 0).then_some(pid)
     }
 
+    /// This element's `CGWindowID`, when it is a window element and
+    /// `_AXUIElementGetWindow` resolved.
+    ///
+    /// Returns `None` when the symbol did not resolve on this macOS
+    /// version, or when the call itself fails — e.g. `self` is not a
+    /// window element. A caller degrades to its own fallback either
+    /// way; see [`crate::window::MacWindowManager::activate_app_without_raise`]
+    /// and PINV-48 in `docs/INVARIANTS.md`.
+    pub fn window_id(&self) -> Option<u32> {
+        let get_window = get_window_fn()?;
+        let mut wid: u32 = 0;
+        let err = unsafe { get_window(self.0, &mut wid) };
+        (err == AX_ERROR_SUCCESS).then_some(wid)
+    }
+
     /// The deepest element at `x`/`y`, in the **global display**
     /// coordinate space — the space `crate::input` clicks into
     /// (PINV-4).
@@ -723,4 +783,23 @@ fn ax_value<T>(value_type: AXValueType, value: &T) -> Result<CFRetained<CFType>,
 /// than re-copying — is sound.
 fn value_as_ax_value_ptr(value: &CFRetained<CFType>) -> *const c_void {
     CFRetained::as_ptr(value).as_ptr().cast_const().cast()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `dlsym(RTLD_DEFAULT, ...)` against a symbol in an
+    /// already-linked framework needs no display and no TCC grant,
+    /// unlike everything else in this module. This runs for real in
+    /// CI (`cargo test --workspace` runs on `macos-latest`, per
+    /// `.github/workflows/ci.yml`), not just on a real session.
+    ///
+    /// Whether `_AXUIElementGetWindow` actually resolves to `Some` on
+    /// this macOS version is a real-session claim, not one this test
+    /// makes — see PINV-48.
+    #[test]
+    fn get_window_fn_is_idempotent_and_does_not_panic() {
+        assert_eq!(get_window_fn().is_some(), get_window_fn().is_some());
+    }
 }

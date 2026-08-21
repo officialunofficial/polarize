@@ -130,18 +130,21 @@ impl WindowManager for MacWindowManager {
         let Some(psn) = crate::carbon_process::find_psn_for_pid(pid) else {
             return Ok(false);
         };
-        // `content::shareable_content` needs Screen Recording
-        // permission, the same as `screenshot` — see PINV-10. `keyboard`
-        // never needed this permission before this path existed.
-        crate::capture::ensure_screen_recording_permission()?;
-        let content = content::shareable_content()?;
-        // No on-screen window is the third availability gate PINV-48
-        // states, not a hard failure: the caller falls back to
-        // `activate_app` the same as a missing symbol or pid.
-        let Ok(window) = content::find_window(&content, pid, None) else {
+        // The window id comes from AX, not `ScreenCaptureKit` — see
+        // issue #33 and PINV-48. This path only needs Accessibility
+        // permission, the same as every other `keyboard` path. No
+        // on-screen window (or `_AXUIElementGetWindow` not resolving)
+        // is the third availability gate PINV-48 states, not a hard
+        // failure: the caller falls back to `activate_app` the same
+        // as a missing symbol or pid.
+        let app_element = crate::ax_ffi::AxElement::for_application(pid);
+        let Some(window_id) = app_element
+            .element_attribute("AXMainWindow")
+            .or_else(|| app_element.element_attribute("AXFocusedWindow"))
+            .and_then(|window| window.window_id())
+        else {
             return Ok(false);
         };
-        let window_id = window.window_id();
 
         // `yabai`'s `window_manager_make_key_window`: a `0xf8`-byte
         // record, byte `0x3a` set, the window id at `0x3c`, and bytes
