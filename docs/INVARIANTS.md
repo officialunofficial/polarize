@@ -1269,10 +1269,12 @@ claim automated coverage they don't have.
   runs this path only when four things all hold. `skylight_ffi::symbols`
   resolved both `SLPSPostEventRecordTo` and
   `_SLPSSetFrontProcessWithOptions`. A `ProcessSerialNumber` resolved
-  for the target's pid, via `carbon_process::find_psn_for_pid`. Screen
-  Recording permission is granted — `content::shareable_content` needs
-  it, the same as `screenshot` (PINV-10). The target has an on-screen
-  window. When it runs, it posts `yabai`'s `window_manager_make_key_window`
+  for the target's pid, via `carbon_process::find_psn_for_pid`. The
+  target's `AXMainWindow` or `AXFocusedWindow` resolved a `CGWindowID`
+  through `AxElement::window_id`, which itself needs
+  `_AXUIElementGetWindow` to resolve (see below). This path needs only
+  Accessibility permission — the same as every other `keyboard` path.
+  When it runs, it posts `yabai`'s `window_manager_make_key_window`
   event-record pair. It then calls `_SLPSSetFrontProcessWithOptions`
   with `kCPSUserGenerated`. It never calls `AXUIElementPerformAction`
   with `kAXRaiseAction`. `perform_keyboard` calls the older
@@ -1331,18 +1333,27 @@ psn. This new piece walks Carbon's deprecated `GetNextProcess`/
 to build its own long-lived pid/psn table. This one runs fresh on
 every call instead of caching it.
 
-A working real-session probe of this path also touches
-`ScreenCaptureKit`, through `content::shareable_content`, to find the
-target's on-screen window id. `keyboard` never needed Screen Recording
-permission before this slice. It does now, on this one path only —
-`MacInputSynthesizer::type_text`/`press_key` still only need
-Accessibility. A caller without Screen Recording granted gets a real
-`PolarizeError::Permission`, not a silent fall back to `activate_app`:
-PINV-10 requires every native call to preflight its real permission,
-and a permission gap is not the same kind of "unavailable" the other
-three gates above describe. A target with no on-screen window,
-by contrast, degrades to `Ok(false)` and the `activate_app` fallback —
-that is a real "unavailable," not a permission problem.
+**Correction, part three: where the window id comes from (issue #33).**
+The first version of this path found the target's window id through
+`ScreenCaptureKit` (`content::shareable_content`). That needed Screen
+Recording permission. This path had never needed that permission
+before. The dependency stayed undisclosed until a code review caught
+it. `keyboard` now gets the window id from AX instead:
+`AxElement::window_id`, over `_AXUIElementGetWindow`. No public header
+ships that symbol either. Every independent reference to it —
+`yabai`'s `extern.h`, `jmgao/metamove`'s `window.mm` — declares it
+with `__attribute__((weak_import))`. Both null-check it before
+calling. This resolves it the same way PINV-46 resolves
+`SkyLight.framework`'s symbols: at runtime, via `dlsym`, never a
+static link. `ApplicationServices` is already linked into this process,
+by `ax_ffi.rs`'s own static `#[link]` block. No separate `dlopen` of a
+new framework path is needed here, unlike `skylight_ffi.rs`.
+
+A missing `AXMainWindow`/`AXFocusedWindow`, or an unresolved
+`_AXUIElementGetWindow` symbol, both degrade to `Ok(false)` — the same
+"unavailable, fall back to `activate_app`" contract the other two
+gates above already use. `activate_app_without_raise` needs only
+Accessibility permission now, matching every other `keyboard` path.
 
 ### PINV-49: `keyboard` posts key events by pid, and reports which path ran
 
@@ -2220,8 +2231,15 @@ See the enforcement checklist entry below.
   Each case asserts `KeyboardResponse.activation_path` names the tier
   that actually ran.
 
+  The graceful-degradation half of the AX window-id lookup (issue #33,
+  "Correction, part three") is also covered by automated `cargo test -p
+  polarize-macos` (`ax_ffi::tests::get_window_fn_is_idempotent_and_does_not_panic`),
+  and runs for real in CI: `dlsym`ing an already-linked framework needs
+  no display and no TCC grant. **Live-verified in this pass**:
+  `_AXUIElementGetWindow` resolves non-null on this dev machine.
+
   What is **not** automated, and not yet live-verified in this pass:
-  everything about `MacWindowManager::activate_app_without_raise`'s
+  everything else about `MacWindowManager::activate_app_without_raise`'s
   real behavior. This invariant's "Correction, part two" names
   skipping `AXUIElementPerformAction`/`kAXRaiseAction` as the real
   no-raise mechanism. Whether that alone is enough is unverified. This
@@ -2229,13 +2247,13 @@ See the enforcement checklist entry below.
   ("What this implementation deliberately skips" above). Whether that
   second gap matters too is also unverified. Whether
   `carbon_process::find_psn_for_pid` resolves a real psn for a real
-  running app's pid is unverified. Whether the no-on-screen-window gate
-  really degrades to `Ok(false)` against a real headless or backgrounded
-  target is unverified — a real native failure this code has not seen
-  could surface differently. Whether the fallback to `activate_app`
-  genuinely reproduces today's raising behavior, when the SkyLight
-  symbols are forced off, is unverified too. A human on a real macOS
-  session needs to confirm all of this.
+  running app's pid is unverified. Whether the no-`AXMainWindow`/
+  no-`AXFocusedWindow` gate really degrades to `Ok(false)` against a
+  real headless or backgrounded target is unverified — a real native
+  failure this code has not seen could surface differently. Whether the
+  fallback to `activate_app` genuinely reproduces today's raising
+  behavior, when the SkyLight symbols are forced off, is unverified
+  too. A human on a real macOS session needs to confirm all of this.
 
 - **PINV-49** — the decision logic is fully covered by automated `cargo
   test -p polarize-core` (`orchestrate::tests`), against fakes: target
