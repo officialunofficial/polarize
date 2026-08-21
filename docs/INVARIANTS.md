@@ -1288,8 +1288,9 @@ change is proposed here: there is no cheap, reliable way to detect
   resolved both `SLPSPostEventRecordTo` and
   `_SLPSSetFrontProcessWithOptions`. A `ProcessSerialNumber` resolved
   for the target's pid, via `carbon_process::find_psn_for_pid`. The
-  target's `AXMainWindow` or `AXFocusedWindow` resolved a `CGWindowID`
-  through `AxElement::window_id`, which itself needs
+  target's `AXFocusedWindow`, or `AXMainWindow` when no window is
+  focused, resolved a `CGWindowID` through `AxElement::window_id`,
+  which itself needs
   `_AXUIElementGetWindow` to resolve (see below). This path needs only
   Accessibility permission — the same as every other `keyboard` path.
   When it runs, it posts `yabai`'s `window_manager_make_key_window`
@@ -1367,11 +1368,30 @@ static link. `ApplicationServices` is already linked into this process,
 by `ax_ffi.rs`'s own static `#[link]` block. No separate `dlopen` of a
 new framework path is needed here, unlike `skylight_ffi.rs`.
 
-A missing `AXMainWindow`/`AXFocusedWindow`, or an unresolved
+A missing `AXFocusedWindow`/`AXMainWindow`, or an unresolved
 `_AXUIElementGetWindow` symbol, both degrade to `Ok(false)` — the same
 "unavailable, fall back to `activate_app`" contract the other two
 gates above already use. `activate_app_without_raise` needs only
 Accessibility permission now, matching every other `keyboard` path.
+
+**Correction, part four: `AXFocusedWindow` first, not `AXMainWindow`
+first.** The first version of this path tried `AXMainWindow` before
+`AXFocusedWindow`. A live session caught the bug that order causes: a
+target app with more than one window — its main window plus a
+separate floating panel, such as Messages' "New Message" compose
+panel — reports a real `AXMainWindow` even while the floating panel,
+not the main window, holds actual keyboard focus. Trying
+`AXMainWindow` first keyed the wrong window every time. Typed text
+went to a window nobody was reading. `yabai`'s own SkyLight calls
+(`window_manager_make_key_window` and both
+`window_manager_focus_window_*` variants, `window_manager.c`) take an
+explicit window id from its own tracking table; none of them prefer a
+main window over a focused one. That preference was this
+implementation's own mistake, not something the SkyLight calls
+required. `AxElement::window_id` now tries `AXFocusedWindow` first —
+whichever window the target app currently treats as focused — and
+falls back to `AXMainWindow` only when the app reports no focused
+window at all.
 
 ### PINV-49: `keyboard` posts key events by pid, and reports which path ran
 
@@ -1396,22 +1416,32 @@ Accessibility permission now, matching every other `keyboard` path.
   `post_path` to know whether this call touched anything outside the
   target would trust a claim the platform did not back up.
 
-**Open question this slice does not resolve, now partly answered live.**
-Whether a pid-posted key event reaches the target app's first responder
-when that app is not AppKit-active. PINV-48's raise-free activation
-flips AppKit-active state before `keyboard` posts anything, which is
-why `perform_keyboard` always activates a named target regardless of
-whether the pid-post path needs it. A live session surfaced the cost of
-that order: `_SLPSSetFrontProcessWithOptions` genuinely changes which
-process is OS-level key, even though it never raises a window. A
-`keyboard` call aimed at a background app moves real keyboard focus
-away from whatever the person at the machine was doing, then back,
-every time it runs. `activation_path: raise_free` correctly reports
-"did not raise a window." It does not mean "did not disturb the
-person at the machine." Whether `CGEventPostToPid` alone, with no
-activation step at all, reaches a target app's first responder reliably
-enough to drop the activation call in the pid-post case is still open.
-See the enforcement checklist entry below.
+**Resolved: activation before posting is structurally required, not an
+implementation gap.** The open question this slice originally left —
+whether a pid-posted key event reaches the target app's first
+responder when that app is not AppKit-active — is answered no. AppKit
+dispatches a keystroke through `NSApp → keyWindow → firstResponder`. A
+window that is not key has no path into that dispatch, regardless of
+which native call posted the event. `CGEventPostToPid` reaches the
+target process's event queue by pid; it does not make any window key.
+`perform_keyboard` activates a named target before every post because
+skipping activation would not merely lose an optimization — it would
+drop text into a process that has nowhere to route it. No published
+technique (Apple's own docs, or `yabai`, Hammerspoon, Keyboard
+Maestro, cliclick) delivers real character input to an existing app's
+focused text field without some key-process change. This is the
+mechanism's real cost, not a bug this crate can fix.
+
+What PINV-48's raise-free activation removes is the visible raise and
+the Space switch, nothing more. `activation_path: raise_free` reports
+exactly that, and no more: it does not mean "did not disturb the
+person at the machine." A `keyboard` call aimed at a background app
+still moves real keyboard focus away from whatever the person at the
+machine was doing, for the length of the call, every time it runs. A
+live session confirmed this directly: two `keyboard` calls in a row,
+each targeting a backgrounded app while a person was actively working
+in a different one, visibly pulled real keyboard focus back to the
+target both times. See the enforcement checklist entry below.
 
 ## Enforcement checklist
 
@@ -2269,13 +2299,18 @@ See the enforcement checklist entry below.
   ("What this implementation deliberately skips" above). Whether that
   second gap matters too is also unverified. Whether
   `carbon_process::find_psn_for_pid` resolves a real psn for a real
-  running app's pid is unverified. Whether the no-`AXMainWindow`/
-  no-`AXFocusedWindow` gate really degrades to `Ok(false)` against a
+  running app's pid is unverified. Whether the no-`AXFocusedWindow`/
+  no-`AXMainWindow` gate really degrades to `Ok(false)` against a
   real headless or backgrounded target is unverified — a real native
   failure this code has not seen could surface differently. Whether the
   fallback to `activate_app` genuinely reproduces today's raising
   behavior, when the SkyLight symbols are forced off, is unverified
-  too. A human on a real macOS session needs to confirm all of this.
+  too. **Live-verified in this pass**: a multi-window target (Messages,
+  main window plus a floating compose panel) confirmed `AXMainWindow`
+  resolves successfully even while a different window holds real
+  focus, which is why PINV-48's "Correction, part four" tries
+  `AXFocusedWindow` first now. A human on a real macOS session still
+  needs to confirm the rest.
 
 - **PINV-49** — the decision logic is fully covered by automated `cargo
   test -p polarize-core` (`orchestrate::tests`), against fakes: target
@@ -2291,16 +2326,19 @@ See the enforcement checklist entry below.
   `type_text`/`press_key` report `post_path` correctly against the real
   `CGEventPostToPid` call.
 
-  **Live-verified finding, not fully favorable**: a real session
+  **Live-verified finding, resolved not favorably**: a real session
   confirmed `keyboard` reaches a background app's text field through
-  the raise-free-activation-then-pid-post order. It also confirmed a
-  cost the earlier open question did not anticipate:
-  `activate_app_without_raise` moves real OS keyboard focus away from
-  whatever app the person at the machine was using, even though it
-  never raises a window. Two live `keyboard` calls in a row, each
-  targeting a backgrounded app while the person was actively working
-  in a different app, visibly pulled focus back to the target each
-  time. Whether `CGEventPostToPid` alone — no activation step — reaches
-  a target's first responder reliably enough to drop the activation
-  call for the pid-post case is still unverified, and is now the
-  subject of a follow-up issue.
+  the raise-free-activation-then-pid-post order, and confirmed the
+  cost that order carries: `activate_app_without_raise` moves real OS
+  keyboard focus away from whatever app the person at the machine was
+  using, even though it never raises a window. Two live `keyboard`
+  calls in a row, each targeting a backgrounded app while the person
+  was actively working in a different app, visibly pulled focus back
+  to the target both times. This is now resolved, not open:
+  `CGEventPostToPid` alone cannot reach a target's first responder
+  without some key-process change — AppKit only dispatches a keystroke
+  to a key window's first responder, and no native call posts an event
+  straight to a specific, non-key window's responder chain. Dropping
+  the activation call for the pid-post case is not a viable fix; it
+  would only make `keyboard` post text nobody's focused view reads.
+  See PINV-48's text above for the full argument.
