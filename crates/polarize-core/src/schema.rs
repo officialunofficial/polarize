@@ -209,7 +209,14 @@ pub enum ActivationPath {
     /// `target` was `None`. Neither activation method ran.
     None,
     /// Activated without raising the window or switching the current
-    /// Space.
+    /// Space. This still moves real keyboard focus to `target`: macOS
+    /// routes a keystroke to a window's first responder only when that
+    /// window is key, so making `target` receive typed text changes
+    /// which process is key, whether or not anything visibly raises.
+    /// A person actively using a different app loses real keyboard
+    /// focus to `target` for the length of this call. `RaiseFree`
+    /// promises no visual raise and no Space switch. It does not
+    /// promise the call left the person at the machine undisturbed.
     RaiseFree,
     /// Activated through `NSRunningApplication`, as `keyboard` always
     /// did before PINV-48. The window raises. The current Space can

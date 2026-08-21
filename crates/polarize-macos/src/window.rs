@@ -137,10 +137,19 @@ impl WindowManager for MacWindowManager {
         // is the third availability gate PINV-48 states, not a hard
         // failure: the caller falls back to `activate_app` the same
         // as a missing symbol or pid.
+        //
+        // `AXFocusedWindow` first, `AXMainWindow` only as a fallback: a
+        // live session found `AXMainWindow` reports the app's primary
+        // window even while a separate floating panel — one with no
+        // `AXMainWindow` bit set — actually holds keyboard focus. Keying
+        // the wrong window this way makes `keyboard` post text nobody
+        // reads. `AXFocusedWindow` names whichever window really has
+        // focus right now; `AXMainWindow` only stands in when the app
+        // reports no focused window at all.
         let app_element = crate::ax_ffi::AxElement::for_application(pid);
         let Some(window_id) = app_element
-            .element_attribute("AXMainWindow")
-            .or_else(|| app_element.element_attribute("AXFocusedWindow"))
+            .element_attribute("AXFocusedWindow")
+            .or_else(|| app_element.element_attribute("AXMainWindow"))
             .and_then(|window| window.window_id())
         else {
             return Ok(false);
