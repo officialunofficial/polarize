@@ -155,6 +155,15 @@ pub trait WindowManager {
         &self,
         target: &crate::schema::ScreenshotTarget,
     ) -> Result<Option<i32>, PolarizeError>;
+
+    /// Activates `app` without raising its window or switching the
+    /// current Space.
+    ///
+    /// Returns `false` when this path is unavailable. A caller then
+    /// falls back to [`Self::activate_app`]. See PINV-48. `Err` means a
+    /// real platform call failed, not that the path was merely
+    /// unavailable.
+    fn activate_app_without_raise(&self, app: &AppIdentifier) -> Result<bool, PolarizeError>;
 }
 
 /// Performs one accessibility action on one element. Implemented by

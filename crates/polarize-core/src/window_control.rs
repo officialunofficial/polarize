@@ -1163,6 +1163,12 @@ mod tests {
             // path (PINV-47).
             Ok(None)
         }
+
+        fn activate_app_without_raise(&self, _app: &AppIdentifier) -> Result<bool, PolarizeError> {
+            // Not exercised here — see the `resolve_target_pid` note
+            // above. This module never calls `perform_keyboard`.
+            Ok(false)
+        }
     }
 
     fn frame_request() -> SetWindowFrameRequest {

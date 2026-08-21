@@ -194,6 +194,25 @@ pub enum KeyboardRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct KeyboardResponse {
     pub sent: bool,
+    /// How `target` got activated before this call posted its keys.
+    /// See PINV-48.
+    pub activation_path: ActivationPath,
+}
+
+/// How a `keyboard` request's `target` got activated. See PINV-48 in
+/// `docs/INVARIANTS.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivationPath {
+    /// `target` was `None`. Neither activation method ran.
+    None,
+    /// Activated without raising the window or switching the current
+    /// Space.
+    RaiseFree,
+    /// Activated through `NSRunningApplication`, as `keyboard` always
+    /// did before PINV-48. The window raises. The current Space can
+    /// switch.
+    Raised,
 }
 
 #[cfg(test)]
@@ -366,7 +385,25 @@ mod tests {
 
     #[test]
     fn keyboard_response_round_trips() {
-        let value = KeyboardResponse { sent: true };
+        let value = KeyboardResponse {
+            sent: true,
+            activation_path: ActivationPath::RaiseFree,
+        };
         assert_eq!(round_trip(&value), value);
+    }
+
+    #[test]
+    fn keyboard_response_round_trips_every_activation_path() {
+        for activation_path in [
+            ActivationPath::None,
+            ActivationPath::RaiseFree,
+            ActivationPath::Raised,
+        ] {
+            let value = KeyboardResponse {
+                sent: true,
+                activation_path,
+            };
+            assert_eq!(round_trip(&value), value);
+        }
     }
 }

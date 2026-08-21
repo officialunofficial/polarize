@@ -298,10 +298,10 @@ claim automated coverage they don't have.
 ### PINV-14: a `keyboard` request activates its target app first
 
 - Always: when a `keyboard` request names a `target` app,
-  `orchestrate::perform_keyboard` calls `WindowManager::activate_app`
-  with it before calling either `InputSynthesizer::type_text` or
-  `InputSynthesizer::press_key`. When `target` is `None`, it calls
-  neither.
+  `orchestrate::perform_keyboard` activates it before calling either
+  `InputSynthesizer::type_text` or `InputSynthesizer::press_key`. When
+  `target` is `None`, it activates nothing. See PINV-48 for the two
+  ways activation can happen.
 - Because: `CGEvent` posts to whichever app is currently frontmost, not
   to an app named in the request. Without activating the target first, a
   `target`-scoped `keyboard` call would silently type into whatever app
@@ -1261,6 +1261,60 @@ claim automated coverage they don't have.
   `post_path` before relying on "the cursor did not move" would then
   trust a claim the platform did not back up.
 
+### PINV-48: a `keyboard` target activates without raising, or falls back
+
+- Always: for a request that names a `target`,
+  `orchestrate::perform_keyboard` tries
+  `WindowManager::activate_app_without_raise` first. `MacWindowManager`
+  runs this path only when three things all hold. `skylight_ffi::symbols`
+  resolved both `SLPSPostEventRecordTo` and
+  `_SLPSSetFrontProcessWithOptions`. A `ProcessSerialNumber` resolved
+  for the target's pid, via `carbon_process::find_psn_for_pid`. The
+  target has an on-screen window. When it runs, it posts `yabai`'s
+  `window_manager_make_key_window` event-record pair. It then calls
+  `_SLPSSetFrontProcessWithOptions` with `kCPSUserGenerated`. Neither
+  step raises the target's window. Neither switches the current Space.
+  `perform_keyboard` calls the older `WindowManager::activate_app` only
+  when the raise-free path reports itself unavailable.
+  `KeyboardResponse.activation_path` always names whichever tier
+  actually ran, or `none` when `target` was absent.
+- Because: raising a window, or switching Spaces, is the one visible
+  interruption this PRD exists to remove from an agent driving a
+  background app. `activate_app`'s single
+  `NSRunningApplication::activateWithOptions` call conflates two
+  separate operations into one. The first flips AppKit-active state —
+  the actual thing that makes typed input reach the right app. The
+  second raises a window. The raise-free path performs only the first.
+- If violated: a `keyboard` call with `target` still raises the target's
+  window, or still switches the current Space, even though
+  `activation_path` reports `raise_free`. A caller relying on that field
+  to avoid disrupting whoever is at the machine would be misled.
+
+**Correction to this slice's originating issue.** The issue that
+specified this work read `yabai`'s source as "drop the
+`_SLPSSetFrontProcessWithOptions` call." The real source disagrees.
+`window_manager_focus_window_without_raise` (`window_manager.c:1293`)
+calls `_SLPSSetFrontProcessWithOptions` unconditionally, every time. It
+pairs that call with `window_manager_make_key_window`'s event records.
+It never drops it. This implementation follows the real source, not
+the issue's paraphrase of it.
+
+This implementation also deliberately skips one part of that real
+source: a leading conditional block of two further event records. That
+block only runs when the target's psn equals `yabai`'s own tracked
+previously-focused window. The block exists to replay `yabai`'s own
+per-Space focus history across a Space switch. `polarize` keeps no such
+history — a `keyboard` call is one request, not a step in a tracked
+sequence — so there is nothing here for that gate to check.
+
+Finding a `ProcessSerialNumber` for an arbitrary pid needed its own new
+piece, `carbon_process::find_psn_for_pid`, which the issue did not
+mention. None of PINV-46's four SkyLight symbols convert a pid to a
+psn. This new piece walks Carbon's deprecated `GetNextProcess`/
+`GetProcessPID` pair instead — the same primitive `yabai` uses to build
+its own long-lived pid/psn table, run fresh on every call instead of
+cached.
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -2092,3 +2146,30 @@ claim automated coverage they don't have.
   the cursor untouched on a real screen. Not yet live-verified in this
   pass. A human on a real macOS session needs to confirm both, per this
   repo's policy that native-API behavior has no CI coverage.
+
+- **PINV-48** — the decision logic is fully covered by automated `cargo
+  test -p polarize-core` (`orchestrate::tests`), against fakes:
+  raise-free path available → it runs, and `activate_app` does not
+  (`perform_keyboard_prefers_raise_free_activation_when_available`);
+  raise-free path unavailable → `activate_app` runs, as before PINV-48
+  (`perform_keyboard_activates_target_app_before_typing`,
+  `perform_keyboard_activates_target_app_before_key_press`); no
+  `target` → neither runs
+  (`perform_keyboard_does_not_activate_anything_when_target_is_none`).
+  Each case asserts `KeyboardResponse.activation_path` names the tier
+  that actually ran.
+
+  What is **not** automated, and not yet live-verified in this pass:
+  everything about `MacWindowManager::activate_app_without_raise`'s
+  real behavior. Whether it actually avoids raising the window and
+  switching the current Space. Whether
+  `carbon_process::find_psn_for_pid` resolves a real psn for a real
+  running app's pid. Whether `kCPSUserGenerated` alone is enough for
+  `polarize`'s simpler one-shot case — this implementation skips this
+  function's leading conditional event-record block (see this
+  invariant's "Correction" note above), and that gap could mean a real
+  target still raises sometimes. Whether the fallback to `activate_app`
+  genuinely reproduces today's raising behavior when the SkyLight
+  symbols are forced off. A human on a real macOS session needs to
+  confirm all of this, per this repo's policy that native-API behavior
+  has no CI coverage.

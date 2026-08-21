@@ -91,6 +91,64 @@ impl WindowManager for MacWindowManager {
         }
     }
 
+    /// See PINV-48. Builds the same raw SkyLight event record `yabai`'s
+    /// `window_manager_make_key_window` posts (window_manager.c:1269).
+    /// Then calls `_SLPSSetFrontProcessWithOptions`. That pairing
+    /// matches what `yabai`'s own
+    /// `window_manager_focus_window_without_raise` (window_manager.c:1293)
+    /// always does, unconditionally, at its end.
+    ///
+    /// This deliberately skips that function's leading conditional
+    /// block: two more event records, gated on whether `window_psn`
+    /// equals `yabai`'s own tracked previously-focused window. That
+    /// gate exists to replay `yabai`'s own per-Space focus history
+    /// across a Space switch. `polarize` keeps no such history. One
+    /// `keyboard` call is a one-shot request, not a step in a tracked
+    /// focus sequence. There is no equivalent state to gate on here.
+    fn activate_app_without_raise(&self, app: &AppIdentifier) -> Result<bool, PolarizeError> {
+        let symbols = crate::skylight_ffi::symbols();
+        let (Some(post_event_record_to), Some(set_front_process_with_options)) = (
+            symbols.post_event_record_to,
+            symbols.set_front_process_with_options,
+        ) else {
+            return Ok(false);
+        };
+
+        let running = resolve_running_app(Some(app))?;
+        let pid = running.processIdentifier();
+        let Some(psn) = crate::carbon_process::find_psn_for_pid(pid) else {
+            return Ok(false);
+        };
+        let content = content::shareable_content()?;
+        let window = content::find_window(&content, pid, None)?;
+        let window_id = window.window_id();
+
+        // `yabai`'s `window_manager_make_key_window`: a `0xf8`-byte
+        // record, byte `0x3a` set, the window id at `0x3c`, and bytes
+        // `0x20..0x30` filled with `0xff`. Only byte `0x08` changes
+        // between the two posts.
+        let mut record = [0u8; 0xf8];
+        record[0x04] = 0xf8;
+        record[0x3a] = 0x10;
+        record[0x3c..0x40].copy_from_slice(&window_id.to_ne_bytes());
+        record[0x20..0x30].fill(0xff);
+
+        record[0x08] = 0x01;
+        unsafe { post_event_record_to(&psn, record.as_ptr()) };
+        record[0x08] = 0x02;
+        unsafe { post_event_record_to(&psn, record.as_ptr()) };
+
+        // `kCPSUserGenerated` (`window_manager.h`): the mode `yabai`
+        // pairs with the event records above for a non-raising focus
+        // change. Whether this mode alone avoids raising and Space
+        // switching here too is still an open question. See PINV-48
+        // for the real-session check this needs.
+        const K_CPS_USER_GENERATED: u32 = 0x200;
+        unsafe { set_front_process_with_options(&psn, window_id, K_CPS_USER_GENERATED) };
+
+        Ok(true)
+    }
+
     fn resolve_target_pid(&self, target: &ScreenshotTarget) -> Result<Option<i32>, PolarizeError> {
         match target {
             ScreenshotTarget::Screen { .. } => Ok(None),
