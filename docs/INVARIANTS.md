@@ -1585,6 +1585,28 @@ Which of the four sends that dialog actually belonged to could not be
 isolated from the available evidence. See the enforcement checklist
 entry below, and PINV-44's "Correction" section.
 
+**Follow-up, live-verified negative result: the disclaimed send does
+not reliably raise a fresh consent dialog at all.** A later session
+tested `--request-permissions` against three targets confirmed to have
+no prior Automation grant for any requesting process (Stocks, Calendar,
+Notes — each freshly launched, given several real seconds to finish
+launching before the send, confirmed running by pid). All three: the
+bootstrap ran to completion, `automation_check` read back
+`NotDetermined` immediately after, and no consent dialog appeared on
+screen at any point, checked by polling screenshots through the whole
+window. This is a stronger, reproducible version of this section's own
+"four techniques, none visibly raised a dialog" finding above — not
+new behavior, but the first time it was checked against fresh targets
+with no possible pre-existing grant to confound the result. Whatever
+raises the dialog macOS does eventually show for a *first* Automation
+send is not this mechanism, at least not reliably. See PINV-52/53's own
+follow-up note for what this means for that later work: the bundle and
+self-respawn there are independently confirmed to do what they claim
+(flip this process's own responsible-process identity, and make a
+shared App Group container resolve) — but neither one has been shown
+to make a *fresh* Automation grant attribute to `polarize` specifically,
+because no fresh grant could be raised at all to observe that with.
+
 ### PINV-52: a real bundle plus a disclaimed self-respawn are what let `polarize` hold its own TCC identity, and the respawn must forward signals to the child it creates
 
 - Always: `just bundle-app` assembles `target/debug/Polarize.app`
@@ -1681,6 +1703,16 @@ observable and confirmed, as above; that is necessary evidence this
 change works as designed. It is not sufficient evidence that TCC's
 Automation grant follows it into System Settings — only a live consent
 session can show that.
+
+A later session tried to run that exact check and could not complete
+it: three fresh targets never showed a consent dialog at all, so there
+was no grant to observe attributing anywhere. See PINV-51's own
+follow-up note for the reproducible negative result — this is a gap in
+the pre-existing bootstrap-send mechanism PINV-51 covers, not evidence
+against this invariant's own bundle/respawn claims, which were verified
+independently (PINV-53's App Group check exercises the same code
+signature this invariant's respawn produces, and did resolve correctly
+under it).
 
 Whether `lsregister`-registering the bundle is required for TCC
 attribution, beyond a well-formed bundle sitting on disk, is also
