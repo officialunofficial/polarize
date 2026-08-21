@@ -1214,25 +1214,28 @@ claim automated coverage they don't have.
 
 - Always: `skylight_ffi::symbols` resolves `SLEventPostToPid`,
   `SLPSPostEventRecordTo`, `_SLPSSetFrontProcessWithOptions`, and
-  `_SLPSGetFrontProcess` with `dlopen`/`dlsym` at runtime, against
-  `/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight`. A
-  `dlopen` failure, or any one `dlsym` miss, leaves that symbol's field
-  `None`. Nothing in the resolution path panics or aborts.
-- Because: these four symbols are private and undocumented — no public
-  header ships them, and this crate's own knowledge of their names and
+  `_SLPSGetFrontProcess` with `dlopen`/`dlsym` at runtime. It reads them
+  from `/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight`.
+  A `dlopen` failure leaves every field `None`. Any single `dlsym` miss
+  leaves only that field `None`. Nothing in the resolution path panics
+  or aborts. `apps/polarize`'s startup log names each symbol and its
+  resolution state, one line per symbol.
+- Because: these four symbols are private and undocumented. No public
+  header ships them. This crate's own knowledge of their names and
   shapes comes from cross-referencing `yabai`
   (github.com/koekeishiya/yabai), not from Apple. Apple can rename or
-  drop any of them in a future release without notice. `ax_ffi.rs`
-  links its (public, stable) symbols statically, where a missing one
-  breaks the build — the right outcome there. A private symbol needs
-  the opposite outcome: a caller that keeps working, on the public-API
+  drop any of them in a future release, without notice. `ax_ffi.rs`
+  links its symbols statically, because they are public and stable. A
+  missing one there should break the build. A private symbol needs the
+  opposite outcome: a caller that keeps working on the public-API
   fallback, on whichever macOS version stops shipping one of these
   names.
 - If violated: a dropped or renamed symbol on some future macOS release
-  would either fail this binary to load (a static link) or crash a
-  `tap`/`keyboard` call outright (an unchecked call through a null
-  function pointer), instead of falling back to the global `CGEvent`
-  post and real activation this crate already had before this work.
+  would fail this binary to load, if it were linked statically instead.
+  Or it would crash a `tap`/`keyboard` call outright, through an
+  unchecked call to a null function pointer. Either way, `polarize`
+  would lose the global `CGEvent` post and real activation it already
+  had before this work, instead of falling back to it.
 
 ## Enforcement checklist
 
@@ -2032,18 +2035,18 @@ claim automated coverage they don't have.
   as designed.
 
 - **PINV-46** — partly automated, partly not. The graceful-degradation
-  half — a name `dlsym` cannot find yields `None`, never a panic — is
-  covered by `cargo test -p polarize-macos`
-  (`skylight_ffi::tests::unresolvable_symbol_name_yields_none`), and
-  runs for real in CI: `dlopen`ing `SkyLight.framework` needs no
-  display and no TCC grant, unlike everything else this crate touches,
-  so `skylight_ffi::tests::dlopen_resolves_the_real_framework` and
-  `symbols_is_idempotent_and_does_not_panic` are genuine CI coverage,
-  not a claim deferred to a real session. What is **not** automated,
-  and not yet live-verified in this pass: which of the four symbols
-  actually resolve to a working implementation — as opposed to merely
-  resolving to *some* code address — on a real, displayed macOS
-  session, and whether `SLEventPostToPid`'s guessed signature
-  (mirroring the public `CGEventPostToPid`'s shape) is correct. A human
-  on a real macOS session needs to confirm both, per this repo's policy
-  that native-API behavior has no CI coverage.
+  half is covered by automated `cargo test -p polarize-macos`. A name
+  `dlsym` cannot find yields `None`, never a panic; that is
+  `skylight_ffi::tests::unresolvable_symbol_name_yields_none`. This
+  coverage runs for real in CI, not just on a real session: `dlopen`ing
+  `SkyLight.framework` needs no display and no TCC grant, unlike
+  everything else this crate touches. `dlopen_resolves_the_real_framework`
+  and `symbols_is_idempotent_and_does_not_panic` confirm this.
+
+  What is **not** automated, and not yet live-verified in this pass:
+  whether each of the four symbols resolves to a *working*
+  implementation, not merely to some code address. Also unverified:
+  whether `SLEventPostToPid`'s guessed signature — mirroring the public
+  `CGEventPostToPid`'s shape — is correct. A human on a real macOS
+  session needs to confirm both, per this repo's policy that native-API
+  behavior has no CI coverage.
