@@ -1242,9 +1242,9 @@ claim automated coverage they don't have.
 - Always: `orchestrate::perform_tap` resolves the target's pid through
   `WindowManager::resolve_target_pid`. It passes that pid to
   `InputSynthesizer::click_at_pixel`. `MacInputSynthesizer` posts
-  through `SLEventPostToPid` only when two things both hold: a pid
-  resolved, and `skylight_ffi::symbols` resolved
-  `SLEventPostToPid` too. Every other case posts through the global
+  through `SLEventPostToPid` only when two things both hold. A pid
+  resolved. `skylight_ffi::symbols` resolved `SLEventPostToPid` too.
+  Every other case posts through the global
   `CGEvent` stream, exactly as `tap` always did before this work.
   `click_at_pixel` returns which path it took. `TapResponse.post_path`
   always carries that real answer, never a path `perform_tap` merely
@@ -1314,6 +1314,38 @@ psn. This new piece walks Carbon's deprecated `GetNextProcess`/
 `GetProcessPID` pair instead — the same primitive `yabai` uses to build
 its own long-lived pid/psn table, run fresh on every call instead of
 cached.
+
+### PINV-49: `keyboard` posts key events by pid, and reports which path ran
+
+- Always: `orchestrate::perform_keyboard` resolves the target's pid
+  through `WindowManager::resolve_app_pid`. It passes that pid to
+  `InputSynthesizer::type_text` or `InputSynthesizer::press_key`,
+  whichever the request calls for. `MacInputSynthesizer` posts through
+  `SLEventPostToPid` only when two things both hold. A pid resolved.
+  `skylight_ffi::symbols` resolved `SLEventPostToPid` too. Every other
+  case posts through the global `CGEvent` stream, exactly as
+  `keyboard` always did before this work.
+  `type_text`/`press_key` return which path they took.
+  `KeyboardResponse.post_path` always carries that real answer, never
+  a path `perform_keyboard` merely requested. `keymap`'s pure
+  modifier/keycode/event-sequence logic is unchanged. Only the posting
+  call itself picks between the two paths.
+- Because: PINV-47 gave `tap` this same guarantee. `keyboard` needs it
+  for the same reason. A caller cannot see the screen. It cannot tell
+  which path ran by watching the keys land — both paths type the same
+  text into the same app.
+- If violated: `post_path` could report `pid` when the keys actually
+  posted through the global path, or the reverse. A caller relying on
+  `post_path` to know whether this call touched anything outside the
+  target would trust a claim the platform did not back up.
+
+**Open question this slice does not resolve.** Whether a pid-posted key
+event reaches the target app's first responder when that app is not
+AppKit-active. PINV-48's raise-free activation already flips
+AppKit-active state before `keyboard` posts anything. Today's
+`perform_keyboard` order — activate, then post — may make this
+question moot in practice. Confirming that needs a real macOS session.
+See the enforcement checklist entry below.
 
 ## Enforcement checklist
 
@@ -2173,3 +2205,24 @@ cached.
   symbols are forced off. A human on a real macOS session needs to
   confirm all of this, per this repo's policy that native-API behavior
   has no CI coverage.
+
+- **PINV-49** — the decision logic is fully covered by automated `cargo
+  test -p polarize-core` (`orchestrate::tests`), against fakes: target
+  with pid and symbol available → pid path
+  (`perform_keyboard_posts_by_pid_when_a_target_pid_and_the_symbol_are_both_available`);
+  no target → global path
+  (`perform_keyboard_falls_back_to_global_when_no_target_names_an_app`);
+  symbol unavailable → global path
+  (`perform_keyboard_falls_back_to_global_when_the_pid_symbol_is_unavailable`).
+  Each case asserts `KeyboardResponse.post_path` names the path the
+  fake actually took. `keymap`'s pure logic is untouched by this slice,
+  and stays covered by its own existing `cargo test` cases.
+
+  What is **not** automated, and not yet live-verified in this pass:
+  whether `MacInputSynthesizer`'s real `type_text`/`press_key` report
+  `post_path` correctly against the real `SLEventPostToPid` call.
+  Whether a pid-posted key event really reaches the target app's first
+  responder — including the open question this invariant's text
+  states, above, about first-responder delivery when the target is not
+  AppKit-active. A human on a real macOS session needs to confirm both,
+  per this repo's policy that native-API behavior has no CI coverage.

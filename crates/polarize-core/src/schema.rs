@@ -197,6 +197,8 @@ pub struct KeyboardResponse {
     /// How `target` got activated before this call posted its keys.
     /// See PINV-48.
     pub activation_path: ActivationPath,
+    /// Which native path actually posted the key events. See PINV-49.
+    pub post_path: PostPath,
 }
 
 /// How a `keyboard` request's `target` got activated. See PINV-48 in
@@ -388,6 +390,7 @@ mod tests {
         let value = KeyboardResponse {
             sent: true,
             activation_path: ActivationPath::RaiseFree,
+            post_path: PostPath::Pid,
         };
         assert_eq!(round_trip(&value), value);
     }
@@ -402,6 +405,19 @@ mod tests {
             let value = KeyboardResponse {
                 sent: true,
                 activation_path,
+                post_path: PostPath::Global,
+            };
+            assert_eq!(round_trip(&value), value);
+        }
+    }
+
+    #[test]
+    fn keyboard_response_round_trips_every_post_path() {
+        for post_path in [PostPath::Pid, PostPath::Global] {
+            let value = KeyboardResponse {
+                sent: true,
+                activation_path: ActivationPath::None,
+                post_path,
             };
             assert_eq!(round_trip(&value), value);
         }

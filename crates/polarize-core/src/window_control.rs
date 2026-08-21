@@ -1169,6 +1169,12 @@ mod tests {
             // above. This module never calls `perform_keyboard`.
             Ok(false)
         }
+
+        fn resolve_app_pid(&self, _app: &AppIdentifier) -> Result<Option<i32>, PolarizeError> {
+            // Not exercised here — see the `resolve_target_pid` note
+            // above.
+            Ok(None)
+        }
     }
 
     fn frame_request() -> SetWindowFrameRequest {

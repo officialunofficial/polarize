@@ -114,10 +114,22 @@ pub trait InputSynthesizer {
     ) -> Result<PostPath, PolarizeError>;
 
     /// Types a literal string as a sequence of key-down/key-up events.
-    fn type_text(&self, text: &str) -> Result<(), PolarizeError>;
+    ///
+    /// `pid` carries the same meaning as [`Self::click_at_pixel`]'s
+    /// `pid`, resolved instead via [`WindowManager::resolve_app_pid`].
+    /// See PINV-49 in `docs/INVARIANTS.md`.
+    fn type_text(&self, text: &str, pid: Option<i32>) -> Result<PostPath, PolarizeError>;
 
     /// Presses one named key, holding the given modifiers.
-    fn press_key(&self, key: NamedKey, modifiers: &[Modifier]) -> Result<(), PolarizeError>;
+    ///
+    /// `pid` carries the same meaning as [`Self::type_text`]'s `pid`.
+    /// See PINV-49.
+    fn press_key(
+        &self,
+        key: NamedKey,
+        modifiers: &[Modifier],
+        pid: Option<i32>,
+    ) -> Result<PostPath, PolarizeError>;
 }
 
 /// Enumerates apps/windows and resolves their pixel geometry.
@@ -164,6 +176,16 @@ pub trait WindowManager {
     /// real platform call failed, not that the path was merely
     /// unavailable.
     fn activate_app_without_raise(&self, app: &AppIdentifier) -> Result<bool, PolarizeError>;
+
+    /// The process id of `app`, if it is running.
+    ///
+    /// [`crate::orchestrate::perform_keyboard`] passes this pid to
+    /// [`InputSynthesizer::type_text`]/[`InputSynthesizer::press_key`],
+    /// as a candidate for the `SLEventPostToPid` path (PINV-49). A
+    /// caller treats an `Err` here the same as `Ok(None)`. Losing the
+    /// pid only loses the pid-post optimization. It never loses the
+    /// keypress itself.
+    fn resolve_app_pid(&self, app: &AppIdentifier) -> Result<Option<i32>, PolarizeError>;
 }
 
 /// Performs one accessibility action on one element. Implemented by
