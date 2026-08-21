@@ -1153,6 +1153,16 @@ mod tests {
         ) -> Result<PixelRect, PolarizeError> {
             Ok(self.display)
         }
+
+        fn resolve_target_pid(
+            &self,
+            _target: &ScreenshotTarget,
+        ) -> Result<Option<i32>, PolarizeError> {
+            // Not exercised here: this module's tests are about window
+            // writes (position/size/minimize/…), not the `tap` pid-post
+            // path (PINV-47).
+            Ok(None)
+        }
     }
 
     fn frame_request() -> SetWindowFrameRequest {

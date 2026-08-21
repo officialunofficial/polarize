@@ -12,18 +12,21 @@
 //! [`crate::keymap`]: the modifier-to-flags mapping, the keycode table,
 //! and the multi-click event sequence.
 
-use objc2_core_foundation::CGPoint;
+use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventSource, CGEventSourceStateID, CGEventTapLocation, CGMouseButton,
     CGPreflightPostEventAccess,
 };
+use std::ffi::c_void;
+
 use polarize_core::coords::PixelPoint;
 use polarize_core::error::PolarizeError;
 use polarize_core::permission::{PermissionError, PermissionKind, PermissionState};
-use polarize_core::schema::{Modifier, NamedKey};
+use polarize_core::schema::{Modifier, NamedKey, PostPath};
 use polarize_core::traits::InputSynthesizer;
 
 use crate::keymap;
+use crate::skylight_ffi;
 
 /// `InputSynthesizer` implementation over `CGEvent`.
 #[derive(Debug, Default)]
@@ -54,13 +57,25 @@ fn event_source() -> Result<objc2_core_foundation::CFRetained<CGEventSource>, Po
 }
 
 impl InputSynthesizer for MacInputSynthesizer {
-    fn click_at_pixel(&self, point: PixelPoint, click_count: u8) -> Result<(), PolarizeError> {
+    /// Posts the click via `SLEventPostToPid` when `pid` is `Some` and
+    /// [`skylight_ffi::symbols`] resolved the symbol. Falls back to the
+    /// global `CGEvent` post otherwise. See PINV-46 and PINV-47.
+    fn click_at_pixel(
+        &self,
+        point: PixelPoint,
+        click_count: u8,
+        pid: Option<i32>,
+    ) -> Result<PostPath, PolarizeError> {
         ensure_input_permission()?;
         let source = event_source()?;
         let cg_point = CGPoint {
             x: point.x,
             y: point.y,
         };
+
+        // A pid alone is not enough. The symbol must have resolved on
+        // this macOS version too — see PINV-46.
+        let pid_post = pid.zip(skylight_ffi::symbols().event_post_to_pid);
 
         for (event_type, click_state) in keymap::click_event_sequence(click_count) {
             let event =
@@ -73,9 +88,23 @@ impl InputSynthesizer for MacInputSynthesizer {
                 CGEventField::MouseEventClickState,
                 click_state,
             );
-            CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
+            match pid_post {
+                Some((pid, post_to_pid)) => {
+                    // `SLEventPostToPid` takes the same `CGEventRef` the
+                    // global post takes — reuse the already-retained
+                    // pointer rather than building a second event.
+                    let event_ptr: *const c_void =
+                        CFRetained::as_ptr(&event).as_ptr().cast_const().cast();
+                    unsafe { post_to_pid(pid, event_ptr) };
+                }
+                None => CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event)),
+            }
         }
-        Ok(())
+        Ok(if pid_post.is_some() {
+            PostPath::Pid
+        } else {
+            PostPath::Global
+        })
     }
 
     fn type_text(&self, text: &str) -> Result<(), PolarizeError> {

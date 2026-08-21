@@ -184,6 +184,16 @@ mod tests {
             self.resolved.borrow_mut().push(target.clone());
             Ok(self.rect)
         }
+
+        fn resolve_target_pid(
+            &self,
+            _target: &ScreenshotTarget,
+        ) -> Result<Option<i32>, PolarizeError> {
+            // Not exercised here: this module's tests are about pixel
+            // agreement between `hit_test` and `tap` (PINV-32), not
+            // about the pid-post path (PINV-47).
+            Ok(None)
+        }
     }
 
     #[derive(Default)]
@@ -224,9 +234,14 @@ mod tests {
     }
 
     impl InputSynthesizer for FakeInputSynthesizer {
-        fn click_at_pixel(&self, point: PixelPoint, click_count: u8) -> Result<(), PolarizeError> {
+        fn click_at_pixel(
+            &self,
+            point: PixelPoint,
+            click_count: u8,
+            _pid: Option<i32>,
+        ) -> Result<crate::schema::PostPath, PolarizeError> {
             self.clicks.borrow_mut().push((point, click_count));
-            Ok(())
+            Ok(crate::schema::PostPath::Global)
         }
 
         fn type_text(&self, _text: &str) -> Result<(), PolarizeError> {

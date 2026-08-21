@@ -1237,6 +1237,30 @@ claim automated coverage they don't have.
   would lose the global `CGEvent` post and real activation it already
   had before this work, instead of falling back to it.
 
+### PINV-47: a `tap` reports which native path actually posted its click
+
+- Always: `orchestrate::perform_tap` resolves the target's pid through
+  `WindowManager::resolve_target_pid`. It passes that pid to
+  `InputSynthesizer::click_at_pixel`. `MacInputSynthesizer` posts
+  through `SLEventPostToPid` only when two things both hold: a pid
+  resolved, and `skylight_ffi::symbols` resolved
+  `SLEventPostToPid` too. Every other case posts through the global
+  `CGEvent` stream, exactly as `tap` always did before this work.
+  `click_at_pixel` returns which path it took. `TapResponse.post_path`
+  always carries that real answer, never a path `perform_tap` merely
+  requested.
+- Because: a pid alone does not guarantee the pid-post path runs. The
+  symbol can be missing on an older or newer macOS release (PINV-46).
+  A caller cannot see the screen. It cannot tell which path ran by
+  watching the click land — both paths click the same point. Without
+  `post_path`, a caller could not tell whether this exact call left the
+  shared cursor alone, which is the one property the whole PRD behind
+  PINV-46/PINV-47 exists to give it.
+- If violated: `post_path` could report "pid" when the click actually
+  ran through the global path, or the reverse. A caller checking
+  `post_path` before relying on "the cursor did not move" would then
+  trust a claim the platform did not back up.
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -2050,3 +2074,21 @@ claim automated coverage they don't have.
   `CGEventPostToPid`'s shape — is correct. A human on a real macOS
   session needs to confirm both, per this repo's policy that native-API
   behavior has no CI coverage.
+
+- **PINV-47** — the decision logic is fully covered by automated `cargo
+  test -p polarize-core` (`orchestrate::tests`), against fakes: target
+  with pid and symbol available → pid path
+  (`perform_tap_posts_by_pid_when_a_target_pid_and_the_symbol_are_both_available`);
+  no target → global path
+  (`perform_tap_falls_back_to_global_when_no_target_names_an_app`);
+  symbol unavailable → global path
+  (`perform_tap_falls_back_to_global_when_the_pid_symbol_is_unavailable`).
+  Each case asserts `TapResponse.post_path` names the path the fake
+  actually took, not the path `perform_tap` requested.
+
+  What is **not** automated: whether `MacInputSynthesizer`'s real
+  `click_at_pixel` reports `post_path` correctly against the real
+  `SLEventPostToPid` call, and whether a pid-posted click really leaves
+  the cursor untouched on a real screen. Not yet live-verified in this
+  pass. A human on a real macOS session needs to confirm both, per this
+  repo's policy that native-API behavior has no CI coverage.
