@@ -10,6 +10,7 @@ use std::fmt;
 use crate::action::ActionError;
 use crate::coords::CoordError;
 use crate::permission::PermissionError;
+use crate::recording::RecordingError;
 use crate::selector::SelectorError;
 use crate::wait::WaitError;
 
@@ -64,6 +65,11 @@ pub enum PolarizeError {
     /// deadline. See [`crate::wait`] (PINV-19).
     #[error(transparent)]
     Wait(#[from] WaitError),
+
+    /// A `record_flow` request could not start a recording. See
+    /// [`crate::recording`] (PINV-39).
+    #[error(transparent)]
+    Recording(#[from] RecordingError),
 
     /// The requested app (by bundle id or name) is not running.
     #[error("app not found: {0}")]

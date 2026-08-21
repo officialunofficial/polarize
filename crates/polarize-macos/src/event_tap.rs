@@ -55,7 +55,7 @@ use objc2_core_graphics::{
 use polarize_core::error::PolarizeError;
 use polarize_core::permission::{PermissionError, PermissionKind, PermissionState};
 use polarize_core::recording::{
-    self, FlowRecorder, RawRecording, RawTapEvent, RecordingPlan, is_mouse_move_type,
+    self, FlowRecorder, RawRecording, RawTapEvent, RecordingPlan, is_key_type, is_mouse_move_type,
     kind_for_raw_type,
 };
 
@@ -116,6 +116,9 @@ struct Collector {
     /// How many real events the tap kept. A tap-disabled notice does
     /// not count, so one disabled tap does not shorten the budget.
     kept: usize,
+    /// How many events arrived after the budget filled, and were
+    /// therefore lost. Only the tap can see these. See PINV-39.
+    dropped: usize,
     /// The tap's own port, borrowed. The callback needs it to turn a
     /// disabled tap back on. It is null until the port exists.
     tap: *const CFMachPort,
@@ -189,6 +192,7 @@ fn run_tap(plan: RecordingPlan) -> Result<RawRecording, String> {
         started: Instant::now(),
         events: Vec::new(),
         kept: 0,
+        dropped: 0,
         tap: std::ptr::null(),
     });
     let user_info = std::ptr::from_ref(&collector).cast_mut().cast::<c_void>();
@@ -263,6 +267,7 @@ fn run_tap(plan: RecordingPlan) -> Result<RawRecording, String> {
     let elapsed_ms = u64::try_from(state.started.elapsed().as_millis()).unwrap_or(u64::MAX);
     Ok(RawRecording {
         events: state.events,
+        dropped_events: state.dropped,
         // Every timestamp below is already an offset from this same
         // start, so the start itself is zero. See `read_event`.
         started_ns: 0,
@@ -321,9 +326,6 @@ unsafe extern "C-unwind" fn tap_callback(
         return passthrough;
     }
 
-    if collector.kept >= collector.plan.max_events {
-        return passthrough;
-    }
     // Both tests belong to `polarize_core`. The mask already leaves a
     // move out when the caller did not ask for one; this repeats the
     // test because a mask is a request, not a promise.
@@ -331,6 +333,14 @@ unsafe extern "C-unwind" fn tap_callback(
         return passthrough;
     }
     if kind_for_raw_type(raw_type).is_none() {
+        return passthrough;
+    }
+    // The budget test runs after the filters, so the drop count means
+    // "events this recording lost", not "events it would have ignored
+    // anyway". `polarize-core` reports that count, and a recording that
+    // lost input is never reported as complete. See PINV-39.
+    if collector.kept >= collector.plan.max_events {
+        collector.dropped = collector.dropped.saturating_add(1);
         return passthrough;
     }
 
@@ -376,10 +386,13 @@ fn read_event(
             Some(event),
             CGEventField::ScrollWheelEventDeltaAxis1,
         ),
-        // The characters are read only when the caller opted in. A
-        // default recording never holds a typed password, not even in
-        // this process's memory. See PINV-40.
-        characters: if plan.capture_text {
+        // The characters are read only when the caller opted in, and
+        // only for a key event. A default recording never holds a typed
+        // password, not even in this process's memory (PINV-40), and
+        // `CGEventKeyboardGetUnicodeString` is a keyboard API — running
+        // it on a mouse or scroll event asks a question it cannot
+        // answer.
+        characters: if plan.capture_text && is_key_type(raw_type) {
             read_characters(event)
         } else {
             None

@@ -161,12 +161,6 @@ pub enum RecordingError {
     NoDisplays,
 }
 
-impl From<RecordingError> for PolarizeError {
-    fn from(error: RecordingError) -> Self {
-        PolarizeError::Platform(error.to_string())
-    }
-}
-
 // ---- what crosses the platform boundary ---------------------------------
 
 /// The settings the tap runs with, after defaults and clamps.
@@ -229,6 +223,14 @@ pub struct RawRecording {
     pub started_ns: u64,
     /// How long the tap really ran, in milliseconds.
     pub elapsed_ms: u64,
+    /// How many events the tap declined to keep, because its budget was
+    /// already full.
+    ///
+    /// Only the tap can count these. It stops collecting the moment
+    /// `max_events` fills, so the events it turned away never reach
+    /// `polarize-core` at all. Without this count a truncated recording
+    /// looks exactly like a complete one. See PINV-39.
+    pub dropped_events: usize,
 }
 
 /// Runs a listen-only `CGEventTap` for a bounded time. `polarize-macos`
@@ -432,6 +434,16 @@ pub fn is_mouse_move_type(event_type: u32) -> bool {
     )
 }
 
+/// Whether this raw type is a key event.
+///
+/// `polarize-macos` calls this inside the tap callback, to decide
+/// whether reading the characters is even a sensible question.
+/// `CGEventKeyboardGetUnicodeString` is a keyboard API, and a mouse
+/// event has no characters to give it. See PINV-40.
+pub fn is_key_type(event_type: u32) -> bool {
+    matches!(event_type, RAW_KEY_DOWN | RAW_KEY_UP)
+}
+
 /// Whether this raw type is one of the two tap-disabled notices.
 pub fn is_tap_disabled_type(event_type: u32) -> bool {
     matches!(
@@ -615,7 +627,12 @@ pub fn translate_event(
     // read the characters at all without the opt-in, and this drops
     // whatever arrives anyway. One bug in `polarize-macos` then still
     // cannot put a password in a response. See PINV-40.
-    let text = if plan.capture_text {
+    //
+    // Only a key event may carry text. `CGEventKeyboardGetUnicodeString`
+    // is a keyboard API, so anything it yields for a mouse or scroll
+    // event is meaningless — and a click record with a `text` field
+    // would tell a caller the user typed during a click.
+    let text = if plan.capture_text && is_key_event {
         raw.characters.clone()
     } else {
         None
@@ -710,7 +727,10 @@ pub fn assemble_recording(
         }
     }
 
-    let dropped_events = events.len().saturating_sub(plan.max_events);
+    // What the tap turned away, plus anything this function trimmed.
+    // The first is the real number in production: the tap stops at the
+    // budget, so it rarely hands over more than `max_events`.
+    let dropped_events = raw.dropped_events + events.len().saturating_sub(plan.max_events);
     events.truncate(plan.max_events);
 
     let stopped_because = if events.len() >= plan.max_events {
@@ -1280,11 +1300,68 @@ mod tests {
     // ---- assembly -------------------------------------------------------
 
     #[test]
+    fn only_a_key_event_ever_carries_text() {
+        // `CGEventKeyboardGetUnicodeString` is a keyboard API. Running
+        // it on a mouse or scroll event yields nothing meaningful, and a
+        // click record with a `text` field it never produced would tell
+        // a caller the user typed during a click.
+        let mut opted_in = plan();
+        opted_in.capture_text = true;
+
+        for raw_type in [RAW_LEFT_MOUSE_DOWN, RAW_LEFT_MOUSE_UP, RAW_SCROLL_WHEEL] {
+            let mut event = raw(raw_type, 0);
+            event.characters = Some("hunter2".to_string());
+            let recorded = translate_event(&event, 0, &one_display(), &opted_in)
+                .expect("the event is recordable");
+            assert_eq!(
+                recorded.text, None,
+                "a {:?} event carried text",
+                recorded.kind
+            );
+        }
+
+        // The same opt-in still gives a key event its characters.
+        let mut key = raw(RAW_KEY_DOWN, 0);
+        key.characters = Some("hunter2".to_string());
+        let recorded = translate_event(&key, 0, &one_display(), &opted_in).unwrap();
+        assert_eq!(recorded.text.as_deref(), Some("hunter2"));
+    }
+
+    #[test]
+    fn a_recording_the_tap_truncated_is_not_complete() {
+        // The tap stops collecting the moment its budget fills, so the
+        // events it declined never reach `polarize-core` to be counted.
+        // Only the tap knows they happened. A recording that reports
+        // itself complete while real input is missing is exactly what
+        // PINV-39 forbids.
+        let recording = RawRecording {
+            events: vec![raw(RAW_KEY_DOWN, 0), raw(RAW_KEY_UP, 1_000_000)],
+            started_ns: 0,
+            elapsed_ms: 5_000,
+            dropped_events: 7,
+        };
+        let mut plan = plan();
+        plan.max_events = 2;
+
+        let response = assemble_recording(&recording, &one_display(), &plan);
+
+        assert_eq!(response.dropped_events, 7);
+        assert!(!response.complete, "input was lost");
+        assert_eq!(response.stopped_because, StopReason::EventLimit);
+        assert!(
+            response.warnings.iter().any(|w| w.contains("7")),
+            "the warning must name how many were lost: {:?}",
+            response.warnings
+        );
+    }
+
+    #[test]
     fn a_clean_recording_reports_itself_complete() {
         let recording = RawRecording {
             events: vec![raw(RAW_KEY_DOWN, 0), raw(RAW_KEY_UP, 1_000_000)],
             started_ns: 0,
             elapsed_ms: 5_000,
+            dropped_events: 0,
         };
         let response = assemble_recording(&recording, &one_display(), &plan());
         assert_eq!(response.event_count, 2);
@@ -1306,6 +1383,7 @@ mod tests {
             ],
             started_ns: 0,
             elapsed_ms: 5_000,
+            dropped_events: 0,
         };
         let response = assemble_recording(&recording, &one_display(), &plan());
         assert_eq!(response.tap_disabled_by_timeout, 1);
@@ -1326,6 +1404,7 @@ mod tests {
             events: vec![raw(RAW_TAP_DISABLED_BY_USER_INPUT, 0)],
             started_ns: 0,
             elapsed_ms: 5_000,
+            dropped_events: 0,
         };
         let response = assemble_recording(&recording, &one_display(), &plan());
         assert_eq!(response.tap_disabled_by_user_input, 1);
@@ -1343,6 +1422,7 @@ mod tests {
             ],
             started_ns: 0,
             elapsed_ms: 100,
+            dropped_events: 0,
         };
         let response = assemble_recording(&recording, &one_display(), &plan());
         assert_eq!(response.tap_disabled_by_timeout, 2);
@@ -1365,6 +1445,7 @@ mod tests {
             ],
             started_ns: 0,
             elapsed_ms: 40,
+            dropped_events: 0,
         };
         let response = assemble_recording(&recording, &one_display(), &small);
         assert_eq!(response.events.len(), 2);
@@ -1388,6 +1469,7 @@ mod tests {
             ],
             started_ns: 0,
             elapsed_ms: 10,
+            dropped_events: 0,
         };
         let response = assemble_recording(&recording, &one_display(), &plan());
         let offsets: Vec<u64> = response
@@ -1405,6 +1487,7 @@ mod tests {
             events: vec![raw(24, 0), raw(RAW_KEY_DOWN, 0)],
             started_ns: 0,
             elapsed_ms: 10,
+            dropped_events: 0,
         };
         let response = assemble_recording(&recording, &one_display(), &plan());
         assert_eq!(response.event_count, 1);
@@ -1506,6 +1589,7 @@ mod tests {
             events: vec![raw(RAW_KEY_DOWN, 0)],
             started_ns: 0,
             elapsed_ms: 812,
+            dropped_events: 0,
         });
         let request = RecordFlowRequest {
             duration_ms: Some(5 * MAX_DURATION_MS),
@@ -1530,6 +1614,7 @@ mod tests {
             }],
             started_ns: 0,
             elapsed_ms: 10,
+            dropped_events: 0,
         });
         let response = perform_record_flow(
             &recorder,
@@ -1555,6 +1640,7 @@ mod tests {
             }],
             started_ns: 0,
             elapsed_ms: 10,
+            dropped_events: 0,
         });
         let response = perform_record_flow(
             &recorder,
@@ -1590,6 +1676,7 @@ mod tests {
             events: vec![raw(RAW_KEY_DOWN, 0)],
             started_ns: 0,
             elapsed_ms: 10,
+            dropped_events: 0,
         });
         let response =
             perform_record_flow(&recorder, &FakeDisplays(one_display()), &request).expect("ok");

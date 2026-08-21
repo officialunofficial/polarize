@@ -138,6 +138,9 @@ unsafe extern "C" {
     /// system-wide element can return an element of any app.
     fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
     fn AXValueGetType(value: *const c_void) -> AXValueType;
+    /// The `CFTypeID` of `AXValueRef`. `AXValueGetType` is defined only
+    /// for that type, so this is what makes calling it sound.
+    fn AXValueGetTypeID() -> usize;
     fn AXValueGetValue(value: *const c_void, the_type: AXValueType, out: *mut c_void) -> bool;
     /// Wraps a `CGPoint`/`CGSize` in the `AXValue` box every geometric
     /// AX attribute takes. Returns `NULL` on failure.
@@ -147,6 +150,7 @@ unsafe extern "C" {
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn CFRetain(cf: *const c_void) -> *const c_void;
+    fn CFGetTypeID(cf: *const c_void) -> usize;
     fn CFRelease(cf: *const c_void);
 }
 
@@ -609,7 +613,18 @@ fn slot_from_value(raw: *const c_void) -> AxAttributeSlot {
         return AxAttributeSlot::Flag(flag.value());
     }
 
+    // `AXValueGetType` is defined only for an `AXValueRef`. A batched
+    // read returns whatever type each attribute really has, and several
+    // are neither a string, a boolean, nor an `AXValue`: `AXValue` on a
+    // slider or a stepper is a `CFNumber`, and a future attribute could
+    // be anything. Handing one of those to `AXValueGetType` reads a
+    // foreign object through the wrong lens. The single-attribute
+    // readers never met this, because each one asked for a specific
+    // attribute whose type it already knew.
     let raw = value_as_ax_value_ptr(&value);
+    if unsafe { CFGetTypeID(raw) } != unsafe { AXValueGetTypeID() } {
+        return AxAttributeSlot::Unread;
+    }
     match unsafe { AXValueGetType(raw) } {
         // The placeholder for a slot the batch call could not read. It
         // is a real object of a real type, so nothing but this check

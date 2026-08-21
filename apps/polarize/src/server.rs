@@ -139,8 +139,9 @@ pub struct PolarizeServer {
 }
 
 /// Maps a [`PolarizeError`] to the MCP [`ErrorData`] shape a tool call
-/// result carries. `Coord`/`Selector`/`Action`/`AppNotFound`/
-/// `WindowNotFound` are treated as bad input from the caller
+/// result carries. `Coord`/`Selector`/`Action`/`Recording`/
+/// `AppNotFound`/`WindowNotFound` are treated as bad input from the
+/// caller
 /// (`INVALID_PARAMS`) — an `Action` refusal means the caller named an
 /// element that does not offer the action, or that is disabled; `Permission` and
 /// `Platform` are treated as environment/native failures
@@ -158,6 +159,7 @@ fn to_error_data(err: PolarizeError) -> ErrorData {
         PolarizeError::Coord(_)
         | PolarizeError::Selector(_)
         | PolarizeError::Action(_)
+        | PolarizeError::Recording(_)
         | PolarizeError::AppNotFound(_)
         | PolarizeError::WindowNotFound(_) => ErrorData::invalid_params(message, None),
         PolarizeError::Permission(PermissionError::NotGranted { kind, state }) => {
