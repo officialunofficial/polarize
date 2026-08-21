@@ -93,18 +93,29 @@ impl WindowManager for MacWindowManager {
 
     /// See PINV-48. Builds the same raw SkyLight event record `yabai`'s
     /// `window_manager_make_key_window` posts (window_manager.c:1269).
-    /// Then calls `_SLPSSetFrontProcessWithOptions`. That pairing
-    /// matches what `yabai`'s own
-    /// `window_manager_focus_window_without_raise` (window_manager.c:1293)
-    /// always does, unconditionally, at its end.
+    /// Then calls `_SLPSSetFrontProcessWithOptions`. `yabai` pairs
+    /// exactly these two steps in both
+    /// `window_manager_focus_window_with_raise` and
+    /// `window_manager_focus_window_without_raise`
+    /// (window_manager.c:1293) — they are shared machinery, not the
+    /// raise/no-raise difference itself.
     ///
-    /// This deliberately skips that function's leading conditional
-    /// block: two more event records, gated on whether `window_psn`
-    /// equals `yabai`'s own tracked previously-focused window. That
-    /// gate exists to replay `yabai`'s own per-Space focus history
-    /// across a Space switch. `polarize` keeps no such history. One
-    /// `keyboard` call is a one-shot request, not a step in a tracked
-    /// focus sequence. There is no equivalent state to gate on here.
+    /// The real difference is one call this function never makes:
+    /// `window_manager_focus_window_with_raise` (window_manager.c:1324)
+    /// ends with `AXUIElementPerformAction(window_ref, kAXRaiseAction)`.
+    /// The without-raise variant does not. Skipping that AX raise
+    /// action, not anything about the event records above, is what
+    /// makes this "without raise."
+    ///
+    /// This also deliberately skips
+    /// `window_manager_focus_window_without_raise`'s leading
+    /// conditional block: two more event records, gated on whether
+    /// `window_psn` equals `yabai`'s own tracked previously-focused
+    /// window. That gate exists to replay `yabai`'s own per-Space
+    /// focus history across a Space switch. `polarize` keeps no such
+    /// history. One `keyboard` call is a one-shot request, not a step
+    /// in a tracked focus sequence. There is no equivalent state to
+    /// gate on here.
     fn activate_app_without_raise(&self, app: &AppIdentifier) -> Result<bool, PolarizeError> {
         let symbols = crate::skylight_ffi::symbols();
         let (Some(post_event_record_to), Some(set_front_process_with_options)) = (
@@ -119,8 +130,17 @@ impl WindowManager for MacWindowManager {
         let Some(psn) = crate::carbon_process::find_psn_for_pid(pid) else {
             return Ok(false);
         };
+        // `content::shareable_content` needs Screen Recording
+        // permission, the same as `screenshot` — see PINV-10. `keyboard`
+        // never needed this permission before this path existed.
+        crate::capture::ensure_screen_recording_permission()?;
         let content = content::shareable_content()?;
-        let window = content::find_window(&content, pid, None)?;
+        // No on-screen window is the third availability gate PINV-48
+        // states, not a hard failure: the caller falls back to
+        // `activate_app` the same as a missing symbol or pid.
+        let Ok(window) = content::find_window(&content, pid, None) else {
+            return Ok(false);
+        };
         let window_id = window.window_id();
 
         // `yabai`'s `window_manager_make_key_window`: a `0xf8`-byte

@@ -327,6 +327,20 @@ mod tests {
         }
     }
 
+    impl FakeInputSynthesizer {
+        /// The `PostPath` every method below reports: `Pid` only when a
+        /// pid was passed and this fake's symbol is available, `Global`
+        /// otherwise. Shared so the three methods don't each repeat the
+        /// same decision.
+        fn post_path(&self, pid: Option<i32>) -> PostPath {
+            if pid.is_some() && self.symbol_available {
+                PostPath::Pid
+            } else {
+                PostPath::Global
+            }
+        }
+    }
+
     impl InputSynthesizer for FakeInputSynthesizer {
         fn click_at_pixel(
             &self,
@@ -335,20 +349,12 @@ mod tests {
             pid: Option<i32>,
         ) -> Result<PostPath, PolarizeError> {
             self.clicks.borrow_mut().push((point, click_count, pid));
-            Ok(if pid.is_some() && self.symbol_available {
-                PostPath::Pid
-            } else {
-                PostPath::Global
-            })
+            Ok(self.post_path(pid))
         }
 
         fn type_text(&self, text: &str, pid: Option<i32>) -> Result<PostPath, PolarizeError> {
             self.typed.borrow_mut().push(text.to_string());
-            Ok(if pid.is_some() && self.symbol_available {
-                PostPath::Pid
-            } else {
-                PostPath::Global
-            })
+            Ok(self.post_path(pid))
         }
 
         fn press_key(
@@ -358,11 +364,7 @@ mod tests {
             pid: Option<i32>,
         ) -> Result<PostPath, PolarizeError> {
             self.pressed.borrow_mut().push((key, modifiers.to_vec()));
-            Ok(if pid.is_some() && self.symbol_available {
-                PostPath::Pid
-            } else {
-                PostPath::Global
-            })
+            Ok(self.post_path(pid))
         }
     }
 
