@@ -1636,20 +1636,28 @@ around it, not a grant `polarize` could ever hold under its own name —
 `osascript` has no bundle for a "Polarize" row to exist under in the
 first place.
 
-The fix this points to is the one PINV-52 already describes, now with
-direct evidence behind it rather than a hypothesis: once `polarize`
-itself is self-responsible (PINV-52's disclaimed self-respawn), a
-**plain** `osascript` child it spawns — exactly what
-`MacAppleScriptRunner::run_script`'s real `run_applescript` path
-already does, no disclaim involved — should inherit responsibility
-from `polarize` itself, the same way this session's plain send
-inherited it from Ghostty. That specific link (a plain child's send,
-spawned from an already-self-responsible parent, actually attributing
-to that parent) was not directly reproduced end-to-end this session —
-a two-hop chain built to test it (disclaim a shell, have the shell
-plainly spawn `osascript`) produced no new `kTCCServiceAppleEvents`
-record at all against its chosen target, inconclusive rather than
-contradictory. It is the next thing to verify live, not yet proven.
+**The fix this points to is the one PINV-52 already describes, and the
+missing link is now directly confirmed, not just hypothesized.** A
+second two-hop reproduction — disclaim a shell (mimicking `polarize`
+post-self-respawn), have that shell plainly spawn `osascript` (mimicking
+`MacAppleScriptRunner::run_script`'s real, undisclaimed
+`Command::new("osascript")`) — sent a real, state-touching query against
+a target neither process had touched before. The resulting
+`kTCCServiceAppleEvents` creation event recorded the disclaimed shell's
+own path (`/bin/sh`) as the identity — not `osascript`'s, and not
+whatever launched the shell. A plain child's send does inherit
+responsibility from an already-self-responsible parent.
+
+This closes the chain for `polarize` itself: once PINV-52's disclaimed
+self-respawn makes `polarize` its own responsible process, a plain
+`osascript` child it spawns — exactly `run_applescript`'s real path,
+no disclaim needed there — should inherit `polarize`'s own bundle
+identity (`com.officialunofficial.polarize`), the same way this
+session's shell's identity carried down to its own plain child. What
+remains unverified is only the last, System-Settings-visible step:
+whether that inherited identity is what finally shows a `polarize` row
+with a human's real consent grant against it — still a live session
+with a real dialog, not reproducible from this evidence alone.
 
 ### PINV-52: a real bundle plus a disclaimed self-respawn are what let `polarize` hold its own TCC identity, and the respawn must forward signals to the child it creates
 
