@@ -10,6 +10,8 @@
 	<string>APPL</string>
 	<key>CFBundleName</key>
 	<string>polarize</string>
+	<key>CFBundleIconFile</key>
+	<string>Polarize</string>
 	<key>CFBundleVersion</key>
 	<string>__VERSION__</string>
 	<key>CFBundleShortVersionString</key>

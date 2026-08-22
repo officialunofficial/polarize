@@ -62,17 +62,27 @@ build:
     just bundle-app
 
 # Assembles `Polarize.app`, under `dist/`. It builds a real bundle
-# directory — `Contents/{Info.plist,MacOS/polarize}` — around the same
-# signed binary `build` produces. Then it signs the bundle itself. The
-# bundle's own `Info.plist` renders from the same template
-# `apps/polarize/build.rs` embeds into the bare binary. It carries
-# `identifier`, so `--identifier` is not passed again on this
+# directory — `Contents/{Info.plist,MacOS/polarize,Resources/Polarize.icns}`
+# — around the same signed binary `build` produces. Then it signs the
+# bundle itself. The bundle's own `Info.plist` renders from the same
+# template `apps/polarize/build.rs` embeds into the bare binary. It
+# carries `identifier`, so `--identifier` is not passed again on this
 # `codesign` call. The bundle's `CFBundleIdentifier` is what macOS
-# reads instead.
+# reads instead. `Polarize.icns` is a committed, pre-built asset — not
+# rebuilt from source at build time. It started from
+# `assets/polarize-logo.svg`, rasterized at 1024×1024. macOS does not
+# auto-round third-party `.icns` artwork on most versions, unlike its
+# own system icons. So the source was masked to Apple's own squircle
+# convention first. That is a rounded rect, corner radius 22% of
+# width. It was then scaled down through the standard iconset sizes,
+# via `sips`. It was packed with `iconutil` last. A flat, unmasked
+# square here would show hard corners in the Dock, next to every
+# rounded system icon.
 bundle-app:
-    mkdir -p {{bundle}}/Contents/MacOS
+    mkdir -p {{bundle}}/Contents/MacOS {{bundle}}/Contents/Resources
     sed 's/__VERSION__/{{version}}/' {{plist_template}} > {{bundle}}/Contents/Info.plist
     cp {{bin}} {{bundle}}/Contents/MacOS/polarize
+    cp apps/polarize/bundle/Polarize.icns {{bundle}}/Contents/Resources/Polarize.icns
     codesign --force --sign {{identity}} --options runtime --entitlements {{entitlements}} {{bundle}}
 
 # Verifies `Polarize.app` is a well-formed, LaunchServices-acceptable
