@@ -1,46 +1,52 @@
 # `just build` compiles the workspace, then re-signs `polarize`'s
 # binary with a stable local identity.
 #
-# macOS keys Accessibility/Screen Recording TCC grants to a binary's
-# code-signing identity. A plain `cargo build` binary is unsigned, so
-# macOS falls back to an ad-hoc identity derived from the binary's
-# content hash — which changes on every rebuild, forcing you to
-# re-grant permissions each time. Signing with a real (even
-# self-signed) certificate and a fixed `--identifier` keeps that
-# identity stable across rebuilds, so a TCC grant survives.
+# macOS keys Accessibility and Screen Recording TCC grants to a
+# binary's code-signing identity. A plain `cargo build` binary is
+# unsigned. macOS then falls back to an ad-hoc identity. That identity
+# comes from the binary's content hash. The hash changes on every
+# rebuild. So you must re-grant permissions after every rebuild.
+# Signing with a real certificate keeps the identity stable. A fixed
+# `--identifier` does too. Either one, even self-signed, lets a TCC
+# grant survive a rebuild.
 #
-# Automation needs one more thing code-signing identity alone does not
-# give: a real bundle identity. TCC attributes an Apple Event send to
-# whichever ancestor process carries a `CFBundleIdentifier`, climbing
-# past any process that has none — a bare Mach-O binary has no bundle
-# identity to climb to, so its Automation grant always lands on
-# whatever launched it instead, and reliably reproduces this. See
-# `apps/polarize/build.rs`, which embeds a real `Info.plist` (with a
-# `CFBundleIdentifier` matching `identifier` below) into the binary's
-# `__TEXT,__info_plist` section for exactly this reason.
-# `--options runtime` plus the `com.apple.security.automation.apple-events`
-# entitlement (`apps/polarize/polarize.entitlements`) is also required —
-# an unentitled binary's Apple Event sends are refused outright, even
-# with a bundle identity in place.
+# Automation needs one more thing. Code-signing identity alone does
+# not give it. TCC needs a real bundle identity too. TCC attributes an
+# Apple Event send to the nearest ancestor process with a
+# `CFBundleIdentifier`. It climbs past any process that has none. A
+# bare Mach-O binary has no bundle identity to climb to. Its
+# Automation grant then lands on whatever launched it instead. This
+# reliably reproduces. See `apps/polarize/build.rs`. It embeds a real
+# `Info.plist` into the binary's `__TEXT,__info_plist` section, for
+# exactly this reason. Its `CFBundleIdentifier` matches `identifier`
+# below.
+# `--options runtime` is also required, plus the
+# `com.apple.security.automation.apple-events` entitlement
+# (`apps/polarize/polarize.entitlements`). An unentitled binary's
+# Apple Event sends are refused outright, even with a bundle identity
+# in place.
 #
 # One-time setup: create a "Code Signing" certificate named
-# `polarize-dev` in your login keychain (see CONTRIBUTING.md), then
-# grant it Accessibility and Screen Recording access under System
-# Settings > Privacy & Security. `just build` re-signs with that same
-# identity from then on, so the grant persists.
+# `polarize-dev` in your login keychain (see CONTRIBUTING.md). Grant
+# it Accessibility and Screen Recording access, under System Settings
+# > Privacy & Security. `just build` re-signs with that same identity
+# from then on. So the grant persists.
 #
-# `build` also assembles `Polarize.app`, a real bundle directory
-# around the same signed binary (see `bundle-app` below). Research
-# found a bare, non-bundle executable cannot hold a stable Automation
-# identity of its own — see PINV-52 in `docs/INVARIANTS.md`, and
-# PINV-44's "Correction" section for the live `-600`
-# (`kLSApplicationNotFoundErr`) finding that motivated it. `apps/
-# polarize/src/main.rs` pairs the bundle with a disclaimed self-respawn
-# at server startup; the two together are what let `polarize` become
-# its own TCC-responsible process, independent of what launched it.
+# `build` also assembles `Polarize.app` in `dist/` — a real bundle
+# directory around the same signed binary (see `bundle-app` below). A
+# bare, non-bundle executable cannot hold a stable Automation identity
+# of its own. Research confirmed this. See PINV-52 in
+# `docs/INVARIANTS.md`. See PINV-44's "Correction" section too, for
+# the live `-600` (`kLSApplicationNotFoundErr`) finding that motivated
+# it. `apps/polarize/src/main.rs` pairs the bundle with a disclaimed
+# self-respawn at server startup. The two together let `polarize`
+# become its own TCC-responsible process, independent of what launched
+# it. The bundle's name and location — `Polarize.app`, under `dist/`
+# — were a deliberate human decision, not a default left unquestioned.
+# See PINV-52's own note for the earlier open question this answers.
 
 bin := "target/debug/polarize"
-bundle := "target/debug/Polarize.app"
+bundle := "dist/Polarize.app"
 identity := "polarize-dev"
 identifier := "com.officialunofficial.polarize"
 entitlements := "apps/polarize/polarize.entitlements"
@@ -55,13 +61,13 @@ build:
     codesign --force --sign {{identity}} --identifier {{identifier}} --options runtime --entitlements {{entitlements}} {{bin}}
     just bundle-app
 
-# Assembles `Polarize.app`: a real bundle directory
-# (`Contents/{Info.plist,MacOS/polarize}`) around the same signed
-# binary `build` produces, then signs the bundle itself. The bundle's
-# own `Info.plist` — rendered from the same template
-# `apps/polarize/build.rs` embeds into the bare binary — carries
+# Assembles `Polarize.app`, under `dist/`. It builds a real bundle
+# directory — `Contents/{Info.plist,MacOS/polarize}` — around the same
+# signed binary `build` produces. Then it signs the bundle itself. The
+# bundle's own `Info.plist` renders from the same template
+# `apps/polarize/build.rs` embeds into the bare binary. It carries
 # `identifier`, so `--identifier` is not passed again on this
-# `codesign` call; the bundle's `CFBundleIdentifier` is what macOS
+# `codesign` call. The bundle's `CFBundleIdentifier` is what macOS
 # reads instead.
 bundle-app:
     mkdir -p {{bundle}}/Contents/MacOS
@@ -70,7 +76,7 @@ bundle-app:
     codesign --force --sign {{identity}} --options runtime --entitlements {{entitlements}} {{bundle}}
 
 # Verifies `Polarize.app` is a well-formed, LaunchServices-acceptable
-# bundle. Every check here needs zero TCC grants — see PINV-52's own
+# bundle. Every check here needs zero TCC grants. See PINV-52's own
 # "not automatable" note for what this cannot check.
 verify-bundle: bundle-app
     plutil -lint {{bundle}}/Contents/Info.plist
@@ -79,19 +85,20 @@ verify-bundle: bundle-app
     # Asks LaunchServices to resolve the bundle by identity, with no
     # launch — checkable with zero TCC grants. PINV-44 documented a
     # bare binary failing this with `-600` (`kLSApplicationNotFoundErr`)
-    # on an earlier macOS; that specific failure did not reproduce
-    # against the bare binary when this bundle work was verified live
-    # on a macOS 27 beta, so read this as "the bundle is well-formed
-    # and LaunchServices-acceptable," not as a guaranteed regression
-    # check against that exact prior finding — see PINV-52's own note.
-    # `spctl` is deliberately not run here: it always fails against
-    # this self-signed dev certificate, which is expected, not a
+    # on an earlier macOS. That specific failure did not reproduce
+    # against the bare binary this time. This bundle work was verified
+    # live, on a macOS 27 beta. So read this as: the bundle is
+    # well-formed and LaunchServices-acceptable. It is not a guaranteed
+    # regression check against that exact prior finding. See PINV-52's
+    # own note.
+    # `spctl` is deliberately not run here. It always fails against
+    # this self-signed dev certificate. That is expected, not a
     # regression.
     #
-    # `open -a` resolves a relative path as an app *name* lookup
-    # against LaunchServices' own database, not a literal filesystem
-    # path — confirmed live: a relative `{{bundle}}` fails "Unable to
-    # find application," while the same path made absolute succeeds.
+    # `open -a` resolves a relative path as an app name lookup. It
+    # searches LaunchServices' own database, not a literal filesystem
+    # path. Confirmed live: a relative `{{bundle}}` path fails, "Unable
+    # to find application." The same path, made absolute, succeeds.
     # `justfile_directory()` makes it absolute.
     open -Ra {{justfile_directory()}}/{{bundle}}
     @echo "Polarize.app: well-formed, signed, and LaunchServices-acceptable."

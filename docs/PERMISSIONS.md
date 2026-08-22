@@ -13,9 +13,9 @@ which tools need which permission, and when `polarize` asks for one.
 
 Accessibility and Screen Recording are required for every install. A
 client that only calls `describe` still needs Accessibility granted. A
-client that never calls `screenshot` can skip Screen Recording — but
+client that never calls `screenshot` can skip Screen Recording. But
 every other tool still needs Accessibility. Automation is only needed
-by a client that calls `run_applescript` or `script_dictionary`; it is
+by a client that calls `run_applescript` or `script_dictionary`. It is
 granted per target app, not once for the whole binary — see PINV-44 in
 [`INVARIANTS.md`](INVARIANTS.md).
 
@@ -62,18 +62,20 @@ across rebuilds" section for the local-build case.
 ## Automation needs its own bundle identity
 
 Accessibility and Screen Recording key their grant to `polarize`'s
-code-signing identity alone; the bare `target/debug/polarize` binary
-already carries a stable one after `just build` re-signs it. Automation
-needs one more thing: a real `CFBundleIdentifier` for TCC's
-"responsible process" climb to land on, and (for a directly-launched
-`polarize`, the normal MCP stdio case) a disclaimed self-respawn so
-`polarize` becomes that responsible process itself, rather than
-whatever launched it. `just build` assembles this automatically as
-`target/debug/Polarize.app`; run its bootstrap flag through the bundle:
+code-signing identity alone. The bare `target/debug/polarize` binary
+already carries a stable one, after `just build` re-signs it.
+Automation needs one more thing: a real `CFBundleIdentifier`. TCC's
+"responsible process" climb needs it to land on. For a
+directly-launched `polarize` — the normal MCP stdio case — it also
+needs a disclaimed self-respawn. That makes `polarize` become that
+responsible process itself, rather than whatever launched it. `just
+build` assembles this automatically as `dist/Polarize.app`. Run its
+bootstrap flag through the bundle:
 
 ```sh
-./target/debug/Polarize.app/Contents/MacOS/polarize --request-permissions <App Name>
+./dist/Polarize.app/Contents/MacOS/polarize --request-permissions <App Name>
 ```
 
-See PINV-52 in [`INVARIANTS.md`](INVARIANTS.md) for the full mechanism,
-including what is and is not confirmed by a real macOS session.
+See PINV-52 in [`INVARIANTS.md`](INVARIANTS.md) for the full
+mechanism. It also covers what is, and is not, confirmed by a real
+macOS session.

@@ -5,31 +5,31 @@
 //! A real `.app` bundle (`just bundle-app`) gives `polarize` a
 //! LaunchServices-acceptable identity on disk. It does not, by
 //! itself, change which process TCC treats as responsible for an
-//! Apple Event send — PINV-44's "Correction" section confirmed that
+//! Apple Event send. PINV-44's "Correction" section confirmed that
 //! live. TCC assigns responsibility at spawn, and a plain
 //! `fork`/`exec` inherits it from the parent, bundle directory or
-//! not. Two things break that inheritance: a LaunchServices launch
-//! (`open`, Finder, `NSWorkspace`), or the private
-//! `responsibility_spawnattrs_setdisclaim` attribute PINV-51 already
-//! uses for its one-shot bootstrap send. `polarize`'s MCP stdio use
-//! case is spawned directly by its client — never through
-//! LaunchServices — and needs its stdio pipes preserved, so a
+//! not. Two things break that inheritance. One is a LaunchServices
+//! launch — `open`, Finder, `NSWorkspace`. The other is the private
+//! `responsibility_spawnattrs_setdisclaim` attribute. PINV-51 already
+//! uses it, for its one-shot bootstrap send. `polarize`'s MCP stdio
+//! use case is spawned directly by its client — never through
+//! LaunchServices. It needs its stdio pipes preserved. So a
 //! disclaimed self-respawn is the mechanism this module adds.
 //!
-//! This module resolves two private, undocumented symbols the same
-//! way [`crate::skylight_ffi`] and [`crate::disclaimed_spawn`] resolve
-//! theirs: `dlsym(RTLD_DEFAULT, ...)`, cached once, degrading to
-//! `None` rather than panicking when a name does not resolve on this
-//! macOS version (PINV-46's pattern). The disclaimed-spawn attribute
-//! setup itself is not duplicated here — see
-//! [`crate::disclaimed_spawn::init_disclaimed_attr`], which this
+//! This module resolves two private, undocumented symbols.
+//! [`crate::skylight_ffi`] and [`crate::disclaimed_spawn`] resolve
+//! theirs the same way. Each uses `dlsym(RTLD_DEFAULT, ...)`, cached
+//! once. Each degrades to `None`, rather than panicking, when a name
+//! does not resolve on this macOS version. That is PINV-46's pattern.
+//! The disclaimed-spawn attribute setup itself is not duplicated here
+//! — see [`crate::disclaimed_spawn::init_disclaimed_attr`], which this
 //! module's own send reuses.
 //!
 //! [`respawn_self_disclaimed`] must run before any other thread
-//! starts: it mutates this process's own environment
-//! ([`std::env::set_var`]), which is only sound with no other thread
-//! that could read it concurrently. `apps/polarize/src/main.rs` calls
-//! it before building its `tokio` runtime, for exactly this reason.
+//! starts. It mutates this process's own environment, via
+//! [`std::env::set_var`]. That is only sound with no other thread that
+//! could read it concurrently. `apps/polarize/src/main.rs` calls it
+//! before building its `tokio` runtime, for exactly this reason.
 
 use std::ffi::{CString, c_void};
 use std::os::raw::c_char;
@@ -54,26 +54,27 @@ unsafe extern "C" {
 const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
 
 /// Env var this process's own disclaimed respawn sets on itself
-/// before spawning, so the respawned child's own
-/// [`should_respawn_disclaimed`] check sees it and does not respawn
-/// again. Its value is never read, only its presence.
+/// before spawning. The respawned child's own
+/// [`should_respawn_disclaimed`] check then sees it. That way, it
+/// does not respawn again. Its value is never read, only its
+/// presence.
 const RESPAWN_SENTINEL_VAR: &str = "POLARIZE_DISCLAIMED_RESPAWN";
 
-/// A live session confirmed a real risk plain `waitpid`-and-exit does
-/// not handle: `posix_spawnp` (like `fork`) puts a child in its
-/// parent's own process group, so a job-control `Ctrl-C` at a
-/// terminal — which signals the whole foreground process group —
+/// A live session confirmed a real risk. Plain `waitpid`-and-exit
+/// does not handle it. `posix_spawnp`, like `fork`, puts a child in
+/// its parent's own process group. So a terminal's job-control
+/// `Ctrl-C` — which signals the whole foreground process group —
 /// reaches both. A `kill <pid>` naming this process's own pid
-/// specifically does not: confirmed live, `SIGTERM` sent only to the
-/// parent's pid left the respawned child running, orphaned. Since an
-/// MCP client shutting `polarize` down typically does exactly that
-/// (`kill(child_pid, SIGTERM)`, not a process-group-wide signal), the
-/// parent must forward what it receives.
+/// specifically does not. Confirmed live: `SIGTERM` sent only to the
+/// parent's pid left the respawned child running, orphaned. An MCP
+/// client shutting `polarize` down typically does exactly that. It
+/// sends `kill(child_pid, SIGTERM)`, not a process-group-wide signal.
+/// So the parent must forward what it receives.
 ///
 /// `signum: i32, handler: SigHandler` are `<signal.h>`'s
-/// `signal(int, void (*)(int))`; on Darwin this installs a BSD
-/// "reliable" handler that stays installed across deliveries (unlike
-/// old SysV `signal()` semantics), so no re-arming is needed after
+/// `signal(int, void (*)(int))`. On Darwin this installs a BSD
+/// "reliable" handler. It stays installed across deliveries, unlike
+/// old SysV `signal()` semantics. So no re-arming is needed after
 /// each call.
 type SigHandler = extern "C" fn(i32);
 
@@ -81,7 +82,7 @@ unsafe extern "C" {
     fn signal(signum: i32, handler: SigHandler) -> SigHandler;
     fn kill(pid: i32, sig: i32) -> i32;
     /// Darwin's per-thread `errno` accessor. There is no `errno`
-    /// global symbol to `extern` directly on Darwin — every libc call
+    /// global symbol to `extern` directly on Darwin. Every libc call
     /// site that needs it calls this instead.
     fn __error() -> *mut i32;
 }
@@ -114,12 +115,13 @@ extern "C" fn forward_signal_to_child(signal_number: i32) {
     }
 }
 
-/// Installs [`forward_signal_to_child`] for the signals a process
-/// manager or an interactive shell most plausibly sends `polarize` to
-/// ask it to stop: `SIGHUP`, `SIGINT`, `SIGQUIT`, `SIGTERM`. Must run
-/// before [`CHILD_PID`] is set, so no delivered signal is silently
-/// dropped between "handler installed" and "child pid known" — before
-/// the pid is known, this handler is a safe no-op (`child == 0`).
+/// Installs [`forward_signal_to_child`] for the signals that ask
+/// `polarize` to stop. A process manager or an interactive shell most
+/// plausibly sends these: `SIGHUP`, `SIGINT`, `SIGQUIT`, `SIGTERM`.
+/// Must run before [`CHILD_PID`] is set. That way no delivered signal
+/// is silently dropped, between "handler installed" and "child pid
+/// known". Before the pid is known, this handler is a safe no-op —
+/// `child == 0`.
 fn install_signal_forwarding() {
     for signal_number in [SIGHUP, SIGINT, SIGQUIT, SIGTERM] {
         // SAFETY: `forward_signal_to_child` is `extern "C" fn(i32)`,
@@ -135,15 +137,15 @@ type ResponsibilityGetPidResponsibleForPidFn = unsafe extern "C" fn(pid: i32) ->
 
 /// Resolves `responsibility_get_pid_responsible_for_pid` once and
 /// caches the result. `None` means the name did not resolve on this
-/// macOS version — every caller must treat that as "cannot determine
+/// macOS version. Every caller must treat that as "cannot determine
 /// responsibility here," not as a bug.
 ///
 /// Not `responsibility_get_responsible_for_pid` — a similarly named
-/// sibling in the same private family
-/// (`/usr/lib/system/libquarantine.tbd` lists both, alongside
-/// `responsibility_get_uniqueid_responsible_for_pid`). That one does
-/// not return a bare `pid_t`; calling it as `pid_t -> pid_t` crashed
-/// with `SIGBUS` in this crate's own tests. `..._get_pid_..._for_pid`
+/// sibling in the same private family.
+/// `/usr/lib/system/libquarantine.tbd` lists both, alongside
+/// `responsibility_get_uniqueid_responsible_for_pid`. That one does
+/// not return a bare `pid_t`. Calling it as `pid_t -> pid_t` crashed
+/// with `SIGBUS`, in this crate's own tests. `..._get_pid_..._for_pid`
 /// is the variant whose name — and observed behavior once called
 /// correctly below — matches "answer a pid with a pid."
 fn responsible_pid_fn() -> Option<ResponsibilityGetPidResponsibleForPidFn> {
@@ -182,8 +184,8 @@ pub fn is_self_responsible() -> Option<bool> {
 }
 
 /// One line summarizing this process's own responsible-process state,
-/// for `apps/polarize`'s startup log — the observable half of PINV-52,
-/// checkable with zero TCC grants. Mirrors
+/// for `apps/polarize`'s startup log. This is the observable half of
+/// PINV-52, checkable with zero TCC grants. Mirrors
 /// [`crate::skylight_ffi::SkylightSymbols::resolution_summary`]'s role
 /// for PINV-46.
 pub fn responsibility_summary() -> String {
@@ -198,9 +200,9 @@ pub fn responsibility_summary() -> String {
 }
 
 /// Whether this process's environment already carries
-/// [`RESPAWN_SENTINEL_VAR`] — the pure half of [`already_respawned`],
-/// factored out so it is unit-testable without touching real process
-/// environment.
+/// [`RESPAWN_SENTINEL_VAR`]. This is the pure half of
+/// [`already_respawned`], factored out so it is unit-testable. It
+/// avoids touching real process environment.
 fn sentinel_present(value: Option<&std::ffi::OsStr>) -> bool {
     value.is_some()
 }
@@ -219,8 +221,8 @@ pub fn already_respawned() -> bool {
 ///   resolved; a respawn with no disclaim mechanism cannot help.
 /// - `self_responsible` — this process's own
 ///   [`is_self_responsible`] answer. `None` means the checking symbol
-///   itself did not resolve; per PINV-46's degrade pattern, an
-///   unknown answer never forces a respawn — only a confirmed
+///   itself did not resolve. Per PINV-46's degrade pattern, an
+///   unknown answer never forces a respawn. Only a confirmed
 ///   `Some(false)` does.
 fn decide_respawn(
     sentinel_present: bool,
@@ -265,11 +267,11 @@ where
 }
 
 /// Builds the null-terminated `argv` this process's disclaimed
-/// respawn passes to its own executable: the executable path itself,
-/// followed by every argument this process was started with.
+/// respawn passes to its own executable. That is the executable path
+/// itself, followed by every argument this process was started with.
 ///
-/// Every pointer here borrows from `exe`/`args`, which the caller must
-/// keep alive for as long as the returned `Vec` is used.
+/// Every pointer here borrows from `exe`/`args`. The caller must keep
+/// them alive, for as long as the returned `Vec` is used.
 fn build_respawn_argv(exe: &CString, args: &[CString]) -> Vec<*mut c_char> {
     let mut argv: Vec<*mut c_char> = Vec::with_capacity(args.len() + 2);
     argv.push(exe.as_ptr().cast_mut());
@@ -282,9 +284,9 @@ fn build_respawn_argv(exe: &CString, args: &[CString]) -> Vec<*mut c_char> {
 /// process can pass to [`std::process::exit`].
 ///
 /// A normal exit reports the child's own exit code (`WEXITSTATUS`). A
-/// signal-killed child reports 128 + the signal number
-/// (`WIFSIGNALED`/`WTERMSIG`), the same convention every POSIX shell
-/// uses for `$?` after a signal.
+/// signal-killed child reports 128 + the signal number —
+/// `WIFSIGNALED`/`WTERMSIG`. That is the same convention every POSIX
+/// shell uses for `$?` after a signal.
 fn exit_code_from_wait_status(status: i32) -> i32 {
     let signal = status & 0x7f;
     if signal == 0 {
@@ -298,8 +300,8 @@ fn exit_code_from_wait_status(status: i32) -> i32 {
 ///
 /// Retries on `EINTR`: [`install_signal_forwarding`]'s own handler
 /// runs while this call blocks, and can interrupt it. `EINTR` there
-/// means "a signal was forwarded," not "the child is gone" — the
-/// child is still live, so this loops back into `waitpid` rather than
+/// means "a signal was forwarded," not "the child is gone." The child
+/// is still live. So this loops back into `waitpid`, rather than
 /// reporting a spurious error.
 ///
 /// # Safety
@@ -338,21 +340,22 @@ unsafe fn wait_for_child_exit_code(pid: i32) -> Result<i32, String> {
 /// The child inherits this process's stdin/stdout/stderr unchanged —
 /// no `posix_spawn_file_actions` redirect — so an MCP stdio transport
 /// keeps working through it untouched. This process then blocks on
-/// the child and, on success, exits with its exit status: it never
+/// the child. On success, it exits with its exit status — it never
 /// returns in that case. It returns `Err` only when the respawn could
-/// not even be set up (no child was ever created); the caller then
-/// keeps running the server in this process instead, exactly as if no
-/// respawn had been attempted.
+/// not even be set up. That means no child was ever created. The
+/// caller then keeps running the server in this process instead. That
+/// is exactly as if no respawn had been attempted.
 ///
 /// Marks [`RESPAWN_SENTINEL_VAR`] on this process's own environment
-/// first, via [`std::env::set_var`], so the respawned child's own
-/// [`should_respawn_disclaimed`] check sees it and does not respawn
-/// again. Per that function's own safety contract, this must run
-/// before any other thread starts — see this module's own doc comment.
+/// first, via [`std::env::set_var`]. The respawned child's own
+/// [`should_respawn_disclaimed`] check then sees it. That way, it does
+/// not respawn again. Per that function's own safety contract, this
+/// must run before any other thread starts — see this module's own
+/// doc comment.
 ///
-/// Installs [`install_signal_forwarding`] before spawning, and records
-/// the child's pid for it once the child exists — a live session
-/// confirmed this is not optional: `SIGTERM` sent only to this
+/// Installs [`install_signal_forwarding`] before spawning. It records
+/// the child's pid for it, once the child exists. A live session
+/// confirmed this is not optional. `SIGTERM` sent only to this
 /// process's own pid otherwise leaves the respawned child running,
 /// orphaned. See [`SigHandler`]'s own doc comment.
 pub fn respawn_self_disclaimed() -> Result<(), String> {
@@ -405,13 +408,13 @@ mod tests {
     use super::*;
 
     /// `responsibility_get_pid_responsible_for_pid` ships on every
-    /// real macOS install this crate targets — confirmed live against
-    /// this session's own dev machine, listed in
+    /// real macOS install this crate targets. Confirmed live, against
+    /// this session's own dev machine: it is listed in
     /// `/usr/lib/system/libquarantine.tbd`'s exported symbols. This
     /// needs no display and no TCC grant, unlike everything else this
-    /// crate touches, so it runs for real in CI — the same reasoning
-    /// `disclaimed_spawn`'s and `skylight_ffi`'s own resolution tests
-    /// rely on.
+    /// crate touches. So it runs for real in CI. `disclaimed_spawn`'s
+    /// and `skylight_ffi`'s own resolution tests rely on the same
+    /// reasoning.
     #[test]
     fn responsible_pid_fn_resolves_on_a_real_macos_install() {
         assert!(

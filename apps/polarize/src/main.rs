@@ -58,9 +58,9 @@ fn log_skylight_symbol_resolution() {
     }
 }
 
-/// Logs this process's own TCC "responsible process" state, so PINV-52
-/// is observable without a debugger — the same role
-/// `log_skylight_symbol_resolution` plays for PINV-46.
+/// Logs this process's own TCC "responsible process" state. This
+/// makes PINV-52 observable without a debugger. It plays the same
+/// role `log_skylight_symbol_resolution` plays for PINV-46.
 fn log_responsibility_state() {
     tracing::info!(
         state = %polarize_macos::self_responsibility::responsibility_summary(),
@@ -69,9 +69,9 @@ fn log_responsibility_state() {
 }
 
 /// Logs whether this process's own code signature can see the shared
-/// App Group container, so PINV-52's still-open question about
-/// `polarize`'s own entitlements is observable without a debugger —
-/// the same role `log_responsibility_state` plays for the
+/// App Group container. This makes PINV-52's still-open question
+/// about `polarize`'s own entitlements observable without a debugger.
+/// It plays the same role `log_responsibility_state` plays for the
 /// responsible-process question.
 fn log_app_group_state() {
     tracing::info!(
@@ -82,15 +82,16 @@ fn log_app_group_state() {
 
 /// Respawns this process disclaimed when
 /// [`polarize_macos::self_responsibility::should_respawn_disclaimed`]
-/// says it is warranted, so `polarize` becomes its own TCC-responsible
-/// process instead of inheriting whatever launched it (PINV-52).
+/// says it is warranted. So `polarize` becomes its own TCC-responsible
+/// process, instead of inheriting whatever launched it (PINV-52).
 ///
-/// A successful respawn never returns: the respawned child inherits
-/// this process's stdio, and this process blocks on it, then exits
-/// with its exit status. This only returns when no respawn was
-/// warranted, or the respawn's own setup failed before a child ever
-/// existed — the caller then keeps running the MCP server in this
-/// process, exactly as if no respawn had been attempted.
+/// A successful respawn never returns. The respawned child inherits
+/// this process's stdio. This process blocks on it, then exits with
+/// its exit status. This only returns when no respawn was warranted.
+/// It also returns when the respawn's own setup failed, before a
+/// child ever existed. The caller then keeps running the MCP server
+/// in this process. That is exactly as if no respawn had been
+/// attempted.
 fn respawn_disclaimed_if_warranted() {
     if !polarize_macos::self_responsibility::should_respawn_disclaimed() {
         return;

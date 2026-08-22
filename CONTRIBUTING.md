@@ -26,17 +26,17 @@ It means a link-arg regressed, not that you need a machine-specific
 workaround.
 
 Use `just build` instead of `cargo build --workspace` day to day. It
-re-signs the binary with a stable local identity afterward, and
-assembles `target/debug/Polarize.app` — a real bundle around that same
-binary, needed for Automation's own identity (PINV-52 in
+re-signs the binary with a stable local identity afterward. It also
+assembles `dist/Polarize.app` — a real bundle around that same binary.
+This is needed for Automation's own identity (PINV-52 in
 `docs/INVARIANTS.md`). `just verify-bundle` checks the bundle's
-structure and signature. Grant Accessibility and Screen Recording once
-with `./target/debug/polarize --request-permissions`; grant Automation
-for a given target app through the bundle instead —
-`./target/debug/Polarize.app/Contents/MacOS/polarize --request-permissions <App Name>`.
-See README's "Keeping TCC permission grants across rebuilds" and
-"Automation permission and the app bundle" sections for the full
-one-time setup.
+structure and signature. Grant Accessibility and Screen Recording
+once, with `./target/debug/polarize --request-permissions`. Grant
+Automation for a given target app through the bundle instead:
+`./dist/Polarize.app/Contents/MacOS/polarize --request-permissions <App Name>`.
+See README's "Keeping TCC permission grants across rebuilds" section.
+See its "Automation permission and the app bundle" section too.
+Together they cover the full one-time setup.
 
 This local self-signed certificate is a dev-only analog of a real
 problem released binaries also have. See

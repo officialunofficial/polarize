@@ -1232,12 +1232,13 @@ to `osascript`'s own disclaimed spawn. A real `.app` bundle for
 pass, is the one remaining path research turned up for `polarize` to
 hold a grant under its own name, independent of how it was launched.
 
-**Follow-up: PINV-52.** A later pass adds that bundle
-(`just bundle-app`) and a disclaimed self-respawn at server startup —
-the two remaining mechanisms this section's research turned up. See
-PINV-52 for what they change, what got live-verified this time (the
-self-respawn's own effect on responsible-process identity), and what
-is still unverified about TCC's actual Automation grant.
+**Follow-up: PINV-52.** A later pass adds that bundle, via
+`just bundle-app`. It also adds a disclaimed self-respawn, at server
+startup. These are the two remaining mechanisms this section's
+research turned up. See PINV-52 for what they change. It also covers
+what got live-verified this time: the self-respawn's own effect on
+responsible-process identity. And it covers what is still unverified:
+TCC's actual Automation grant.
 
 ### PINV-45: a `describe` walk stops at a total node budget, not only a depth limit
 
@@ -1538,11 +1539,12 @@ Automation pane, embedded `Info.plist` or not. TCC's
 "responsible-process" climb looks past this fix entirely when
 `polarize` is not itself the process a human directly launched.
 
-**Follow-up: PINV-52.** A real bundle directory, not just an embedded
-`__TEXT,__info_plist` section, is what a `.app`'s own identity looks
-like to LaunchServices and System Settings alike. See PINV-52 for the
-bundle a later pass adds, and the self-respawn that pairs with it to
-make `polarize` its own responsible process.
+**Follow-up: PINV-52.** A real bundle directory is what a `.app`'s own
+identity looks like. LaunchServices and System Settings both read it
+that way. An embedded `__TEXT,__info_plist` section alone is not the
+same thing. See PINV-52 for the bundle a later pass adds. See it too
+for the self-respawn that pairs with it. Together they make `polarize`
+its own responsible process.
 
 ### PINV-51: the Automation bootstrap disclaims its spawned child's TCC responsibility
 
@@ -1585,186 +1587,194 @@ Which of the four sends that dialog actually belonged to could not be
 isolated from the available evidence. See the enforcement checklist
 entry below, and PINV-44's "Correction" section.
 
-**Follow-up, root-caused with a direct `log stream` capture: the
-disclaim redirects the grant, but to the wrong process — `osascript`
-itself, never `polarize`.** A later session went past polling
-screenshots (this section's own earlier finding) and read `tccd`'s
-actual decisions directly: macOS's `log stream` tool, filtered to the
-TCC subsystem, run alongside a hand-built reproduction of this
-function's exact `posix_spawnp`-plus-disclaim call (Python's `ctypes`
+**Follow-up: the disclaim redirects the grant to the wrong process.**
+A direct `log stream` capture root-caused this. It lands on
+`osascript` itself, never on `polarize`.
+
+A later session went past polling screenshots — this section's own
+earlier method. It read `tccd`'s actual decisions directly instead.
+macOS's `log stream` tool did this, filtered to the TCC subsystem. It
+ran alongside a hand-built reproduction of this function's exact
+`posix_spawnp`-plus-disclaim call. Python's `ctypes` made the call,
 against the same `dlsym`ed `responsibility_spawnattrs_setdisclaim`
-symbol), against real targets, both Apple's own apps and third-party
-ones (Calendar, Notes, Spotify, Reminders).
+symbol. The targets were real: both Apple's own apps and third-party
+ones — Calendar, Notes, Spotify, Reminders.
 
 Two distinct behaviors emerged, and separating them is what resolves
 the mystery:
 
-- A trivial identity query (`get its name`, `get version`) never
-  creates a `kTCCServiceAppleEvents` record at all, for any target,
-  disclaimed or not. `osascript`'s own process trace (also visible in
-  the same log stream) shows it exiting within tens of milliseconds,
-  never connecting to the Apple Events daemon. These verbs are
-  apparently answered without a real cross-process send — this
-  section's own four earlier attempts, and this invariant's own
-  bootstrap script (`tell application "<target>" to get its name`),
-  all used exactly this kind of query. They were never capable of
-  raising a consent dialog, because nothing about them ever reaches
+- A trivial identity query — `get its name`, `get version` — never
+  creates a `kTCCServiceAppleEvents` record. This holds for any
+  target, disclaimed or not. `osascript`'s own process trace shows why
+  — also visible in the same log stream. It exits within tens of
+  milliseconds. It never connects to the Apple Events daemon at all.
+  These verbs are apparently answered without a real cross-process
+  send. This section's own four earlier attempts used exactly this
+  kind of query. So does this invariant's own bootstrap script —
+  `tell application "<target>" to get its name`. They were never
+  capable of raising a consent dialog. Nothing about them ever reaches
   the code path that would raise one.
-- A query that actually touches the target's real state (a list count,
-  a note count) does create a real record — visible as `tccd`
-  publishing a `kTCCServiceAppleEvents` creation event. Its identity
-  depends on exactly what this invariant's own text already predicts,
-  confirmed directly
-  rather than inferred: a **plain** (non-disclaimed) send recorded
-  `identifier_type=Bundle ID, identifier=com.mitchellh.ghostty` — the
-  launching terminal, exactly PINV-44's original finding. The
-  **disclaimed** send — this function's own mechanism — recorded
-  `identifier_type=Path, identifier=/usr/bin/osascript`. Not Ghostty.
-  Not `polarize`. The disclaimed *child itself*, by raw filesystem
-  path, because a bare, bundle-less `/usr/bin/osascript` has nothing
-  else for TCC to key its own record to (the same fallback PINV-50
-  documents for a bundle-less `polarize`).
+- A query that actually touches the target's real state does create a
+  real record. A list count, or a note count, both qualify. `tccd`
+  publishing a `kTCCServiceAppleEvents` creation event makes this
+  visible. Its identity matches exactly what this invariant's own text
+  already predicted. This is now confirmed directly, not just
+  inferred. A **plain**, non-disclaimed send recorded the launching
+  terminal's own bundle ID: `com.mitchellh.ghostty`. That exactly
+  matches PINV-44's original finding. The **disclaimed** send — this
+  function's own mechanism — recorded a path instead:
+  `/usr/bin/osascript`. Not Ghostty. Not `polarize`. The record names
+  the disclaimed *child itself*, by raw filesystem path. A bare,
+  bundle-less `/usr/bin/osascript` has nothing else for TCC to key a
+  record to. PINV-50 documents the same fallback, for a bundle-less
+  `polarize`.
 
-Neither case raised a visible consent dialog for the new record —
-still unexplained, and orthogonal to the question above, which this
-now answers directly: **this function disclaims the wrong process.**
-It detaches `osascript` from `polarize`, making `osascript` its own
-responsible party — never `polarize`. Even a fully working disclaim
-was always going to produce a grant keyed to `/usr/bin/osascript`, a
-path shared by every other script on the machine that also disclaims
-around it, not a grant `polarize` could ever hold under its own name —
-`osascript` has no bundle for a "Polarize" row to exist under in the
-first place.
+Neither case raised a visible consent dialog for the new record. That
+is still unexplained. It is also orthogonal to the real question here,
+which this now answers directly. **This function disclaims the wrong
+process.** It detaches `osascript` from `polarize`, making `osascript`
+its own responsible party — never `polarize`. Even a fully working
+disclaim was always going to produce a grant keyed to
+`/usr/bin/osascript`. That path is shared by every other script on the
+machine that also disclaims around it. `polarize` could never hold a
+grant under its own name this way. `osascript` has no bundle, so no
+"Polarize" row could ever exist under it.
 
-**The fix this points to is the one PINV-52 already describes, and the
+**The fix this points to is the one PINV-52 already describes.** **The
 missing link is now directly confirmed, not just hypothesized.** A
-second two-hop reproduction — disclaim a shell (mimicking `polarize`
-post-self-respawn), have that shell plainly spawn `osascript` (mimicking
-`MacAppleScriptRunner::run_script`'s real, undisclaimed
-`Command::new("osascript")`) — sent a real, state-touching query against
-a target neither process had touched before. The resulting
-`kTCCServiceAppleEvents` creation event recorded the disclaimed shell's
-own path (`/bin/sh`) as the identity — not `osascript`'s, and not
-whatever launched the shell. A plain child's send does inherit
-responsibility from an already-self-responsible parent.
+second two-hop reproduction tested this. It disclaimed a shell,
+mimicking `polarize` post-self-respawn. That shell then plainly
+spawned `osascript` — mimicking `MacAppleScriptRunner::run_script`'s
+real, undisclaimed `Command::new("osascript")`. It sent a real,
+state-touching query, against a target neither process had touched
+before. The resulting `kTCCServiceAppleEvents` creation event recorded
+the disclaimed shell's own path — `/bin/sh` — as the identity. Not
+`osascript`'s. Not whatever launched the shell. A plain child's send
+does inherit responsibility from an already-self-responsible parent.
 
-This closes the chain for `polarize` itself: once PINV-52's disclaimed
-self-respawn makes `polarize` its own responsible process, a plain
-`osascript` child it spawns — exactly `run_applescript`'s real path,
-no disclaim needed there — should inherit `polarize`'s own bundle
-identity (`com.officialunofficial.polarize`), the same way this
-session's shell's identity carried down to its own plain child. What
-remains unverified is only the last, System-Settings-visible step:
-whether that inherited identity is what finally shows a `polarize` row
-with a human's real consent grant against it — still a live session
-with a real dialog, not reproducible from this evidence alone.
+This closes the chain for `polarize` itself. PINV-52's disclaimed
+self-respawn makes `polarize` its own responsible process. A plain
+`osascript` child it spawns should then inherit `polarize`'s own
+bundle identity. That child is exactly `run_applescript`'s real path —
+no disclaim needed there. The identity here is
+`com.officialunofficial.polarize`. This session's shell carried its
+own identity down to its own plain child, the same way.
+
+What remains unverified is only the last, System-Settings-visible
+step. Does that inherited identity finally show a `polarize` row? Does
+a human's real consent grant key to it? That still needs a live
+session, with a real dialog. This evidence alone cannot reproduce it.
 
 ### PINV-52: a real bundle plus a disclaimed self-respawn are what let `polarize` hold its own TCC identity, and the respawn must forward signals to the child it creates
 
-- Always: `just bundle-app` assembles `target/debug/Polarize.app`
-  (`Contents/Info.plist`, `Contents/MacOS/polarize`) from the signed
-  `polarize` binary and `apps/polarize/bundle/Info.plist.in`. The
-  template sets `CFBundleIdentifier com.officialunofficial.polarize`,
+- Always: `just bundle-app` assembles `dist/Polarize.app` —
+  `Contents/Info.plist`, `Contents/MacOS/polarize`. It builds this
+  from the signed `polarize` binary and
+  `apps/polarize/bundle/Info.plist.in`. The template sets
+  `CFBundleIdentifier com.officialunofficial.polarize`,
   `CFBundleExecutable polarize`, `CFBundlePackageType APPL`, and
   `LSUIElement true` (no Dock icon on a LaunchServices launch).
   `apps/polarize/build.rs` renders the same template into the
-  `__TEXT,__info_plist` section PINV-50 already covers, so the two
-  plists cannot drift apart — only `__VERSION__` differs per build.
-  Separately, `polarize_macos::self_responsibility::
-  should_respawn_disclaimed` runs at MCP server startup (never on the
-  `--request-permissions` path) and decides whether this process
-  should re-exec itself through a disclaimed `posix_spawnp` call
-  (`self_responsibility::respawn_self_disclaimed`). It respawns only
-  when three things all hold: this process has not already gone
-  through one respawn (an environment-variable sentinel), the private
-  `responsibility_spawnattrs_setdisclaim` symbol resolves (PINV-51's
-  own symbol), and the private
+  `__TEXT,__info_plist` section PINV-50 already covers. So the two
+  plists cannot drift apart. Only `__VERSION__` differs per build.
+  Separately, `self_responsibility::should_respawn_disclaimed` runs at
+  MCP server startup. It never runs on the `--request-permissions`
+  path. It decides whether this process should re-exec itself, through
+  a disclaimed `posix_spawnp` call. That call is
+  `self_responsibility::respawn_self_disclaimed`. It respawns only
+  when three things all hold. First: this process has not already
+  gone through one respawn — an environment-variable sentinel confirms
+  this. Second: the private `responsibility_spawnattrs_setdisclaim`
+  symbol resolves — PINV-51's own symbol. Third: the private
   `responsibility_get_pid_responsible_for_pid` symbol confirms this
   process is not already its own responsible process. Any missing
-  symbol, or an already-self-responsible process, skips the respawn —
-  `polarize` then just runs normally in the current process, per
-  PINV-46's degrade pattern. The respawned child inherits this
+  symbol, or an already-self-responsible process, skips the respawn.
+  `polarize` then just runs normally in the current process. This
+  follows PINV-46's degrade pattern. The respawned child inherits this
   process's stdin/stdout/stderr unchanged, so the MCP stdio transport
-  keeps working through it. The parent installs a `SIGHUP`/`SIGINT`/
-  `SIGQUIT`/`SIGTERM` handler before spawning, forwards whichever of
-  those it receives to the child's pid, then blocks on the child and
-  exits with its exit status.
-- Because: research found a real bundle alone does not change which
-  process TCC treats as responsible for an Apple Event send — see
-  PINV-44's "Correction" section. TCC assigns responsibility at spawn,
-  and a plain `fork`/`exec` inherits it from the parent, bundle
-  directory or not. The private disclaim attribute is the one
-  mechanism available to `polarize`'s MCP stdio use case (spawned
-  directly by its client, needing its stdio pipes preserved) that
-  breaks that inheritance without also breaking stdio. Forwarding
-  signals is not optional, either: a live session confirmed that a
-  `posix_spawnp`ed child shares its parent's process group, so a
-  terminal's own `Ctrl-C` (which signals the whole foreground group)
-  reaches both without any extra code — but a `kill <pid>` naming only
-  the parent's own pid does not, and an MCP client shutting `polarize`
-  down typically does exactly that. Without forwarding, that same live
+  keeps working through it. The parent installs a
+  `SIGHUP`/`SIGINT`/`SIGQUIT`/`SIGTERM` handler before spawning. It
+  forwards whichever of those it receives, to the child's pid. Then it
+  blocks on the child, and exits with its exit status.
+- Because: research found a real bundle alone does not change TCC's
+  responsible-process choice. See PINV-44's "Correction" section for
+  that finding. TCC assigns responsibility at spawn, and a plain
+  `fork`/`exec` inherits it from the parent, bundle directory or not.
+  The private disclaim attribute is the one mechanism that breaks this
+  inheritance. It works without also breaking stdio. That matters for
+  `polarize`'s MCP stdio use case: its client spawns it directly, and
+  its stdio pipes must survive. Forwarding signals is not optional,
+  either. A live session confirmed why: a `posix_spawnp`ed child
+  shares its parent's process group. So a terminal's own `Ctrl-C` —
+  which signals the whole foreground group — reaches both, without any
+  extra code. But a `kill <pid>` naming only the parent's own pid does
+  not reach the child. An MCP client shutting `polarize` down
+  typically does exactly that. Without forwarding, that same live
   session showed the respawned child survives its parent's `SIGTERM`,
   orphaned and still running.
 - If violated: without the bundle, `polarize` has nothing but its
-  content-hash-derived, rebuild-unstable identity to hold any grant
-  against, and no `CFBundleIdentifier` for System Settings to show a
-  row for. Without the self-respawn, a directly-launched `polarize`
-  keeps inheriting its launching shell's or MCP client's TCC identity,
-  exactly as PINV-44's "Correction" section found. Without signal
-  forwarding, every `kill <polarize-pid>` a process manager or MCP
-  client sends leaves an orphaned `polarize` server running in the
-  background, still holding open whatever screen/AX/input access it
-  had — confirmed live before this fix, reproducibly.
+  content-hash-derived, rebuild-unstable identity. It has nothing to
+  hold any grant against. It has no `CFBundleIdentifier` for System
+  Settings to show a row for. Without the self-respawn, a
+  directly-launched `polarize` keeps inheriting its launching shell's
+  or MCP client's TCC identity. That exactly matches what PINV-44's
+  "Correction" section found. Without signal forwarding, every
+  `kill <polarize-pid>` a process manager or MCP client sends leaves
+  an orphaned `polarize` server. It keeps running in the background. It
+  still holds open whatever screen, AX, or input access it had. This
+  was confirmed live before this fix, reproducibly.
 
 **Live-verified, and more conclusively than PINV-44/50/51's own
 "unverified" findings.** This session directly observed the
 self-respawn change which process TCC treats as responsible for
-`polarize`, with no TCC grant needed to see it:
+`polarize`. No TCC grant was needed to see it.
 `self_responsibility::responsibility_summary()`'s startup log line
-read `responsible_pid=1333` (this session's own terminal, `Ghostty.app`
-— matching PINV-44's "Correction" section exactly) before the respawn,
-and `self-responsible` after it, on every run tried. The signal-forward
-fix was also confirmed live, before and after: `kill -TERM` sent only
-to the parent's pid left the respawned child running under the
-original code, and terminated both processes cleanly once the fix
-above was added. `just verify-bundle` passed live in full, including
+read `responsible_pid=1333` before the respawn. That pid is this
+session's own terminal, `Ghostty.app` — matching PINV-44's
+"Correction" section exactly. The same line read `self-responsible`
+after the respawn, on every run tried. The signal-forward fix was also
+confirmed live, before and after. `kill -TERM`, sent only to the
+parent's pid, left the respawned child running under the original
+code. Once the fix above was added, the same signal terminated both
+processes cleanly. `just verify-bundle` passed live in full, including
 `open -Ra` accepting the assembled bundle with no launch.
 
 **Not reproduced in this session, and worth re-checking on the exact
 macOS version PINV-44 was recorded against:** `open -Ra` against the
-*bare* `polarize` binary — no bundle at all — also returned success in
-this session's environment (macOS 27.0, a beta build), not PINV-44's
-documented `-600` (`kLSApplicationNotFoundErr`). Whether LaunchServices
-now accepts bare executables generally on newer macOS, or this
-particular check does not reproduce the exact failure mode PINV-44 hit,
-is unresolved. This does not weaken the case for a real bundle — a
-stable, inspectable `CFBundleIdentifier` is still what System Settings'
-Automation pane keys a row to, bare binary or not — but it means
-`just verify-bundle`'s `open -Ra` step should be read as "the bundle is
-well-formed and LaunchServices-acceptable," not as a guaranteed
-regression check against PINV-44's specific `-600` finding on every
-macOS version.
+*bare* `polarize` binary — no bundle at all — also returned success.
+This session's environment is macOS 27.0, a beta build. That is not
+PINV-44's documented `-600` (`kLSApplicationNotFoundErr`). Two
+explanations are possible, and this is unresolved between them. Maybe
+LaunchServices now accepts bare executables generally, on newer macOS.
+Or maybe this particular check just does not reproduce the exact
+failure mode PINV-44 hit. This does not weaken the case for a real
+bundle. A stable, inspectable `CFBundleIdentifier` is still what
+System Settings' Automation pane keys a row to, bare binary or not. So
+read `just verify-bundle`'s `open -Ra` step this way: it shows the
+bundle is well-formed and LaunchServices-acceptable. It is not a
+guaranteed regression check against PINV-44's specific `-600` finding,
+on every macOS version.
 
-**Still not automatable, and not resolved by this pass:** whether
-System Settings' Automation pane shows `polarize` as its own row after
-this change, and whether a human's consent grant then keys to that
-row, needs a live macOS session with a real approval — the same live
-check PINV-44/50/51 already required and could not fully resolve. The
+**Still not automatable, and not resolved by this pass:** does System
+Settings' Automation pane show `polarize` as its own row, after this
+change? Does a human's consent grant then key to that row? Both need a
+live macOS session, with a real approval. PINV-44/50/51 already
+required this same live check, and could not fully resolve it. The
 respawn's own effect on responsible-process identity is now directly
-observable and confirmed, as above; that is necessary evidence this
+observable and confirmed, as above. That is necessary evidence this
 change works as designed. It is not sufficient evidence that TCC's
-Automation grant follows it into System Settings — only a live consent
+Automation grant follows it into System Settings. Only a live consent
 session can show that.
 
-A later session tried to run that exact check and could not complete
-it: three fresh targets never showed a consent dialog at all, so there
-was no grant to observe attributing anywhere. See PINV-51's own
-follow-up note for the reproducible negative result — this is a gap in
-the pre-existing bootstrap-send mechanism PINV-51 covers, not evidence
-against this invariant's own bundle/respawn claims, which were verified
-independently (PINV-53's App Group check exercises the same code
-signature this invariant's respawn produces, and did resolve correctly
-under it).
+A later session tried to run that exact check. It could not complete:
+three fresh targets never showed a consent dialog at all. So there was
+no grant to observe attributing anywhere. See PINV-51's own follow-up
+note for the reproducible negative result. This is a gap in the
+pre-existing bootstrap-send mechanism PINV-51 covers. It is not
+evidence against this invariant's own bundle and respawn claims. Those
+were verified independently. PINV-53's App Group check exercises the
+same code signature this invariant's respawn produces. It did resolve
+correctly under it.
 
 Whether `lsregister`-registering the bundle is required for TCC
 attribution, beyond a well-formed bundle sitting on disk, is also
@@ -1775,17 +1785,18 @@ necessary.
 `apps/polarize/polarize.entitlements` now also carries
 `com.apple.security.application-groups` (`N8R89M8725.fun.uno.polarize`),
 matching the same entitlement added on the desktop host app's own
-side. Neither app's code reads anything from this group yet — it
-exists so a sandboxed host app and an embedded, unsandboxed
-`Polarize.app` can later share state (for example, a Keychain or
-file-based handoff) under one Team ID instead of each depending on the
-other's sandbox container. Team `N8R89M8725` is confirmed correct:
-Xcode's own Signing & Capabilities pane, inspected live, shows the
-desktop host app's Team as "Official Unofficial, Inc." against that
-same ID, with `N8R89M8725.fun.uno.polarize` already listed under its
+side. Neither app's code reads anything from this group yet. It
+exists so a sandboxed host app and an embedded `Polarize.app` can
+later share state. A Keychain or file-based handoff are two examples.
+This works under one Team ID, instead of each depending on the other's
+sandbox container. Team `N8R89M8725` is confirmed correct. Xcode's own
+Signing & Capabilities pane, inspected live, shows why. The desktop
+host app's Team reads "Official Unofficial, Inc." against that same
+ID. `N8R89M8725.fun.uno.polarize` is already listed there, under its
 App Groups capability. With "Automatically manage signing" on, Xcode
-registers that group in the Apple Developer portal itself on its next
-successful signing resolution — no manual portal step on that side.
+registers that group in the Apple Developer portal itself. It does
+this on its next successful signing resolution. No manual portal step
+is needed on that side.
 
 **Live-verified: the entitlement resolves for `polarize`'s own signing
 story too.** See PINV-53 for the check, the code that makes it
@@ -1793,41 +1804,45 @@ observable at startup, and its confirmed result.
 
 ### PINV-53: the shared App Group container resolves for `polarize`'s own signing story, confirmed live under a real Developer ID certificate
 
-- Always: `polarize_macos::app_group::container_summary`, logged at
-  MCP server startup right after PINV-52's own responsibility-state
-  log line, asks `NSFileManager.defaultManager()` for the container
-  directory of `N8R89M8725.fun.uno.polarize` — the same App Group
-  string both `apps/polarize/polarize.entitlements` and the desktop
-  host app's own entitlements carry. `container_url` reports the real
-  path when the calling process's own code signature can see the
-  group; `None` when it cannot.
-- Because: PINV-52's own follow-up flagged this as unresolved — Xcode
+- Always: `polarize_macos::app_group::container_summary` asks
+  `NSFileManager.defaultManager()` for a container directory. It logs
+  this at MCP server startup, right after PINV-52's own
+  responsibility-state log line. The target group is
+  `N8R89M8725.fun.uno.polarize`. Both `apps/polarize/polarize.entitlements`
+  and the desktop host app's own entitlements carry that same string.
+  `container_url` reports the real path when the calling process's own
+  code signature can see the group; `None` when it cannot.
+- Because: PINV-52's own follow-up flagged this as unresolved. Xcode
   validates App Group access against a real, Apple-issued provisioning
-  profile, and `polarize`'s own `codesign`-only signing story has no
+  profile. `polarize`'s own `codesign`-only signing story has no
   direct equivalent to that. Whether the App Groups entitlement does
-  anything for a profile-less binary was an open question, not an
-  assumption to build on.
+  anything for a profile-less binary was an open question. It was not
+  an assumption to build on.
 - If violated: any future code that reads or writes through this
-  group silently gets `None`/a permissions error instead of a real
-  container path, with no signal at startup that the entitlement
-  never took effect.
+  group silently gets a problem. It gets `None`, or a permissions
+  error, instead of a real container path. Nothing signals at startup
+  that the entitlement never took effect.
 
 **Live-verified**, once `com.officialunofficial.polarize` was
-registered as an App ID under Team `N8R89M8725` with App Groups
-capability, matching the desktop host app's own registration (see this
-invariant's own git history for the manual portal step that unblocked
-this). `target/debug/Polarize.app`, re-signed with a real "Developer ID
-Application: Official Unofficial, Inc. (N8R89M8725)" certificate
-instead of the local `polarize-dev` one — `codesign -dv` confirmed
-`TeamIdentifier=N8R89M8725` and both entitlements present — logged a
-resolved container path under the App Group's own directory inside
-`~/Library/Group Containers/`, on every run tried, both before and
-after PINV-52's own disclaimed self-respawn (the respawned child is
-the same signed binary, so this was expected to match, and did). No
-provisioning profile was embedded in the bundle at any point
-— confirming, for this specific entitlement and this specific macOS
-session, that App Group container access on macOS does not require
-one the way iOS does.
+registered as an App ID. That registration used Team `N8R89M8725` with
+App Groups capability. It matches the desktop host app's own
+registration. See this invariant's own git history for the manual
+portal step that unblocked this.
+
+`dist/Polarize.app` was re-signed with a real "Developer ID
+Application: Official Unofficial, Inc. (N8R89M8725)" certificate. That
+replaced the local `polarize-dev` one. `codesign -dv` confirmed
+`TeamIdentifier=N8R89M8725` and both entitlements present. The bundle
+then logged a resolved container path, under the App Group's own
+directory inside `~/Library/Group Containers/`. This held on every run
+tried. It held both before and after PINV-52's own disclaimed
+self-respawn. The respawned child is the same signed binary, so this
+was expected to match — and did.
+
+No provisioning profile was embedded in the bundle at any point. This
+confirms one thing, for this specific entitlement and this specific
+macOS session. App Group container access on macOS does not require
+one, the way iOS does.
 
 ## Enforcement checklist
 
@@ -2773,49 +2788,54 @@ one the way iOS does.
   for what could and could not be isolated.
 
 - **PINV-52** — the bundle assembly and its structure are automated via
-  `just verify-bundle`: `plutil -lint` on the rendered `Info.plist`,
-  `codesign --verify --strict --deep`, an identifier check against
-  `codesign -dv`, and `open -Ra` to confirm LaunchServices accepts the
-  bundle. All four ran live in this session and passed. The
-  self-respawn's pure decision logic (`self_responsibility::
-  decide_respawn`) and its supporting seams (`build_respawn_argv`,
-  `os_args_to_cstrings`, `path_to_cstring`, `exit_code_from_wait_status`,
-  `sentinel_present`) are fully covered by automated `cargo test -p
-  polarize-macos`. `responsible_pid_for` resolving the private symbol
-  and reporting a real, plausible answer for this process's own pid
-  (this session's dev machine: the test process's own pid, correctly
-  answered by a real, non-panicking call) is also covered by a real
-  `cargo test` run — like PINV-46/PINV-51's own symbol-resolution
+  `just verify-bundle`. That runs four checks. `plutil -lint` checks
+  the rendered `Info.plist`. `codesign --verify --strict --deep`
+  checks the signature. An identifier check runs against
+  `codesign -dv`. `open -Ra` confirms LaunchServices accepts the
+  bundle. All four ran live in this session and passed.
+
+  The self-respawn's pure decision logic is fully covered too. This is
+  `self_responsibility::decide_respawn`. Its supporting seams are
+  covered as well: `build_respawn_argv`, `os_args_to_cstrings`,
+  `path_to_cstring`, `exit_code_from_wait_status`, `sentinel_present`.
+  Automated `cargo test -p polarize-macos` runs cover all of them.
+  `responsible_pid_for` is also covered, by a real `cargo test` run. It
+  resolves the private symbol. It reports a real, plausible answer for
+  this process's own pid. On this session's dev machine, that answer
+  was the test process's own pid, correctly reported by a real,
+  non-panicking call. Like PINV-46 and PINV-51's own symbol-resolution
   tests, this needs no display and no TCC grant.
 
-  Beyond the automated suite, this session live-verified the two
-  effects that need a real process tree, not just a unit test: the
-  respawn does flip this process's own responsible-process identity
-  from its launching terminal to itself (`responsible_pid=1333` →
-  `self-responsible`, `1333` being this session's own `Ghostty.app`),
-  and the signal-forwarding fix does keep `kill <pid>` against the
-  parent from orphaning the respawned child — both reproduced,
-  confirmed broken before the fix and fixed after, in this same
-  session. See this invariant's own text above for the full account,
-  including the one claim from the original plan that did **not**
-  reproduce here (PINV-44's bare-binary `-600` failure, on this
-  session's macOS 27.0 beta).
+  Beyond the automated suite, this session live-verified two effects.
+  Both need a real process tree, not just a unit test. First: the
+  respawn does flip this process's own responsible-process identity,
+  from its launching terminal to itself. The log line went from
+  `responsible_pid=1333` to `self-responsible`. That pid, `1333`, is
+  this session's own `Ghostty.app`. Second: the signal-forwarding fix
+  does keep `kill <pid>` against the parent from orphaning the
+  respawned child. Both effects were reproduced in this same session.
+  Each was confirmed broken before the fix, and fixed after.
 
-  What is **not** automated, and not resolved by any pass so far:
-  whether System Settings' Automation pane shows `polarize` as its own
-  row after this change, and whether a human's consent grant then keys
-  to that row. That needs a live macOS session with a real approval —
-  the same live check PINV-44/50/51 already required and could not
-  fully resolve.
+  See this invariant's own text above for the full account. That
+  includes the one claim from the original plan that did **not**
+  reproduce here. This is PINV-44's bare-binary `-600` failure, on
+  this session's macOS 27.0 beta.
+
+  What is **not** automated, and not resolved by any pass so far, is
+  this. Does System Settings' Automation pane show `polarize` as its
+  own row, after this change? Does a human's consent grant then key to
+  that row? That needs a live macOS session, with a real approval.
+  PINV-44/50/51 already required this same live check, and could not
+  fully resolve it.
 
 - **PINV-53** — not automated: this needs a real App ID/App Group
-  registration under a real team, which no CI runner has. Live-verified
-  in this session instead, after `com.officialunofficial.polarize` was
-  registered as an App ID with App Groups capability, matching under
-  Team `N8R89M8725`: `target/debug/Polarize.app`, signed with a real
+  registration under a real team, which no CI runner has.
+  Live-verified in this session instead. `com.officialunofficial.polarize`
+  was registered as an App ID with App Groups capability, matching
+  under Team `N8R89M8725`. `dist/Polarize.app`, signed with a real
   "Developer ID Application: Official Unofficial, Inc." certificate,
-  logged a resolved shared-container path on every run, both before
-  and after PINV-52's own disclaimed self-respawn. `app_group`'s two
-  functions are otherwise compile/link-checked only — the actual
-  `NSFileManager` call they wrap cannot run meaningfully without a
-  real, team-registered App Group behind it.
+  logged a resolved shared-container path on every run. This held both
+  before and after PINV-52's own disclaimed self-respawn. `app_group`'s
+  two functions are otherwise compile/link-checked only. The actual
+  `NSFileManager` call they wrap needs a real, team-registered App
+  Group behind it. Without one, it cannot run meaningfully.

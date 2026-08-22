@@ -37,8 +37,8 @@ use std::time::{Duration, Instant};
 /// structs whose layout this crate would need to reproduce.
 ///
 /// `pub(crate)`: [`crate::self_responsibility`]'s own disclaimed spawn
-/// (PINV-52) reuses this type and [`init_disclaimed_attr`] below,
-/// rather than duplicating the disclaim-attribute setup a second time.
+/// (PINV-52) reuses this type and [`init_disclaimed_attr`] below. That
+/// avoids duplicating the disclaim-attribute setup a second time.
 pub(crate) type PosixSpawnattrT = *mut c_void;
 type PosixFileActionsT = *mut c_void;
 
@@ -130,7 +130,7 @@ pub(crate) fn set_disclaim_fn() -> Option<SetDisclaimFn> {
 /// it when `responsibility_spawnattrs_setdisclaim` resolves.
 ///
 /// Returns a valid, non-disclaimed attr when the symbol does not
-/// resolve — a caller still spawns with it either way, just without
+/// resolve. A caller still spawns with it either way, just without
 /// retargeting the child's responsible process. The caller owns
 /// `posix_spawnattr_destroy`ing the returned attr once its `posix_spawnp`
 /// call is done with it.

@@ -1,4 +1,5 @@
 /target
+/dist
 
 # `claude mcp add` writes this with an absolute, machine-specific
 # binary path. See README's "Using it with an MCP client" section for
