@@ -1585,27 +1585,71 @@ Which of the four sends that dialog actually belonged to could not be
 isolated from the available evidence. See the enforcement checklist
 entry below, and PINV-44's "Correction" section.
 
-**Follow-up, live-verified negative result: the disclaimed send does
-not reliably raise a fresh consent dialog at all.** A later session
-tested `--request-permissions` against three targets confirmed to have
-no prior Automation grant for any requesting process (Stocks, Calendar,
-Notes — each freshly launched, given several real seconds to finish
-launching before the send, confirmed running by pid). All three: the
-bootstrap ran to completion, `automation_check` read back
-`NotDetermined` immediately after, and no consent dialog appeared on
-screen at any point, checked by polling screenshots through the whole
-window. This is a stronger, reproducible version of this section's own
-"four techniques, none visibly raised a dialog" finding above — not
-new behavior, but the first time it was checked against fresh targets
-with no possible pre-existing grant to confound the result. Whatever
-raises the dialog macOS does eventually show for a *first* Automation
-send is not this mechanism, at least not reliably. See PINV-52/53's own
-follow-up note for what this means for that later work: the bundle and
-self-respawn there are independently confirmed to do what they claim
-(flip this process's own responsible-process identity, and make a
-shared App Group container resolve) — but neither one has been shown
-to make a *fresh* Automation grant attribute to `polarize` specifically,
-because no fresh grant could be raised at all to observe that with.
+**Follow-up, root-caused with a direct `log stream` capture: the
+disclaim redirects the grant, but to the wrong process — `osascript`
+itself, never `polarize`.** A later session went past polling
+screenshots (this section's own earlier finding) and read `tccd`'s
+actual decisions directly: macOS's `log stream` tool, filtered to the
+TCC subsystem, run alongside a hand-built reproduction of this
+function's exact `posix_spawnp`-plus-disclaim call (Python's `ctypes`
+against the same `dlsym`ed `responsibility_spawnattrs_setdisclaim`
+symbol), against real targets, both Apple's own apps and third-party
+ones (Calendar, Notes, Spotify, Reminders).
+
+Two distinct behaviors emerged, and separating them is what resolves
+the mystery:
+
+- A trivial identity query (`get its name`, `get version`) never
+  creates a `kTCCServiceAppleEvents` record at all, for any target,
+  disclaimed or not. `osascript`'s own process trace (also visible in
+  the same log stream) shows it exiting within tens of milliseconds,
+  never connecting to the Apple Events daemon. These verbs are
+  apparently answered without a real cross-process send — this
+  section's own four earlier attempts, and this invariant's own
+  bootstrap script (`tell application "<target>" to get its name`),
+  all used exactly this kind of query. They were never capable of
+  raising a consent dialog, because nothing about them ever reaches
+  the code path that would raise one.
+- A query that actually touches the target's real state (a list count,
+  a note count) does create a real record — visible as `tccd`
+  publishing a `kTCCServiceAppleEvents` creation event. Its identity
+  depends on exactly what this invariant's own text already predicts,
+  confirmed directly
+  rather than inferred: a **plain** (non-disclaimed) send recorded
+  `identifier_type=Bundle ID, identifier=com.mitchellh.ghostty` — the
+  launching terminal, exactly PINV-44's original finding. The
+  **disclaimed** send — this function's own mechanism — recorded
+  `identifier_type=Path, identifier=/usr/bin/osascript`. Not Ghostty.
+  Not `polarize`. The disclaimed *child itself*, by raw filesystem
+  path, because a bare, bundle-less `/usr/bin/osascript` has nothing
+  else for TCC to key its own record to (the same fallback PINV-50
+  documents for a bundle-less `polarize`).
+
+Neither case raised a visible consent dialog for the new record —
+still unexplained, and orthogonal to the question above, which this
+now answers directly: **this function disclaims the wrong process.**
+It detaches `osascript` from `polarize`, making `osascript` its own
+responsible party — never `polarize`. Even a fully working disclaim
+was always going to produce a grant keyed to `/usr/bin/osascript`, a
+path shared by every other script on the machine that also disclaims
+around it, not a grant `polarize` could ever hold under its own name —
+`osascript` has no bundle for a "Polarize" row to exist under in the
+first place.
+
+The fix this points to is the one PINV-52 already describes, now with
+direct evidence behind it rather than a hypothesis: once `polarize`
+itself is self-responsible (PINV-52's disclaimed self-respawn), a
+**plain** `osascript` child it spawns — exactly what
+`MacAppleScriptRunner::run_script`'s real `run_applescript` path
+already does, no disclaim involved — should inherit responsibility
+from `polarize` itself, the same way this session's plain send
+inherited it from Ghostty. That specific link (a plain child's send,
+spawned from an already-self-responsible parent, actually attributing
+to that parent) was not directly reproduced end-to-end this session —
+a two-hop chain built to test it (disclaim a shell, have the shell
+plainly spawn `osascript`) produced no new `kTCCServiceAppleEvents`
+record at all against its chosen target, inconclusive rather than
+contradictory. It is the next thing to verify live, not yet proven.
 
 ### PINV-52: a real bundle plus a disclaimed self-respawn are what let `polarize` hold its own TCC identity, and the respawn must forward signals to the child it creates
 
