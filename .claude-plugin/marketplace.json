@@ -1,0 +1,15 @@
+{
+  "name": "polarize",
+  "description": "polarize's own Claude Code plugin marketplace.",
+  "owner": {
+    "name": "Official Unofficial, Inc.",
+    "url": "https://github.com/officialunofficial"
+  },
+  "plugins": [
+    {
+      "name": "polarize",
+      "source": "./",
+      "description": "Automates real macOS AppKit apps over MCP: screenshot capture, accessibility-tree inspection, and synthetic mouse/keyboard input."
+    }
+  ]
+}

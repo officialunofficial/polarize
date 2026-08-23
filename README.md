@@ -257,6 +257,29 @@ file for this (check your client's docs for its exact location and
 CLI, if it has one); treat that file as machine-specific and keep it
 out of version control, since it embeds an absolute local path.
 
+### Using it as a Claude Code plugin
+
+`polarize` is also its own Claude Code plugin marketplace — this repo
+carries `.claude-plugin/marketplace.json` and `.claude-plugin/plugin.json`
+at its root. Install it directly, once `polarize` itself is installed
+and on `PATH` (see "Installing" above):
+
+```
+/plugin marketplace add officialunofficial/polarize
+/plugin install polarize@polarize
+```
+
+This registers `polarize`'s MCP tools automatically — no manual
+stdio config needed. It also installs the `polarize-setup` skill,
+which walks through the one-time `--request-permissions` bootstrap.
+A `SessionStart` hook prints an install hint if `polarize` isn't on
+`PATH` yet. See [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md) for what
+each permission covers.
+
+The plugin has no install-time hook of its own — it can't fetch the
+`polarize` binary for you. Install `polarize` first, through any of
+the channels above, then install the plugin.
+
 ### Keeping TCC permission grants across rebuilds
 
 `describe`, `tap`, and `keyboard` need Accessibility access.
