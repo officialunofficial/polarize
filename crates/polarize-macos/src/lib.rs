@@ -38,6 +38,9 @@
 
 pub mod accessibility;
 pub mod action;
+/// Resolves whether `polarize`'s own code signature can see the
+/// shared App Group container. See PINV-52's follow-up note.
+pub mod app_group;
 pub mod app_lookup;
 pub mod applescript;
 mod ax_ffi;
@@ -60,6 +63,10 @@ pub mod observer;
 pub mod permission_bootstrap;
 /// Pumps the real main-thread `CFRunLoop`. See PINV-42.
 pub mod runloop;
+/// Resolves `polarize`'s own TCC "responsible process" identity, and
+/// makes `polarize` its own responsible process through a disclaimed
+/// self-respawn. See PINV-52.
+pub mod self_responsibility;
 pub mod session;
 pub mod set_value;
 /// Runtime `dlopen`/`dlsym` resolution of `SkyLight.framework`'s private

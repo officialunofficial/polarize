@@ -58,8 +58,64 @@ fn log_skylight_symbol_resolution() {
     }
 }
 
+/// Logs this process's own TCC "responsible process" state. This
+/// makes PINV-52 observable without a debugger. It plays the same
+/// role `log_skylight_symbol_resolution` plays for PINV-46.
+fn log_responsibility_state() {
+    tracing::info!(
+        state = %polarize_macos::self_responsibility::responsibility_summary(),
+        "TCC responsible-process state"
+    );
+}
+
+/// Logs whether this process's own code signature can see the shared
+/// App Group container. This makes PINV-52's still-open question
+/// about `polarize`'s own entitlements observable without a debugger.
+/// It plays the same role `log_responsibility_state` plays for the
+/// responsible-process question.
+fn log_app_group_state() {
+    tracing::info!(
+        state = %polarize_macos::app_group::container_summary(),
+        "shared App Group container state"
+    );
+}
+
+/// Respawns this process disclaimed when
+/// [`polarize_macos::self_responsibility::should_respawn_disclaimed`]
+/// says it is warranted. So `polarize` becomes its own TCC-responsible
+/// process, instead of inheriting whatever launched it (PINV-52).
+///
+/// A successful respawn never returns. The respawned child inherits
+/// this process's stdio. This process blocks on it, then exits with
+/// its exit status. This only returns when no respawn was warranted.
+/// It also returns when the respawn's own setup failed, before a
+/// child ever existed. The caller then keeps running the MCP server
+/// in this process. That is exactly as if no respawn had been
+/// attempted.
+fn respawn_disclaimed_if_warranted() {
+    if !polarize_macos::self_responsibility::should_respawn_disclaimed() {
+        return;
+    }
+    tracing::info!("respawning disclaimed to become our own TCC-responsible process");
+    if let Err(err) = polarize_macos::self_responsibility::respawn_self_disclaimed() {
+        tracing::warn!("disclaimed self-respawn failed, continuing in this process: {err}");
+    }
+}
+
 fn main() {
     init_tracing();
+
+    // Must happen before any other thread starts anywhere in this
+    // process — see `polarize_macos::self_responsibility`'s own doc
+    // comment for why. This runs before the `--request-permissions`
+    // branch below too, not just the server path. PINV-52's own
+    // follow-up note explains why both need it. A successful respawn
+    // re-execs with the same argv. So `--request-permissions` still
+    // sees its own flag and target. It just runs from the
+    // now-self-responsible child.
+    log_responsibility_state();
+    log_app_group_state();
+    respawn_disclaimed_if_warranted();
 
     if std::env::args().nth(1).as_deref() == Some("--request-permissions") {
         let automation_target = std::env::args()

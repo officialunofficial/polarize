@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.officialunofficial.polarize</string>
+	<key>CFBundleExecutable</key>
+	<string>polarize</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleName</key>
+	<string>polarize</string>
+	<key>CFBundleIconFile</key>
+	<string>Polarize</string>
+	<key>CFBundleVersion</key>
+	<string>__VERSION__</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__VERSION__</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>polarize sends Apple Events to automate apps on your behalf, through its run_applescript MCP tool.</string>
+	<key>LSUIElement</key>
+	<true/>
+</dict>
+</plist>
