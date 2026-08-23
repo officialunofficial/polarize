@@ -1,0 +1,146 @@
+# Hand-written, not generated. `dist generate --mode ci` wires this
+# file into `.github/workflows/release.yml` as a custom publish job —
+# see `dist-workspace.toml`'s `publish-jobs` key. `release.yml` itself
+# stays fully generated; edit this file instead. See
+# docs/RELEASING.md's "Notarization" section for the full story.
+#
+# `dist` has no built-in bundle-assembly or notarization support (its
+# own `cargo-dist`'s macos signing module says so directly). This job
+# assembles `Polarize.app` from a fresh build. It signs the bundle
+# with the same Developer ID identity `dist` uses for the bare binary.
+# It submits the signed bundle to Apple's notary service, then staples
+# the resulting ticket. It uploads the stapled result as an extra
+# GitHub Release asset. It ships one bundle per target triple, not a
+# universal binary — see PINV-54 in docs/INVARIANTS.md for why.
+name: build-notarized-app
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-notarized-app:
+    name: build-notarized-app (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    runs-on: macos-26
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+      CODESIGN_CERTIFICATE: ${{ secrets.CODESIGN_CERTIFICATE }}
+      CODESIGN_CERTIFICATE_PASSWORD: ${{ secrets.CODESIGN_CERTIFICATE_PASSWORD }}
+      # An App Store Connect API key, used for `notarytool` auth only.
+      # Unrelated to the CODESIGN_* secrets above. Those sign the
+      # bundle. This authenticates the notarization submission. See
+      # docs/RELEASING.md.
+      NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+      NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+      NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Read release tag from the dist plan
+        run: |
+          TAG=$(echo '${{ inputs.plan }}' | jq -r '.announcement_tag')
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build the polarize binary
+        run: cargo build --release -p polarize --target ${{ matrix.target }}
+
+      - name: Ensure just is installed
+        run: command -v just || brew install just
+
+      # Imports the same Developer ID Application certificate `dist`
+      # uses for the bare binary (see docs/RELEASING.md's "Signing"
+      # section) into a throwaway keychain scoped to this job. `dist`
+      # exposes no CLI for this step, so it is replicated by hand.
+      - name: Import Developer ID certificate
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          echo "$CODESIGN_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/codesign-cert.p12"
+          security import "$RUNNER_TEMP/codesign-cert.p12" -k "$KEYCHAIN_PATH" \
+            -P "$CODESIGN_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          EXISTING_KEYCHAINS=$(security list-keychains -d user | sed 's/[" ]//g')
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $EXISTING_KEYCHAINS
+          rm "$RUNNER_TEMP/codesign-cert.p12"
+
+      # `just bundle-app` signs without `--timestamp` — correct for a
+      # local, self-signed `polarize-dev` build (see justfile), where
+      # a secure timestamp buys nothing. A notarizable release build
+      # needs one, so this step re-signs afterward with it added.
+      - name: Assemble and sign Polarize.app
+        run: |
+          just bin=target/${{ matrix.target }}/release/polarize \
+            identity="$CODESIGN_IDENTITY" bundle-app
+          codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp \
+            --entitlements apps/polarize/polarize.entitlements dist/Polarize.app
+
+      # Apple's notary service accepts a zip archive, not a bundle
+      # directory directly. `--keepParent` preserves the ".app" as a
+      # single top-level entry, as Apple's own docs require.
+      - name: Archive for notarization
+        run: |
+          ZIP="dist/Polarize-${{ matrix.target }}.zip"
+          ditto -c -k --keepParent dist/Polarize.app "$ZIP"
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+
+      - name: Submit for notarization
+        run: |
+          echo "$NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary-key.p8"
+          xcrun notarytool submit "$ZIP" \
+            --key "$RUNNER_TEMP/notary-key.p8" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --wait \
+            --output-format json | tee "$RUNNER_TEMP/notary-submit.json"
+          SUBMISSION_ID=$(jq -r '.id' "$RUNNER_TEMP/notary-submit.json")
+          echo "SUBMISSION_ID=$SUBMISSION_ID" >> "$GITHUB_ENV"
+
+      # Apple's own docs: "Always check the log file, even if
+      # notarization succeeds." Runs on every outcome, not just
+      # failure.
+      - name: Fetch notarization log
+        if: always()
+        run: |
+          xcrun notarytool log "$SUBMISSION_ID" \
+            --key "$RUNNER_TEMP/notary-key.p8" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID"
+
+      # A stapled ticket can't attach to a zip archive directly.
+      # Staple the bundle itself, then re-zip the stapled result — the
+      # asset this step uploads is the one users actually download.
+      - name: Staple notarization ticket
+        run: |
+          xcrun stapler staple dist/Polarize.app
+          rm "$ZIP"
+          ditto -c -k --keepParent dist/Polarize.app "$ZIP"
+
+      - name: Upload release asset
+        run: gh release upload "$TAG" "$ZIP" --clobber
+
+      - name: Remove throwaway keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true

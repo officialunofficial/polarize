@@ -159,13 +159,11 @@ Homebrew isn't available yet. `dist` builds a formula on every release.
 Publishing it needs a tap repository that doesn't exist yet — see
 "What this doesn't do" in [`docs/RELEASING.md`](docs/RELEASING.md).
 
-Every path installs an **unsigned** binary today. This holds until the
-repo owner adds Apple Developer signing secrets to the release
-workflow (see `docs/RELEASING.md`'s "Signing" section). Until then,
-re-grant Accessibility and Screen Recording after every upgrade. macOS
-ties each TCC grant to the binary's code-signing identity. An unsigned
-binary gets a new identity on every release, so each new release loses
-the old grant.
+Every path installs a binary signed with a real Developer ID identity
+today (see `docs/RELEASING.md`'s "Signing" section). macOS ties each
+TCC grant to the binary's code-signing identity. That identity stays
+the same across releases, so Accessibility and Screen Recording grants
+survive an upgrade.
 
 After installing by either path, run the bootstrap flag once to grant
 permissions:
