@@ -280,6 +280,16 @@ The plugin has no install-time hook of its own — it can't fetch the
 `polarize` binary for you. Install `polarize` first, through any of
 the channels above, then install the plugin.
 
+`claude plugin validate .claude-plugin/marketplace.json --strict`
+passes clean. `claude plugin validate .claude-plugin/plugin.json
+--strict` reports one warning: this repo's own root `CLAUDE.md` is
+not loaded as plugin context. That is expected, by Claude Code's own
+design, for any plugin whose source is a full repo root — see
+[Anthropic's plugin reference](https://code.claude.com/docs/en/plugins-reference).
+It is not a defect. Moving the plugin into its own subdirectory would
+silence it. But `docs/PERMISSIONS.md` would then stop shipping inside
+the plugin's own source tree — a worse trade.
+
 ### Keeping TCC permission grants across rebuilds
 
 `describe`, `tap`, and `keyboard` need Accessibility access.
