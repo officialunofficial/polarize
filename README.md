@@ -323,12 +323,50 @@ ScreenCapture` — this resets Screen Recording for *every* app on the
 Mac, not just `polarize`, so prefer removing the single stuck entry
 when you can.
 
+### Automation permission and the app bundle
+
+`run_applescript` and `script_dictionary` need Automation access.
+macOS grants it per target app (Messages, Mail, Finder, …), not once
+for the whole binary. Accessibility and Screen Recording key their
+grant to `polarize`'s code-signing identity alone. The bare binary
+already has a stable one, after `just build`. Automation needs one
+more thing: a real `CFBundleIdentifier` for macOS to hold the grant
+against.
+
+`just build` assembles this as `dist/Polarize.app`, alongside the bare
+`target/debug/polarize`. `just bundle-app` on its own re-runs just
+that step. `just verify-bundle` lints and codesign-verifies it, and
+confirms LaunchServices accepts it. Run the bootstrap flag through the
+bundle, to request Automation for a target app:
+
+```sh
+./dist/Polarize.app/Contents/MacOS/polarize --request-permissions Messages
+```
+
+The MCP server itself respawns itself once at startup, through a
+disclaimed spawn. Your client launches it, from either the bare binary
+or the bundle. The respawn gives it its own responsible-process
+identity. Otherwise it would inherit the launching shell's or client's
+identity instead. See PINV-52 in `docs/INVARIANTS.md` for the full
+mechanism. See it too for what a real macOS session still needs to
+confirm, about the resulting grant.
+
 Stdio matches how a local MCP client typically spawns `polarize`: one
 client, one subprocess, for the process's whole lifetime. `rmcp` also
 supports a Streamable HTTP transport, for a real shared server process
 multiple clients or machines could reach. Nothing in this repository
 builds or wires up that transport yet — it stays a possible future
 addition, not a v1 requirement.
+
+## Design notes
+
+`apps/polarize` depends on `rmcp` with its `"macros"` feature enabled,
+not on the separate `rmcp-macros` crate directly. `rmcp`'s `"macros"`
+feature already re-exports `rmcp-macros`'s `#[tool]`/`#[tool_router]`/
+`#[tool_handler]` attributes. A direct `rmcp-macros` dependency resolved
+a second, version-mismatched copy of that proc-macro crate alongside
+the one `rmcp` pulls in itself — see `apps/polarize/Cargo.toml`'s
+comment for the detail.
 
 ## License
 

@@ -4,5 +4,9 @@
 <dict>
 	<key>com.apple.security.automation.apple-events</key>
 	<true/>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>N8R89M8725.fun.uno.polarize</string>
+	</array>
 </dict>
 </plist>

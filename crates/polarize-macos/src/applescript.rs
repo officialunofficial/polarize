@@ -240,7 +240,7 @@ pub fn request_automation(target_app_name: &str) -> AutomationCheck {
         .status();
     std::thread::sleep(Duration::from_millis(AUTOMATION_BOOTSTRAP_LAUNCH_SETTLE_MS));
 
-    let _ = crate::disclaimed_spawn::send_disclaimed_bootstrap_script(target_app_name);
+    let _ = crate::disclaimed_spawn::send_bootstrap_script(target_app_name);
 
     let identifier = AppIdentifier {
         bundle_id: Some(target_app_name.to_string()),
