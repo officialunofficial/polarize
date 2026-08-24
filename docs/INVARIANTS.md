@@ -310,20 +310,27 @@ claim automated coverage they don't have.
   every future `describe` call, not just fail to fully describe that
   one app.
 
-### PINV-14: a `keyboard` request activates its target app first
+### PINV-14: a `keyboard` target never receives a wrong-app post
 
 - Always: when a `keyboard` request names a `target` app,
-  `orchestrate::perform_keyboard` activates it before calling either
-  `InputSynthesizer::type_text` or `InputSynthesizer::press_key`. When
-  `target` is `None`, it activates nothing. See PINV-48 for the two
-  ways activation can happen.
-- Because: `CGEvent` posts to whichever app is currently frontmost, not
-  to an app named in the request. Without activating the target first, a
-  `target`-scoped `keyboard` call would silently type into whatever app
-  the user happened to have focused instead.
-- If violated: text or key presses land in the wrong app. Or — if
-  `target` were dropped from the schema instead of wired up — `polarize`
-  would advertise a field its `keyboard` tool never honors.
+  `orchestrate::perform_keyboard` resolves the target's pid first,
+  through `WindowManager::resolve_app_pid`. When a pid resolves, it
+  activates nothing and posts to that pid (PINV-49). When no pid
+  resolves — including when resolution itself errors, treated the same
+  as no pid — it activates the target, then posts globally. See PINV-48
+  for the two ways that fallback activation can happen. When `target`
+  is `None`, it activates nothing and posts globally.
+- Because: a global `CGEvent` post reaches whichever app is frontmost,
+  not the app the request names. A pid post reaches only the named
+  process. It needs no activation first, and it moves no real keyboard
+  focus. A live probe confirmed this — see PINV-49's correction.
+  Activation is only necessary when no pid post is possible: nothing
+  else in the request addresses the right app.
+- If violated: text or key presses land in the wrong app. Or `keyboard`
+  moves real keyboard focus away from whoever is using the machine when
+  a pid post could have left it alone. Or — if `target` were dropped
+  from the schema instead of wired up — `polarize` would advertise a
+  field its `keyboard` tool never honors.
 
 ### PINV-15: an element selector must name a criterion, and resolves in pre-order
 
@@ -1278,9 +1285,11 @@ TCC's actual Automation grant.
   leaves only that field `None`. Nothing in the resolution path panics
   or aborts. `apps/polarize`'s startup log names each symbol and its
   resolution state, one line per symbol. These three back only
-  `keyboard`'s raise-free activation (PINV-48). `tap`/`keyboard`'s
-  pid-post path (PINV-47/PINV-49) does not use this module at all — it
-  posts through the public `CGEventPostToPid` instead (issue #36).
+  `keyboard`'s raise-free activation (PINV-48), which now runs only in
+  PINV-14's no-pid fallback — a resolved pid skips activation entirely.
+  `tap`/`keyboard`'s pid-post path (PINV-47/PINV-49) does not use this
+  module at all — it posts through the public `CGEventPostToPid`
+  instead (issue #36).
 - Because: these three symbols are private and undocumented. No public
   header ships them. This crate's own knowledge of their names and
   shapes comes from cross-referencing `yabai`
@@ -1339,10 +1348,10 @@ change is proposed here: there is no cheap, reliable way to detect
 
 ### PINV-48: a `keyboard` target activates without raising, or falls back
 
-- Always: for a request that names a `target`,
-  `orchestrate::perform_keyboard` tries
-  `WindowManager::activate_app_without_raise` first. `MacWindowManager`
-  runs this path only when four things all hold. `skylight_ffi::symbols`
+- Always: `orchestrate::perform_keyboard` activates a `target` only as
+  a fallback, when the target's pid did not resolve (PINV-14). In that
+  fallback, it tries `WindowManager::activate_app_without_raise` first.
+  `MacWindowManager` runs this path only when four things all hold. `skylight_ffi::symbols`
   resolved both `SLPSPostEventRecordTo` and
   `_SLPSSetFrontProcessWithOptions`. A `ProcessSerialNumber` resolved
   for the target's pid, via `carbon_process::find_psn_for_pid`. The
@@ -1357,7 +1366,8 @@ change is proposed here: there is no cheap, reliable way to detect
   with `kAXRaiseAction`. `perform_keyboard` calls the older
   `WindowManager::activate_app` only when the raise-free path reports
   itself unavailable. `KeyboardResponse.activation_path` always names
-  whichever tier actually ran, or `none` when `target` was absent.
+  whichever tier actually ran, or `none` when `target` was absent or its
+  pid resolved and no activation ran at all.
 - Because: raising a window, or switching Spaces, is the one visible
   interruption this PRD exists to remove from an agent driving a
   background app. `activate_app`'s single
@@ -1370,6 +1380,17 @@ change is proposed here: there is no cheap, reliable way to detect
   window, or still switches the current Space, even though
   `activation_path` reports `raise_free`. A caller relying on that field
   to avoid disrupting whoever is at the machine would be misled.
+
+**After PINV-14's correction, this fallback runs only when the
+target's pid did not resolve.** On `MacWindowManager`,
+`activate_app_without_raise` starts with the same app lookup that
+`resolve_app_pid` just failed. So the raise-free tier now almost
+always reports itself unavailable too, on the real implementation —
+`perform_keyboard` then falls straight through to `activate_app`. The
+tier order below stays correct for any `WindowManager`, real or fake,
+that resolves activation and pid independently. Removing the raise-free
+tier outright is a separate decision this correction does not make;
+see PINV-49's correction for the reasoning.
 
 **Correction to this slice's originating issue, part one: the call the
 issue said to drop.** The issue read `yabai`'s source as "drop the
@@ -1454,7 +1475,8 @@ window at all.
 ### PINV-49: `keyboard` posts key events by pid, and reports which path ran
 
 - Always: `orchestrate::perform_keyboard` resolves the target's pid
-  through `WindowManager::resolve_app_pid`. It passes that pid to
+  through `WindowManager::resolve_app_pid`, once, before it decides
+  whether to activate anything (PINV-14). It passes that pid to
   `InputSynthesizer::type_text` or `InputSynthesizer::press_key`,
   whichever the request calls for. `MacInputSynthesizer` posts through
   the public `CGEventPostToPid` whenever a pid resolved. Every other
@@ -1474,32 +1496,35 @@ window at all.
   `post_path` to know whether this call touched anything outside the
   target would trust a claim the platform did not back up.
 
-**Resolved: activation before posting is structurally required, not an
-implementation gap.** The open question this slice originally left —
-whether a pid-posted key event reaches the target app's first
-responder when that app is not AppKit-active — is answered no. AppKit
-dispatches a keystroke through `NSApp → keyWindow → firstResponder`. A
-window that is not key has no path into that dispatch, regardless of
-which native call posted the event. `CGEventPostToPid` reaches the
-target process's event queue by pid; it does not make any window key.
-`perform_keyboard` activates a named target before every post because
-skipping activation would not merely lose an optimization — it would
-drop text into a process that has nowhere to route it. No published
-technique (Apple's own docs, or `yabai`, Hammerspoon, Keyboard
-Maestro, cliclick) delivers real character input to an existing app's
-focused text field without some key-process change. This is the
-mechanism's real cost, not a bug this crate can fix.
+**Correction: activation before posting is not structurally required.**
+An earlier version of this entry recorded the opposite conclusion. It
+claimed AppKit routes a keystroke only through
+`NSApp → keyWindow → firstResponder`, and concluded a pid-posted key
+event could never reach an inactive app's focused text field without
+activating it first. A live probe on a real macOS session disproved
+that. `crates/polarize-macos/examples/bg_keyboard_probe.rs` posted
+text through `MacInputSynthesizer::type_text` with a pid. No
+activation call ran first. TextEdit was not the frontmost app. A
+different app stayed frontmost before and after the post, confirmed
+through `frontmost_app`. The text still landed in TextEdit's focused
+document. Independent published evidence agrees: `trycua/cua`'s
+`cua-driver` notes report that a pid-scoped keystroke lands in that
+app's own event queue and nowhere else, with no activation step at
+all. `perform_keyboard` now skips activation whenever a pid resolves
+(PINV-14).
 
-What PINV-48's raise-free activation removes is the visible raise and
-the Space switch, nothing more. `activation_path: raise_free` reports
-exactly that, and no more: it does not mean "did not disturb the
-person at the machine." A `keyboard` call aimed at a background app
-still moves real keyboard focus away from whatever the person at the
-machine was doing, for the length of the call, every time it runs. A
-live session confirmed this directly: two `keyboard` calls in a row,
-each targeting a backgrounded app while a person was actively working
-in a different one, visibly pulled real keyboard focus back to the
-target both times. See the enforcement checklist entry below.
+This claim has two known bounds. The live check covered one AppKit
+text view, in one app, on one macOS version — other toolkits are
+unverified; see the enforcement checklist. And PINV-47's Open/Save
+panel limitation applies here the same way: a pid post reaches the
+named process, never an out-of-process panel that process merely
+shows.
+
+The focus-stealing cost the old note described now applies only to
+PINV-14's no-pid fallback. A `keyboard` call moves real keyboard focus
+away from the person at the machine only when that fallback runs. A
+pid-posted call leaves the frontmost app, and real keyboard focus,
+exactly where they were.
 
 ### PINV-50: `polarize` embeds a real bundle identity for Automation's own sake
 
@@ -2063,20 +2088,31 @@ present.
   proxy that re-exposes an element cyclically — neither is producible
   without a live accessibility session. `MAX_AX_DEPTH`'s value itself
   (`64`) is a plain constant with no logic to unit test in isolation.
-- **PINV-14** — the orchestration half (activate-before-type,
-  activate-before-key-press, and no-activation-when-`target`-is-`None`)
-  is fully covered by automated `cargo test -p polarize-core`
-  (`orchestrate::tests`) against a fake `WindowManager`. It was also
-  confirmed over real MCP stdio traffic: a `keyboard` call with a
-  `target` reached `WindowManager::activate_app`'s real
-  `resolve_running_app` lookup (observed as `"app not found:
-  com.apple.TextEdit"`, since no matching app runs in this environment),
-  while a `keyboard` call with `target: null` stopped at the
-  Accessibility preflight instead, without attempting activation. What
-  is **not** verified: whether `activateWithOptions` actually brings a
-  real, running target app to the front on a live macOS session — that
-  needs one, with Accessibility permission granted and a real target
-  app running.
+- **PINV-14** — the orchestration half is fully covered by automated
+  `cargo test -p polarize-core` (`orchestrate::tests`) against a fake
+  `WindowManager`: `perform_keyboard_skips_activation_when_a_target_pid_resolves`
+  and `..._before_key_press_when_a_pid_resolves` (no activation call at
+  all when a pid resolves, even one the raise-free path could serve),
+  `perform_keyboard_treats_a_pid_resolution_error_as_no_pid` (an `Err`
+  from `resolve_app_pid` falls back to activation, never propagates),
+  `perform_keyboard_activates_target_before_typing_when_no_pid_resolves`
+  and `..._before_key_press_when_no_pid_resolves` (the fallback still
+  activates when no pid resolves), and
+  `perform_keyboard_does_not_activate_anything_when_target_is_none`. It
+  was also confirmed over real MCP stdio traffic before this
+  correction: a `keyboard` call with a `target` reached
+  `WindowManager::activate_app`'s real `resolve_running_app` lookup
+  (observed as `"app not found: com.apple.TextEdit"`, since no matching
+  app ran in that environment — which still exercises today's no-pid
+  fallback, since pid resolution fails the same lookup), while a
+  `keyboard` call with `target: null` stopped at the Accessibility
+  preflight instead, without attempting activation. It was confirmed
+  again live for the pid-post path directly: see PINV-49's correction.
+  What is **not** verified: whether `activateWithOptions` actually
+  brings a real, running target app to the front on a live macOS
+  session, for the fallback case — that needs one, with Accessibility
+  permission granted and a real target app running that has no
+  resolvable pid.
 - **PINV-15** — fully covered by automated `cargo test -p polarize-core`
   (`selector::tests`), including which fields count toward the guard: an
   `index`-only selector, an `enabled_only`-only selector, and a selector
@@ -2798,13 +2834,16 @@ present.
   confirm both.
 
 - **PINV-48** — the decision logic is fully covered by automated `cargo
-  test -p polarize-core` (`orchestrate::tests`), against fakes:
-  raise-free path available → it runs, and `activate_app` does not
-  (`perform_keyboard_prefers_raise_free_activation_when_available`);
+  test -p polarize-core` (`orchestrate::tests`), against fakes, all
+  scoped to PINV-14's no-pid fallback (a resolved pid skips this tier
+  order entirely — see `perform_keyboard_skips_activation_when_a_target_pid_resolves`
+  under PINV-14 above): raise-free path available → it runs, and
+  `activate_app` does not
+  (`perform_keyboard_prefers_raise_free_activation_when_no_pid_resolves`);
   raise-free path unavailable → `activate_app` runs, as before PINV-48
-  (`perform_keyboard_activates_target_app_before_typing`,
-  `perform_keyboard_activates_target_app_before_key_press`); no
-  `target` → neither runs
+  (`perform_keyboard_activates_target_before_typing_when_no_pid_resolves`,
+  `perform_keyboard_activates_target_before_key_press_when_no_pid_resolves`);
+  no `target` → neither runs
   (`perform_keyboard_does_not_activate_anything_when_target_is_none`).
   Each case asserts `KeyboardResponse.activation_path` names the tier
   that actually ran.
@@ -2840,34 +2879,45 @@ present.
 
 - **PINV-49** — the decision logic is fully covered by automated `cargo
   test -p polarize-core` (`orchestrate::tests`), against fakes: target
-  with pid available → pid path
-  (`perform_keyboard_posts_by_pid_when_a_target_pid_is_available`); no
-  target → global path
-  (`perform_keyboard_falls_back_to_global_when_no_target_names_an_app`).
-  Each case asserts `KeyboardResponse.post_path` names the path the
-  fake actually took. `keymap`'s pure logic is untouched by this slice,
-  and stays covered by its own existing `cargo test` cases.
+  with pid available → pid path, no activation at all
+  (`perform_keyboard_posts_by_pid_when_a_target_pid_is_available`,
+  `perform_keyboard_skips_activation_when_a_target_pid_resolves`,
+  `perform_keyboard_skips_activation_before_key_press_when_a_pid_resolves`);
+  no target → global path
+  (`perform_keyboard_falls_back_to_global_when_no_target_names_an_app`);
+  a pid-resolution error treated the same as no pid, falling back to
+  activation rather than propagating
+  (`perform_keyboard_treats_a_pid_resolution_error_as_no_pid`). Each
+  case asserts `KeyboardResponse.post_path` names the path the fake
+  actually took. `keymap`'s pure logic is untouched by this slice, and
+  stays covered by its own existing `cargo test` cases.
 
   What is **not** automated: whether `MacInputSynthesizer`'s real
   `type_text`/`press_key` report `post_path` correctly against the real
   `CGEventPostToPid` call.
 
-  **Live-verified finding, resolved not favorably**: a real session
-  confirmed `keyboard` reaches a background app's text field through
-  the raise-free-activation-then-pid-post order, and confirmed the
-  cost that order carries: `activate_app_without_raise` moves real OS
-  keyboard focus away from whatever app the person at the machine was
-  using, even though it never raises a window. Two live `keyboard`
-  calls in a row, each targeting a backgrounded app while the person
-  was actively working in a different app, visibly pulled focus back
-  to the target both times. This is now resolved, not open:
+  **Live-verified finding (2026-08-24), correcting an earlier one**: a
+  real session bypassed `perform_keyboard` entirely and called
+  `MacInputSynthesizer::type_text` directly with a resolved pid, no
+  activation call of any kind
+  (`crates/polarize-macos/examples/bg_keyboard_probe.rs`). TextEdit was
+  not the frontmost app; a different app stayed frontmost, confirmed
+  through `frontmost_app` both before and after the post. The posted
+  text landed correctly in TextEdit's focused document anyway. An
+  earlier pass of this entry recorded the opposite conclusion — that
   `CGEventPostToPid` alone cannot reach a target's first responder
-  without some key-process change — AppKit only dispatches a keystroke
-  to a key window's first responder, and no native call posts an event
-  straight to a specific, non-key window's responder chain. Dropping
-  the activation call for the pid-post case is not a viable fix; it
-  would only make `keyboard` post text nobody's focused view reads.
-  See PINV-48's text above for the full argument.
+  without some key-process change — based on observing that the
+  *shipped* `keyboard` tool (which always activated at the time) pulled
+  real keyboard focus when it ran. That observation was real, but it
+  showed what the old code did, not what a pid post requires: nothing
+  in that test bypassed activation to isolate the pid post's own
+  behavior. This pass did, and the result contradicts the earlier
+  conclusion directly. `perform_keyboard` now skips activation whenever
+  a pid resolves. See PINV-14's and this entry's "Correction" text
+  above for the full argument and its known bounds. Re-run
+  `bg_keyboard_probe` (`cargo run -p polarize-macos --example
+  bg_keyboard_probe -- <pid> [text]`, target app running but not
+  frontmost) to re-verify this on any future macOS release.
 
 - **PINV-50** — the embedding itself is code-inspectable and confirmed
   live: `codesign -dv target/debug/polarize` reports `Info.plist
