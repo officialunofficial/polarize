@@ -136,10 +136,12 @@ pub trait InputSynthesizer {
 /// Enumerates apps/windows and resolves their pixel geometry.
 /// Implemented by `polarize-macos` over AppKit (objc2-app-kit).
 pub trait WindowManager {
-    /// Brings `app` to the front. [`crate::orchestrate::perform_keyboard`]
-    /// calls this first when a request names a `target` app, so typed
-    /// text and key presses reach that app even when it did not already
-    /// have focus.
+    /// Brings `app` to the front.
+    /// [`crate::orchestrate::perform_keyboard`] calls this only as a
+    /// fallback, when a `target` app's pid did not resolve (PINV-14) —
+    /// a resolved pid posts directly and needs no activation.
+    /// [`crate::window_control::perform_window_action`]'s `Focus` action
+    /// calls this too, unconditionally.
     fn activate_app(&self, app: &AppIdentifier) -> Result<(), PolarizeError>;
 
     /// The pixel geometry — global-space origin plus size — of the
@@ -173,19 +175,22 @@ pub trait WindowManager {
     /// current Space.
     ///
     /// Returns `false` when this path is unavailable. A caller then
-    /// falls back to [`Self::activate_app`]. See PINV-48. `Err` means a
-    /// real platform call failed, not that the path was merely
-    /// unavailable.
+    /// falls back to [`Self::activate_app`]. See PINV-48.
+    /// [`crate::orchestrate::perform_keyboard`] reaches this only when a
+    /// `target`'s pid did not resolve (PINV-14). `Err` means a real
+    /// platform call failed, not that the path was merely unavailable.
     fn activate_app_without_raise(&self, app: &AppIdentifier) -> Result<bool, PolarizeError>;
 
     /// The process id of `app`, if it is running.
     ///
     /// [`crate::orchestrate::perform_keyboard`] passes this pid to
     /// [`InputSynthesizer::type_text`]/[`InputSynthesizer::press_key`],
-    /// as a candidate for the `SLEventPostToPid` path (PINV-49). A
-    /// caller treats an `Err` here the same as `Ok(None)`. Losing the
-    /// pid only loses the pid-post optimization. It never loses the
-    /// keypress itself.
+    /// as a candidate for the `CGEventPostToPid` path (PINV-49). A
+    /// caller treats an `Err` here the same as `Ok(None)`. A missing pid
+    /// selects [`Self::activate_app_without_raise`]/[`Self::activate_app`]
+    /// as a fallback instead (PINV-14) — the keypress still runs, but
+    /// the call then moves real keyboard focus, which a resolved pid
+    /// would have made unnecessary.
     fn resolve_app_pid(&self, app: &AppIdentifier) -> Result<Option<i32>, PolarizeError>;
 }
 

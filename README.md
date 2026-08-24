@@ -26,8 +26,9 @@ tool.
    position. Coordinates are normalized `[0, 1]` fractions of the
    target screen or window's width/height, not raw pixels.
 4. **`keyboard`** — post synthetic key events via `CGEvent`: type a
-   string, or press a named key. Naming a `target` app activates it
-   first, so the input reaches that app even without prior focus.
+   string, or press a named key. Naming a `target` app posts the keys
+   to that app by pid, without stealing focus. When no pid resolves, it
+   activates the target first.
 5. **`perform_action`** — press one element through its own
    `AXUIElementPerformAction` action, naming the element by identifier,
    role, subrole, or label instead of by coordinate. This reaches an

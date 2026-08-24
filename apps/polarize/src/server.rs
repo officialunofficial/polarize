@@ -278,8 +278,9 @@ impl PolarizeServer {
 
     /// Posts synthetic key events: either types a literal string, or
     /// presses one named key with optional modifiers. When the request
-    /// names a `target` app, activates that app first — see PINV-14 in
-    /// `docs/INVARIANTS.md`.
+    /// names a `target` app, posts to that app by pid without stealing
+    /// focus. It activates the target first only when no pid resolves
+    /// — see PINV-14 in `docs/INVARIANTS.md`.
     #[tool(name = "keyboard", input_schema = keyboard_input_schema())]
     // A `type` request's `text` is exactly what a caller types — which
     // can be a password. Skipped whole, the same reasoning PINV-40

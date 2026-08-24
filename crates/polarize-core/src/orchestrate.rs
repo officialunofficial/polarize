@@ -128,29 +128,37 @@ where
     ))
 }
 
-/// # PINV-14: a `keyboard` request activates its target app first
+/// # PINV-14: a `keyboard` target never receives a wrong-app post
 ///
 /// - Always: when `request` names a `target` app, [`perform_keyboard`]
-///   activates it before calling either [`InputSynthesizer::type_text`]
-///   or [`InputSynthesizer::press_key`]. When `target` is `None`, it
-///   activates nothing.
-/// - Because: `CGEvent` posts to whichever app is currently frontmost,
-///   not to an app named in the request. Without activating the target
-///   first, a `target`-scoped `keyboard` call would silently type into
-///   whatever app the user happened to have focused instead.
-/// - If violated: text or key presses land in the wrong app, or — if
-///   `target` is dropped from the schema entirely instead of wired up —
-///   `polarize` advertises a field its `keyboard` tool never honors.
+///   resolves the target's pid first, through
+///   [`WindowManager::resolve_app_pid`]. When a pid resolves, it
+///   activates nothing and posts to that pid (PINV-49). When no pid
+///   resolves — including when resolution itself errors, treated the
+///   same as `None` — it activates the target, then posts globally. When
+///   `target` is `None`, it activates nothing and posts globally.
+/// - Because: a global `CGEvent` post reaches whichever app is
+///   frontmost, not the app the request names. A pid post reaches only
+///   the named process. It needs no activation, and it moves no real
+///   keyboard focus. A live probe confirmed this — see PINV-49's
+///   correction. Activation is only necessary when no pid post is
+///   possible; nothing else in the request addresses the right app.
+/// - If violated: text or key presses land in the wrong app. Or
+///   `keyboard` moves real keyboard focus when a pid post could have
+///   left it alone. Or — if `target` is dropped from the schema
+///   entirely instead of wired up — `polarize` advertises a field its
+///   `keyboard` tool never honors.
 ///
-/// See also PINV-48: activation itself now has two tiers.
+/// See also PINV-48: activation, when it runs, still has two tiers.
 /// [`perform_keyboard`] tries [`WindowManager::activate_app_without_raise`]
 /// first. It falls back to [`WindowManager::activate_app`] only when the
 /// raise-free path reports itself unavailable. `KeyboardResponse.activation_path`
-/// always names whichever tier actually ran.
+/// always names whichever tier actually ran, or [`ActivationPath::None`]
+/// when a pid post made activation unnecessary.
 ///
-/// See also PINV-49: the key events themselves can now post by pid too,
-/// the same way [`perform_tap`] does. `KeyboardResponse.post_path`
-/// always names whichever path [`InputSynthesizer::type_text`] or
+/// See also PINV-49: the key events post by pid the same way
+/// [`perform_tap`] does. `KeyboardResponse.post_path` always names
+/// whichever path [`InputSynthesizer::type_text`] or
 /// [`InputSynthesizer::press_key`] actually took.
 pub fn perform_keyboard<W, I>(
     window_manager: &W,
@@ -165,9 +173,17 @@ where
         KeyboardRequest::Type { target, .. } => target,
         KeyboardRequest::KeyPress { target, .. } => target,
     };
-    let activation_path = match target {
-        None => ActivationPath::None,
-        Some(app) => {
+    // A pid-resolution failure (the target is not running, or the
+    // platform call itself errors) is treated the same as `Ok(None)`:
+    // it selects the activation fallback below, rather than propagating
+    // the error. See PINV-14.
+    let pid = match target {
+        None => None,
+        Some(app) => window_manager.resolve_app_pid(app).unwrap_or(None),
+    };
+    let activation_path = match (target, &pid) {
+        (None, _) | (Some(_), Some(_)) => ActivationPath::None,
+        (Some(app), None) => {
             if window_manager.activate_app_without_raise(app)? {
                 ActivationPath::RaiseFree
             } else {
@@ -175,12 +191,6 @@ where
                 ActivationPath::Raised
             }
         }
-    };
-    // A pid-resolution failure only loses the pid-post optimization —
-    // activation above already succeeded either way. See PINV-49.
-    let pid = match target {
-        None => None,
-        Some(app) => window_manager.resolve_app_pid(app).unwrap_or(None),
     };
     let post_path = match request {
         KeyboardRequest::Type { text, .. } => input.type_text(text, pid)?,
@@ -219,6 +229,10 @@ mod tests {
         /// [`Self::with_raise_free_available`] to exercise the new
         /// path.
         raise_free_available: bool,
+        /// When `true`, `resolve_app_pid` returns `Err` instead of
+        /// `Ok(self.pid)` — as if the target app were not running.
+        /// [`Self::with_pid_resolution_error`] opts a test in.
+        pid_error: bool,
     }
 
     impl FakeWindowManager {
@@ -236,6 +250,7 @@ mod tests {
                 activated: RefCell::new(Vec::new()),
                 raise_free_activated: RefCell::new(Vec::new()),
                 raise_free_available: false,
+                pid_error: false,
             }
         }
 
@@ -251,12 +266,22 @@ mod tests {
                 activated: RefCell::new(Vec::new()),
                 raise_free_activated: RefCell::new(Vec::new()),
                 raise_free_available: false,
+                pid_error: false,
             }
         }
 
         /// Makes `activate_app_without_raise` report success (PINV-48).
         fn with_raise_free_available(mut self) -> Self {
             self.raise_free_available = true;
+            self
+        }
+
+        /// Makes `resolve_app_pid` report `Err` — as if the target were
+        /// not running. `perform_keyboard` must treat that the same as
+        /// `Ok(None)`: fall back to activation instead of propagating
+        /// the error (PINV-14).
+        fn with_pid_resolution_error(mut self) -> Self {
+            self.pid_error = true;
             self
         }
     }
@@ -289,7 +314,11 @@ mod tests {
         }
 
         fn resolve_app_pid(&self, _app: &AppIdentifier) -> Result<Option<i32>, PolarizeError> {
-            Ok(self.pid)
+            if self.pid_error {
+                Err(PolarizeError::Platform("pid resolution failed".to_string()))
+            } else {
+                Ok(self.pid)
+            }
         }
     }
 
@@ -747,11 +776,109 @@ mod tests {
 
     // ---- perform_keyboard target activation -----------------------------
     //
-    // PINV-14: a `keyboard` request naming a `target` app activates that
-    // app before posting any key event, so the input actually reaches it.
+    // PINV-14: a `keyboard` request naming a `target` app skips
+    // activation whenever the target's pid resolves — the pid post
+    // reaches that app directly (PINV-49's correction). Activation runs
+    // only as a fallback, when no pid resolves.
 
     #[test]
-    fn perform_keyboard_activates_target_app_before_typing() {
+    fn perform_keyboard_skips_activation_when_a_target_pid_resolves() {
+        let wm = FakeWindowManager::with_pid(
+            PixelSize {
+                width: 100.0,
+                height: 100.0,
+            },
+            4242,
+        )
+        .with_raise_free_available();
+        let input = FakeInputSynthesizer::default();
+        let target = AppIdentifier {
+            bundle_id: Some("com.apple.TextEdit".to_string()),
+            app_name: None,
+        };
+        let request = KeyboardRequest::Type {
+            text: "hi".to_string(),
+            target: Some(target.clone()),
+        };
+
+        let response = perform_keyboard(&wm, &input, &request).unwrap();
+
+        assert!(
+            wm.raise_free_activated.borrow().is_empty(),
+            "no activation may run when a pid resolved, even one the raise-free path could serve"
+        );
+        assert!(wm.activated.borrow().is_empty());
+        assert_eq!(response.activation_path, ActivationPath::None);
+        assert_eq!(response.post_path, PostPath::Pid);
+        assert_eq!(input.typed.borrow().as_slice(), &["hi".to_string()]);
+    }
+
+    #[test]
+    fn perform_keyboard_skips_activation_before_key_press_when_a_pid_resolves() {
+        let wm = FakeWindowManager::with_pid(
+            PixelSize {
+                width: 100.0,
+                height: 100.0,
+            },
+            4242,
+        )
+        .with_raise_free_available();
+        let input = FakeInputSynthesizer::default();
+        let target = AppIdentifier {
+            bundle_id: None,
+            app_name: Some("Safari".to_string()),
+        };
+        let request = KeyboardRequest::KeyPress {
+            key: NamedKey::Return,
+            modifiers: vec![],
+            target: Some(target.clone()),
+        };
+
+        let response = perform_keyboard(&wm, &input, &request).unwrap();
+
+        assert!(wm.raise_free_activated.borrow().is_empty());
+        assert!(wm.activated.borrow().is_empty());
+        assert_eq!(response.activation_path, ActivationPath::None);
+        assert_eq!(response.post_path, PostPath::Pid);
+        assert_eq!(
+            input.pressed.borrow().as_slice(),
+            &[(NamedKey::Return, vec![])]
+        );
+    }
+
+    #[test]
+    fn perform_keyboard_treats_a_pid_resolution_error_as_no_pid() {
+        // `resolve_app_pid` failing (e.g. the target is not running)
+        // must fall back to activation, exactly like a resolved `None`
+        // — never propagate the error, and never silently drop to a
+        // global post for a *named* target (see the doc comment on
+        // `perform_keyboard`: unlike `perform_tap`'s coordinates, a
+        // keyboard post carries no addressing of its own without a pid).
+        let wm = FakeWindowManager::new(PixelSize {
+            width: 100.0,
+            height: 100.0,
+        })
+        .with_pid_resolution_error();
+        let input = FakeInputSynthesizer::default();
+        let target = AppIdentifier {
+            bundle_id: Some("com.apple.TextEdit".to_string()),
+            app_name: None,
+        };
+        let request = KeyboardRequest::Type {
+            text: "hi".to_string(),
+            target: Some(target.clone()),
+        };
+
+        let response = perform_keyboard(&wm, &input, &request).unwrap();
+
+        assert_eq!(wm.activated.borrow().as_slice(), &[target]);
+        assert_eq!(response.activation_path, ActivationPath::Raised);
+        assert_eq!(response.post_path, PostPath::Global);
+        assert_eq!(input.typed.borrow().as_slice(), &["hi".to_string()]);
+    }
+
+    #[test]
+    fn perform_keyboard_activates_target_before_typing_when_no_pid_resolves() {
         let wm = FakeWindowManager::new(PixelSize {
             width: 100.0,
             height: 100.0,
@@ -771,10 +898,11 @@ mod tests {
         assert_eq!(wm.activated.borrow().as_slice(), &[target]);
         assert_eq!(input.typed.borrow().as_slice(), &["hi".to_string()]);
         assert_eq!(response.activation_path, ActivationPath::Raised);
+        assert_eq!(response.post_path, PostPath::Global);
     }
 
     #[test]
-    fn perform_keyboard_activates_target_app_before_key_press() {
+    fn perform_keyboard_activates_target_before_key_press_when_no_pid_resolves() {
         let wm = FakeWindowManager::new(PixelSize {
             width: 100.0,
             height: 100.0,
@@ -794,10 +922,11 @@ mod tests {
 
         assert_eq!(wm.activated.borrow().as_slice(), &[target]);
         assert_eq!(response.activation_path, ActivationPath::Raised);
+        assert_eq!(response.post_path, PostPath::Global);
     }
 
     #[test]
-    fn perform_keyboard_prefers_raise_free_activation_when_available() {
+    fn perform_keyboard_prefers_raise_free_activation_when_no_pid_resolves() {
         let wm = FakeWindowManager::new(PixelSize {
             width: 100.0,
             height: 100.0,
@@ -869,6 +998,7 @@ mod tests {
         let response = perform_keyboard(&wm, &input, &request).unwrap();
 
         assert_eq!(response.post_path, PostPath::Pid);
+        assert!(wm.activated.borrow().is_empty());
     }
 
     #[test]
