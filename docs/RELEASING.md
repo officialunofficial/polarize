@@ -66,7 +66,7 @@ This file is generated, not hand-written. Run this after editing
 dist generate --mode ci
 ```
 
-The generated workflow runs four stages:
+The generated workflow runs five stages:
 
 1. Plans the release (`dist plan`).
 2. Builds the `polarize` binary for `aarch64-apple-darwin` and
@@ -78,6 +78,9 @@ The generated workflow runs four stages:
    build time, every release.
 4. Creates a GitHub Release for the tag and uploads every artifact to
    it.
+5. Assembles, signs, and notarizes `Polarize.app`, then uploads it as
+   an extra release asset — a hand-written custom job, not a generated
+   stage. See "Signing and notarization" below.
 
 `dist-workspace.toml` also sets `github-attestations = true`. Each
 built artifact gets a signed build-provenance attestation
@@ -90,28 +93,35 @@ have yet — see "What this doesn't do" below.
 
 ## Signing
 
-`dist-workspace.toml` sets `macos-sign = true`. A release stays
-ad-hoc-signed until three GitHub Actions secrets all exist:
+`dist-workspace.toml` sets `macos-sign = true`. `dist` needs three
+GitHub Actions secrets to sign with a real identity. All three exist
+now:
 
 | Secret | Purpose | Present? |
 |---|---|---|
 | `CODESIGN_IDENTITY` | The Developer ID Application identity string, e.g. `Developer ID Application: Name (TEAMID)`. | Yes |
-| `CODESIGN_CERTIFICATE_PASSWORD` | Password for the `.p12` export below. | Not yet |
+| `CODESIGN_CERTIFICATE_PASSWORD` | Password for the `.p12` export below. | Yes |
 | `CODESIGN_CERTIFICATE` | Base64-encoded `.p12` export of a Developer ID Application certificate. | Yes |
 
 These are `dist`'s own three signing secret names. Its `Codesign::new`
 function reads exactly these three environment variables. This repo
-did not invent them. All three need a paid Apple Developer Program
-membership, held by the repo owner, before they can exist. `dist`
-signs with them when present. It falls back to an ad-hoc signature
-when any secret is missing, with no hard failure. The current gap —
-`CODESIGN_CERTIFICATE_PASSWORD` still missing — keeps releases
-ad-hoc-signed. It does not break them.
+did not invent them. All three needed a paid Apple Developer Program
+membership, held by the repo owner, before they could exist.
 `.github/workflows/release.yml`'s build job already maps all three
-secrets into `dist`'s environment, ready for the moment the last one
-lands. No further workflow change is needed then.
+secrets into `dist`'s environment. The next tagged release signs the
+binary with the real Developer ID identity, not an ad-hoc signature.
+No further workflow change is needed for that.
 
-## Why an unsigned release still matters
+This Developer ID signature does not, on its own, make the released
+binary hardened-runtime-signed or notarizable. `dist`'s generated
+workflow maps only these three secrets. It never sets
+`CODESIGN_OPTIONS`, so `dist`'s own signing step never adds
+`--options runtime`, and it passes no `--entitlements`. That gap
+matters only for the notarized `.app` bundle "Signing and
+notarization" covers below, not for this real-Developer-ID-signature
+milestone.
+
+## Why a stable signing identity matters
 
 This repo's `justfile` already solves the *local* version of this
 problem. `just build` signs the debug binary with a self-signed
@@ -125,21 +135,78 @@ identity on every release. A local ad-hoc-signed build gets a new
 identity on every rebuild, for the same underlying reason. Either way,
 the old grant doesn't survive.
 
-Until `macos-sign = true` and the three secrets above exist, every
-release stays ad-hoc-signed. A user who upgrades `polarize` must then
-re-grant both permissions after every release, with no way around it.
-README.md's "Installing" section states this caveat for users
-directly. See also [`PERMISSIONS.md`](PERMISSIONS.md).
+Now that all three secrets in "Signing" exist, `dist` signs each
+release with the same Developer ID identity every time. A user who
+upgrades `polarize` keeps their existing Accessibility and Screen
+Recording grants across that upgrade. README.md's "Installing" section
+and [`PERMISSIONS.md`](PERMISSIONS.md) still describe the older,
+ad-hoc-signed caveat for releases cut before this fix — update both if
+they still claim every release re-prompts.
+
+## Signing and notarization: `Polarize.app`
+
+`dist` has no built-in bundle-assembly or notarization step. Its own
+`sign/macos.rs` module comment says so directly. Nothing in "Signing"
+above makes `Polarize.app` notarizable — that section only covers the
+bare `polarize` binary `dist` builds and signs itself.
+
+A hand-written job closes that gap:
+[`.github/workflows/build-notarized-app.yml`](../.github/workflows/build-notarized-app.yml).
+`dist-workspace.toml`'s `publish-jobs` key runs it as a custom publish
+job, after the `host` job creates the GitHub Release — see
+[`dist`'s CI customization docs](https://axodotdev.github.io/cargo-dist/book/ci/customizing.html).
+Unlike `release.yml`, this file is not generated. Edit it directly.
+
+It builds `polarize`, then assembles `Polarize.app` via `just
+bundle-app`. It signs the bundle with the same Developer ID identity
+as "Signing" above, plus `--options runtime`, `--timestamp`, and the
+bundle's entitlements. It submits the signed bundle to Apple's notary
+service with `xcrun notarytool submit --wait`, then staples the
+ticket with `xcrun stapler staple`. It uploads the stapled result as
+an extra release asset — alongside, not instead of, the existing
+npm/shell-installer/Homebrew channels.
+
+Four decisions, made by the repo owner, shape this job:
+
+- **Additional asset, not a replacement.** The bare-binary channels
+  keep working exactly as before. `Polarize.app` is a new, fourth
+  asset, for standalone use or later embedding into another app.
+- **Two bundles, not one universal binary.** `Polarize-aarch64-apple-darwin.zip`
+  and `Polarize-x86_64-apple-darwin.zip` notarize separately, matching
+  `dist`'s own two-target build matrix. No `lipo` merge step exists.
+- **A notarization failure does not block the release.** The `host`
+  job already created the GitHub Release before this job runs. A
+  failed notarization leaves that release published, without the
+  `.app` asset. The job itself, and the `announce` job after it, both
+  report the failure.
+- **`notarytool` authenticates with an App Store Connect API key**, not
+  an Apple ID and app-specific password. No 2FA prompt, works cleanly
+  in CI. See
+  [Apple's TN3147](https://developer.apple.com/documentation/technotes/tn3147-migrating-to-the-latest-notarization-tool)
+  for both supported auth methods.
+
+Three more GitHub Actions secrets drive this job, unrelated to the
+`CODESIGN_*` secrets above. Those sign the bundle. These authenticate
+the notarization submission itself:
+
+| Secret | Purpose |
+|---|---|
+| `NOTARY_KEY_ID` | The App Store Connect API key's Key ID. |
+| `NOTARY_ISSUER_ID` | The API key's Issuer ID (a UUID). |
+| `NOTARY_KEY` | Base64-encoded `.p8` private key file for that API key. |
+
+All three need an App Store Connect API key, generated by the repo
+owner in App Store Connect's own Users and Access page. Until they
+exist, `custom-build-notarized-app` fails at its notarization
+submission step — the release itself still publishes; see the
+non-blocking decision above.
+
+See PINV-54 in [`docs/INVARIANTS.md`](INVARIANTS.md) for the
+enforcement story, and PINV-52/PINV-53 for why `Polarize.app` needs
+its own signing identity at all.
 
 ## What this doesn't do
 
-- **Notarization.** `dist` has no built-in notarization step. Adding
-  one needs a hand-written `xcrun notarytool submit` call layered on
-  top. None of `polarize`'s three install channels — npm, the shell
-  installer, Homebrew — trigger Gatekeeper's quarantine check. That
-  check only fires against a direct browser download. Notarization
-  buys little for these channels, so it stays unimplemented. Revisit
-  this only if a browser-download channel is added later.
 - **npm registry publish.** `dist build` produces a ready-to-publish
   npm package as a release artifact. It's scoped
   `@officialunofficial/polarize`, matching Argent's own

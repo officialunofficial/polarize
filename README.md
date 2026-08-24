@@ -159,13 +159,11 @@ Homebrew isn't available yet. `dist` builds a formula on every release.
 Publishing it needs a tap repository that doesn't exist yet — see
 "What this doesn't do" in [`docs/RELEASING.md`](docs/RELEASING.md).
 
-Every path installs an **unsigned** binary today. This holds until the
-repo owner adds Apple Developer signing secrets to the release
-workflow (see `docs/RELEASING.md`'s "Signing" section). Until then,
-re-grant Accessibility and Screen Recording after every upgrade. macOS
-ties each TCC grant to the binary's code-signing identity. An unsigned
-binary gets a new identity on every release, so each new release loses
-the old grant.
+Every path installs a binary signed with a real Developer ID identity
+today (see `docs/RELEASING.md`'s "Signing" section). macOS ties each
+TCC grant to the binary's code-signing identity. That identity stays
+the same across releases, so Accessibility and Screen Recording grants
+survive an upgrade.
 
 After installing by either path, run the bootstrap flag once to grant
 permissions:
@@ -258,6 +256,39 @@ expect. Most clients write their own project- or machine-scoped config
 file for this (check your client's docs for its exact location and
 CLI, if it has one); treat that file as machine-specific and keep it
 out of version control, since it embeds an absolute local path.
+
+### Using it as a Claude Code plugin
+
+`polarize` is also its own Claude Code plugin marketplace — this repo
+carries `.claude-plugin/marketplace.json` and `.claude-plugin/plugin.json`
+at its root. Install it directly, once `polarize` itself is installed
+and on `PATH` (see "Installing" above):
+
+```
+/plugin marketplace add officialunofficial/polarize
+/plugin install polarize@polarize
+```
+
+This registers `polarize`'s MCP tools automatically — no manual
+stdio config needed. It also installs the `polarize-setup` skill,
+which walks through the one-time `--request-permissions` bootstrap.
+A `SessionStart` hook prints an install hint if `polarize` isn't on
+`PATH` yet. See [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md) for what
+each permission covers.
+
+The plugin has no install-time hook of its own — it can't fetch the
+`polarize` binary for you. Install `polarize` first, through any of
+the channels above, then install the plugin.
+
+`claude plugin validate .claude-plugin/marketplace.json --strict`
+passes clean. `claude plugin validate .claude-plugin/plugin.json
+--strict` reports one warning: this repo's own root `CLAUDE.md` is
+not loaded as plugin context. That is expected, by Claude Code's own
+design, for any plugin whose source is a full repo root — see
+[Anthropic's plugin reference](https://code.claude.com/docs/en/plugins-reference).
+It is not a defect. Moving the plugin into its own subdirectory would
+silence it. But `docs/PERMISSIONS.md` would then stop shipping inside
+the plugin's own source tree — a worse trade.
 
 ### Keeping TCC permission grants across rebuilds
 

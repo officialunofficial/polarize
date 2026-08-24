@@ -2,8 +2,9 @@
 /dist
 .DS_Store
 
-# `claude mcp add` writes this with an absolute, machine-specific
-# binary path. See README's "Using it with an MCP client" section for
-# the command that regenerates it locally.
-/.mcp.json
-.DS_Store
+# `.mcp.json` is tracked, not ignored. It is the Claude Code plugin's
+# own MCP server declaration (see `.claude-plugin/plugin.json`), and
+# points at the installed `polarize` binary through PATH, not an
+# absolute path. A contributor who wants their own local MCP
+# registration for testing should use `claude mcp add --scope local`
+# instead of editing this file, to avoid colliding with it.

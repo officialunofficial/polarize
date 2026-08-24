@@ -39,6 +39,25 @@ macos-sign = true
 # artifact really came from this repo's CI, not a tampered copy. It costs
 # nothing extra to enable and needs no secrets of its own.
 github-attestations = true
+# Runs after `host` creates the GitHub Release. Assembles, signs, and
+# notarizes `Polarize.app`, then uploads it as an extra release asset.
+# `dist` has no built-in bundle or notarization support (see
+# docs/RELEASING.md's "Notarization" section), so this job is
+# hand-written, not generated. `dist generate --mode ci` wires it into
+# `.github/workflows/release.yml` as
+# `.github/workflows/build-notarized-app.yml` — that referenced file
+# is the one to hand-edit; `release.yml` itself still is not.
+#
+# Both keys below are flat `[dist]`-level keys, and must stay above
+# the `[dist.github-custom-runners]` table that follows. TOML assigns
+# a bare `key = value` line to whichever table header came last, so a
+# key placed after `[dist.github-custom-runners]` silently becomes
+# part of that sub-table instead — confirmed live, the wrong placement
+# parsed as a bogus runner-target entry with no error.
+publish-jobs = ["./build-notarized-app"]
+[dist.github-custom-job-permissions.build-notarized-app]
+contents = "write"
+
 # `dist`'s own runner auto-selection picked `macos-14`/`macos-15-intel` for
 # these two targets. Both labels currently alias to the same underlying
 # `macos-26-arm64` image as the `macos-26` label, but real builds still

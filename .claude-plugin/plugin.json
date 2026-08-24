@@ -1,0 +1,21 @@
+{
+  "name": "polarize",
+  "displayName": "Polarize",
+  "version": "0.1.0",
+  "description": "Automates real macOS AppKit apps over MCP: screenshot capture, accessibility-tree inspection, and synthetic mouse/keyboard input.",
+  "author": {
+    "name": "Official Unofficial, Inc.",
+    "url": "https://github.com/officialunofficial"
+  },
+  "homepage": "https://github.com/officialunofficial/polarize",
+  "repository": "https://github.com/officialunofficial/polarize",
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "macos",
+    "mcp",
+    "automation",
+    "accessibility",
+    "screenshot",
+    "appkit"
+  ]
+}

@@ -39,9 +39,9 @@ See its "Automation permission and the app bundle" section too.
 Together they cover the full one-time setup.
 
 This local self-signed certificate is a dev-only analog of a real
-problem released binaries also have. See
-[`docs/RELEASING.md`](docs/RELEASING.md)'s "Why an unsigned release
-still matters" for that side of it, and its "Release PR authentication"
+problem released binaries used to have. See
+[`docs/RELEASING.md`](docs/RELEASING.md)'s "Why a stable signing
+identity matters" for that side of it, and its "Release PR authentication"
 section for the separate secrets `.github/workflows/release-plz.yml`
 needs before it can run.
 

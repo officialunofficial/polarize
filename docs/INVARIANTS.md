@@ -1779,8 +1779,9 @@ decide.** Here is where each landed, with a pointer to the evidence.
    review found this decided without the human sign-off the plan
    asked for. The user then chose it directly.
 5. Should release and `cargo-dist` packaging gain a signed `.app`
-   artifact? Still open. Nothing in this pass touches
-   `dist-workspace.toml` or the release workflow.
+   artifact? Resolved in a later session. See PINV-54: a custom
+   `dist` publish job now assembles, signs, and notarizes
+   `Polarize.app` on every tagged release.
 6. Is PINV-51's disclaimed bootstrap send still needed, once
    `polarize` is self-responsible? No, not unconditionally. See
    PINV-51's own final follow-up note for the full account: its
@@ -1916,6 +1917,48 @@ No provisioning profile was embedded in the bundle at any point. This
 confirms one thing, for this specific entitlement and this specific
 macOS session. App Group container access on macOS does not require
 one, the way iOS does.
+
+### PINV-54: a tagged release notarizes `Polarize.app`, as a custom `dist` publish job
+
+- Always: `.github/workflows/build-notarized-app.yml` builds, signs,
+  notarizes, staples, and uploads `Polarize.app` for both
+  `aarch64-apple-darwin` and `x86_64-apple-darwin`, as two separate
+  bundles — not one universal binary. `dist-workspace.toml`'s
+  `publish-jobs` key runs it as a custom publish job, after the `host`
+  job creates the GitHub Release. It uploads its own zip as an
+  additional asset on that release. It never replaces the bare-binary
+  assets `dist` already builds.
+- Because: `cargo-dist` 0.32.0 has no built-in bundle-assembly or
+  notarization support — its own `sign/macos.rs` module comment says
+  so directly. A signed but un-notarized `.app`, downloaded directly
+  through a browser, still fails Gatekeeper on a fresh Mac. See
+  docs/RELEASING.md's "Notarization" section for the full account,
+  including why the un-notarized bare binary was fine until this
+  bundle existed.
+- If violated: a user who downloads `Polarize.app` straight from a
+  GitHub Release, rather than through npm/Homebrew/the shell
+  installer, hits Gatekeeper's quarantine block. macOS refuses to open
+  it, with no clear path to trust it.
+
+**A human decided four open questions before this shipped.** See
+docs/RELEASING.md's "Signing and notarization" section for the full
+record. The notarized bundle ships as an additional asset, not a
+replacement. It ships as two arch-specific bundles, not one universal
+one. A notarization failure does not block the release, since the
+`host` job already created it. CI authenticates to `notarytool` with
+an App Store Connect API key, not an Apple ID.
+
+**Not automated.** This needs a real tagged release, run through real
+CI, to verify end to end. A notarization submission cannot run
+locally, since it needs the same App Store Connect API key CI uses. A
+`spctl --assess` check against a genuinely quarantined download needs
+a browser-downloaded copy on a real Mac, too.
+
+The custom job's own TOML placement was verified locally, though.
+`dist generate --mode ci --check` confirms `dist-workspace.toml`
+parses as intended. It produces the expected `release.yml` diff. Both
+checks passed without needing any `CODESIGN_*` or notary secret to be
+present.
 
 ## Enforcement checklist
 
@@ -2914,3 +2957,15 @@ one, the way iOS does.
   two functions are otherwise compile/link-checked only. The actual
   `NSFileManager` call they wrap needs a real, team-registered App
   Group behind it. Without one, it cannot run meaningfully.
+
+- **PINV-54** — not automated: this needs a real tagged release, a
+  real Developer ID certificate, and a real App Store Connect API key,
+  none of which exist in CI ahead of a real release. `dist generate
+  --mode ci --check` confirms locally that `dist-workspace.toml`
+  parses as intended and produces the expected `release.yml` diff.
+  `build-notarized-app.yml`'s own YAML was checked for syntax
+  validity, and its `just bin=... identity=... bundle-app` invocation
+  was run locally against a self-signed identity to confirm the
+  variable overrides work. The full notarize-staple-upload path has
+  not run end to end. It needs the next real tagged release, once the
+  three `NOTARY_*` secrets exist, to verify.
