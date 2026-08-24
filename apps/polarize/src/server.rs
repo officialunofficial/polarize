@@ -26,9 +26,18 @@
 //! - `describe` walks that same tree. It reads eleven attributes per
 //!   node, each a separate `AXUIElementCopyAttributeValue` round-trip to
 //!   the target app, so a large app costs seconds.
+//! - `screenshot` waits on a `ScreenCaptureKit` completion callback.
+//!   `screencapturekit` gives that wait no timeout of its own.
+//!   `polarize-macos` bounds it to ten seconds instead (see issue #50).
+//!   A real capture still finishes in milliseconds. Ten seconds is
+//!   only the worst-case bound.
+//! - `tap` can hit that same unbounded wait, for an `App`- or
+//!   `Window`-scoped target. `WindowManager::resolve_target_rect` calls
+//!   the same `ScreenCaptureKit` content lookup `screenshot` does. The
+//!   same ten-second bound applies here too.
 //!
-//! `screenshot`, `tap`, and `keyboard` stay synchronous. Each returns in
-//! milliseconds.
+//! `keyboard` stays synchronous. It never touches `ScreenCaptureKit`,
+//! and returns in milliseconds.
 //!
 //! The `polarize-macos` types are all zero-sized unit structs, so a
 //! `blocking` closure constructs fresh ones rather than borrowing `self`
@@ -131,7 +140,6 @@ use std::sync::Arc;
 /// because the closure must own everything it touches.
 #[derive(Debug, Default)]
 pub struct PolarizeServer {
-    capture: MacScreenCapture,
     input: MacInputSynthesizer,
     window: MacWindowManager,
     clipboard: MacClipboard,
@@ -239,13 +247,11 @@ impl PolarizeServer {
     /// for why.
     #[tool(name = "screenshot")]
     #[tracing::instrument(skip(self))]
-    fn screenshot(
+    async fn screenshot(
         &self,
         Parameters(request): Parameters<ScreenshotRequest>,
     ) -> Result<Json<ScreenshotResponse>, ErrorData> {
-        orchestrate::perform_screenshot(&self.capture, &request)
-            .map(Json)
-            .map_err(to_error_data)
+        blocking(move || orchestrate::perform_screenshot(&MacScreenCapture, &request)).await
     }
 
     /// Walks the `AXUIElement` accessibility tree for the frontmost (or
@@ -267,13 +273,14 @@ impl PolarizeServer {
     /// any native call runs; see PINV-4 in `docs/INVARIANTS.md`.
     #[tool(name = "tap")]
     #[tracing::instrument(skip(self))]
-    fn tap(
+    async fn tap(
         &self,
         Parameters(request): Parameters<TapRequest>,
     ) -> Result<Json<TapResponse>, ErrorData> {
-        orchestrate::perform_tap(&self.window, &self.input, &request)
-            .map(Json)
-            .map_err(to_error_data)
+        blocking(move || {
+            orchestrate::perform_tap(&MacWindowManager, &MacInputSynthesizer, &request)
+        })
+        .await
     }
 
     /// Posts synthetic key events: either types a literal string, or

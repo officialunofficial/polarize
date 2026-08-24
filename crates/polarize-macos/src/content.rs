@@ -7,15 +7,41 @@
 //! Real native calls throughout; see the crate-level "what is and is not
 //! verified" note.
 
+use std::time::Duration;
+
 use polarize_core::error::PolarizeError;
 use screencapturekit::shareable_content::{SCDisplay, SCShareableContent, SCWindow};
 
+/// How long [`crate::capture`] and [`crate::window`] wait for a
+/// `ScreenCaptureKit` completion callback before giving up.
+///
+/// `screencapturekit`'s `SyncCompletion::wait()` blocks a `Condvar`
+/// with no timeout of its own. A callback that never fires then hangs
+/// the calling thread forever. See issue #50: a real callback went
+/// unanswered under stale Screen Recording TCC state. This module's
+/// own doc note says a real capture normally finishes in milliseconds.
+/// Ten seconds is a generous bound against that.
+pub(crate) const SCREENCAPTUREKIT_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Fetches a fresh content snapshot. `ScreenCaptureKit` scopes this to
-/// whatever the caller currently has Screen Recording permission to see;
-/// a permission failure surfaces here as [`PolarizeError::Platform`].
+/// whatever the caller currently has Screen Recording permission to
+/// see. A permission failure surfaces here as
+/// [`PolarizeError::Platform`].
+///
+/// `SCShareableContent` is `Send` — the crate marks it so. This call
+/// itself runs inside [`polarize_core::timeout::with_timeout`], right
+/// here, bounding the one blocking wait every caller of this function
+/// shares. A caller does not need its own timeout around this specific
+/// call. A caller whose own further work can also block still needs
+/// its own bound around that separate wait — a
+/// `SCScreenshotManager::capture_image` call, say. See
+/// [`SCREENCAPTUREKIT_CALL_TIMEOUT`].
 pub fn shareable_content() -> Result<SCShareableContent, PolarizeError> {
-    SCShareableContent::get()
-        .map_err(|err| PolarizeError::Platform(format!("SCShareableContent::get failed: {err}")))
+    polarize_core::timeout::with_timeout(SCREENCAPTUREKIT_CALL_TIMEOUT, || {
+        SCShareableContent::get().map_err(|err| {
+            PolarizeError::Platform(format!("SCShareableContent::get failed: {err}"))
+        })
+    })
 }
 
 /// Finds the display matching `display_id`, or the first display when

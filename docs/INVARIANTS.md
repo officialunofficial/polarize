@@ -1985,6 +1985,57 @@ parses as intended. It produces the expected `release.yml` diff. Both
 checks passed without needing any `CODESIGN_*` or notary secret to be
 present.
 
+### PINV-55: a `ScreenCaptureKit` completion wait is bounded, never indefinite
+
+- Always: two `screencapturekit` calls block on a completion callback:
+  `content::shareable_content` and `capture_and_encode`'s
+  `SCScreenshotManager::capture_image` call. `shareable_content` backs
+  both `screenshot` and `tap`'s `resolve_target_rect`, for an
+  `App`/`Window` target. Both calls run inside
+  `polarize_core::timeout::with_timeout`. Both are bounded by
+  `content::SCREENCAPTUREKIT_CALL_TIMEOUT` — ten seconds. A call that
+  does not answer in time returns `PolarizeError::Platform`, naming the
+  timeout. It never blocks forever. `apps/polarize`'s `screenshot` and
+  `tap` tools both moved through `blocking()`, matching `describe`. A
+  timed-out call there parks a `tokio` blocking-pool thread. It never
+  parks a worker thread the stdio transport itself depends on.
+- Because: `screencapturekit`'s `SyncCompletion::wait()`
+  (`doom-fish-utils`) blocks a `Condvar` with no timeout of its own. It
+  waits for a Swift completion handler that can go unanswered. See
+  issue #50: a `screenshot` call hung for 1800 seconds, with no
+  response and no error. The likely cause was stale Screen Recording
+  TCC state, after PINV-52's bundle-identity change. A caller with no
+  bound has no way to tell "still working" apart from "will never
+  answer."
+- If violated: a `screenshot` or `App`/`Window`-scoped `tap` call hangs
+  the calling thread indefinitely. No error reaches the MCP caller, and
+  nothing short of killing the process recovers it.
+
+**What this does and does not fix.** The timeout turns a silent,
+unbounded hang into a real, timely `Platform` error. It does not fix
+whatever stops the completion callback from firing in the first place.
+Say that cause is genuinely stale TCC state. Then the real fix is
+re-granting Screen Recording permission to `polarize`'s current bundle
+identity. This timeout is not that fix. `f` — the closure
+`with_timeout` runs — keeps running on its own thread past the
+timeout. There is no way to cancel a blocked native call from the
+outside. A caller that times out repeatedly would otherwise leak one
+thread per call, without bound.
+
+**The worker-thread cap.** `with_timeout` caps how many of its own
+threads may sit abandoned past their timeout at once, process-wide, at
+`MAX_OUTSTANDING_WORKERS` — eight. `WorkerBudget::try_reserve` enforces
+it, with a compare-and-swap loop over one `AtomicUsize`, before a new
+thread ever spawns. A call past the cap refuses outright: no new
+thread, no wait, just an immediate `Platform` error naming the refusal.
+This turns an unbounded leak into a circuit breaker. Eight calls stuck
+on the same failure mode already means something is systematically
+wrong — a ninth stuck thread would not learn anything new, only cost
+more. A caller that times out occasionally still leaks a thread or two
+at a time, exactly as before; only a caller retrying in a tight loop
+now hits the cap and fails fast, instead of accumulating threads
+without limit.
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -3019,3 +3070,40 @@ present.
   variable overrides work. The full notarize-staple-upload path has
   not run end to end. It needs the next real tagged release, once the
   three `NOTARY_*` secrets exist, to verify.
+
+- **PINV-55** — the timeout mechanism itself is fully covered by
+  automated `cargo test -p polarize-core` (`timeout::tests`), with no
+  macOS dependency at all: a closure that finishes in time returns its
+  own `Ok` (`with_timeout_returns_the_closures_ok_when_it_finishes_in_time`);
+  one that finishes in time still returns its own `Err` unchanged
+  (`with_timeout_returns_the_closures_own_err_when_it_finishes_in_time`);
+  one that never finishes in time reports a `Platform` timeout error
+  (`with_timeout_reports_a_platform_error_when_the_closure_never_returns_in_time`).
+  The worker-thread cap has its own coverage, deterministic and
+  thread-free: `WorkerBudget::try_reserve` admits up to its cap and
+  refuses past it (`worker_budget_reserves_up_to_its_cap`); a released
+  slot re-admits (`worker_budget_frees_a_slot_on_release`); a
+  zero-capacity budget admits nothing
+  (`worker_budget_of_zero_reserves_nothing`). One further test proves
+  the cap composes with real, leaked worker threads —
+  `run_with_budget_refuses_a_new_call_once_its_budget_is_full` fills a
+  small, test-local `WorkerBudget` with genuinely abandoned threads,
+  then confirms the next call refuses immediately, without spawning a
+  thread or waiting out its own timeout. That test uses its own
+  `static` budget, separate from the process-wide `WORKER_BUDGET`,
+  specifically so it cannot starve or be starved by any other test in
+  this module. `cargo build -p polarize-macos` confirms `SCContentFilter`,
+  `SCStreamConfiguration`, and `CGImage` genuinely satisfy the `Send`
+  bound `with_timeout` needs to move them onto their own thread — a
+  real compile check, not an assumption.
+
+  Two things are **not** live-verified in this pass. The first: a
+  real, successful `screenshot`/`tap` call should still complete
+  normally through the added timeout wrapper — the wrapper only bounds
+  an already-real wait, it changes nothing inside it. The second:
+  whether the hang this invariant responds to (issue #50) actually
+  stops recurring, on a real macOS session, under the same conditions
+  that produced it. Both need a human on a real session: one ordinary
+  successful capture, and one repeat of the original window-scoped
+  `screenshot` call that hung. That repeat should now either succeed
+  or fail within ten seconds, never hang.
