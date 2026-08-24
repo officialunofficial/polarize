@@ -1962,38 +1962,41 @@ present.
 
 ### PINV-55: a `ScreenCaptureKit` completion wait is bounded, never indefinite
 
-- Always: every `screencapturekit` call that blocks on a completion
-  callback — `content::shareable_content` (used by `screenshot` and by
-  `tap`'s `resolve_target_rect` for an `App`/`Window` target) and
-  `capture_and_encode`'s `SCScreenshotManager::capture_image` call —
-  runs inside `polarize_core::timeout::with_timeout`, bounded by
-  `content::SCREENCAPTUREKIT_CALL_TIMEOUT` (ten seconds). A call that
-  does not answer in time returns `PolarizeError::Platform` naming the
-  timeout, instead of blocking forever. `apps/polarize`'s `screenshot`
-  tool also moved through `blocking()` (matching `describe`), so a
-  timed-out call parks a `tokio` blocking-pool thread, never a worker
-  thread the whole stdio transport depends on.
+- Always: two `screencapturekit` calls block on a completion callback:
+  `content::shareable_content` and `capture_and_encode`'s
+  `SCScreenshotManager::capture_image` call. `shareable_content` backs
+  both `screenshot` and `tap`'s `resolve_target_rect`, for an
+  `App`/`Window` target. Both calls run inside
+  `polarize_core::timeout::with_timeout`. Both are bounded by
+  `content::SCREENCAPTUREKIT_CALL_TIMEOUT` — ten seconds. A call that
+  does not answer in time returns `PolarizeError::Platform`, naming the
+  timeout. It never blocks forever. `apps/polarize`'s `screenshot` and
+  `tap` tools both moved through `blocking()`, matching `describe`. A
+  timed-out call there parks a `tokio` blocking-pool thread. It never
+  parks a worker thread the stdio transport itself depends on.
 - Because: `screencapturekit`'s `SyncCompletion::wait()`
-  (`doom-fish-utils`) blocks a `Condvar` with no timeout of its own,
-  waiting for a Swift completion handler that can go unanswered — see
-  issue #50, where a `screenshot` call hung for 1800 seconds with no
-  response and no error, most likely under stale Screen Recording TCC
-  state after PINV-52's bundle-identity change. A caller with no bound
-  has no way to distinguish "still working" from "will never answer."
+  (`doom-fish-utils`) blocks a `Condvar` with no timeout of its own. It
+  waits for a Swift completion handler that can go unanswered. See
+  issue #50: a `screenshot` call hung for 1800 seconds, with no
+  response and no error. The likely cause was stale Screen Recording
+  TCC state, after PINV-52's bundle-identity change. A caller with no
+  bound has no way to tell "still working" apart from "will never
+  answer."
 - If violated: a `screenshot` or `App`/`Window`-scoped `tap` call hangs
-  the calling thread indefinitely, with no error surfaced to the MCP
-  caller and no way to recover short of killing the process.
+  the calling thread indefinitely. No error reaches the MCP caller, and
+  nothing short of killing the process recovers it.
 
 **What this does and does not fix.** The timeout turns a silent,
 unbounded hang into a real, timely `Platform` error. It does not fix
-whatever stops the completion callback from firing in the first place
-— if that cause is genuinely stale TCC state, the real fix is
+whatever stops the completion callback from firing in the first place.
+Say that cause is genuinely stale TCC state. Then the real fix is
 re-granting Screen Recording permission to `polarize`'s current bundle
-identity, not this timeout. `f` (the closure `with_timeout` runs) keeps
-running on its own thread past the timeout; there is no way to cancel
-a blocked native call from the outside. A caller that times out
-repeatedly leaks one thread per call — acceptable for an occasional
-stalled call, not for a caller retrying in a tight loop.
+identity. This timeout is not that fix. `f` — the closure
+`with_timeout` runs — keeps running on its own thread past the
+timeout. There is no way to cancel a blocked native call from the
+outside. A caller that times out repeatedly leaks one thread per call. That
+cost is acceptable for an occasional stalled call, not for a caller
+retrying in a tight loop.
 
 ## Enforcement checklist
 
@@ -3018,13 +3021,13 @@ stalled call, not for a caller retrying in a tight loop.
   bound `with_timeout` needs to move them onto their own thread — a
   real compile check, not an assumption.
 
-  What is **not** live-verified in this pass: whether a real,
-  successful `screenshot`/`tap` call still completes normally through
-  the added timeout wrapper (it should — the wrapper only bounds an
-  already-real wait, it does not change what runs inside it), and
+  Two things are **not** live-verified in this pass. The first: a
+  real, successful `screenshot`/`tap` call should still complete
+  normally through the added timeout wrapper — the wrapper only bounds
+  an already-real wait, it changes nothing inside it. The second:
   whether the hang this invariant responds to (issue #50) actually
-  stops recurring on a real macOS session under the same conditions
+  stops recurring, on a real macOS session, under the same conditions
   that produced it. Both need a human on a real session: one ordinary
   successful capture, and one repeat of the original window-scoped
-  `screenshot` call that hung, this time confirming it now either
-  succeeds or fails within ten seconds instead of hanging.
+  `screenshot` call that hung. That repeat should now either succeed
+  or fail within ten seconds, never hang.

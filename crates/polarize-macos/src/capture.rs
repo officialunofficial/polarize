@@ -99,15 +99,16 @@ impl ScreenCapture for MacScreenCapture {
 /// `polarize-core`'s base64-in-response schema (see `schema.rs`'s
 /// design-decision doc comment).
 ///
-/// Takes `filter`/`config` by value, not by reference: the
+/// Takes `filter`/`config` by value, not by reference. The
 /// `SCScreenshotManager::capture_image` call below blocks on a
-/// `Condvar` with no timeout of its own (see issue #50 and
-/// [`content::SCREENCAPTUREKIT_CALL_TIMEOUT`]'s doc), so it runs inside
-/// [`polarize_core::timeout::with_timeout`] on a dedicated thread —
-/// which needs `'static` ownership of everything it captures.
-/// `SCContentFilter`, `SCStreamConfiguration`, and `CGImage` are all
-/// `Send` (the crates mark each so), so only the timeout wait is added
-/// here — nothing about the real capture call changes.
+/// `Condvar` with no timeout of its own. See issue #50, and
+/// [`content::SCREENCAPTUREKIT_CALL_TIMEOUT`]'s own doc. So this call
+/// runs inside [`polarize_core::timeout::with_timeout`], on a
+/// dedicated thread. That thread needs `'static` ownership of
+/// everything it touches. `SCContentFilter`, `SCStreamConfiguration`,
+/// and `CGImage` are all `Send` — the crates mark each so. Only the
+/// timeout wait is added here. The real capture call itself is
+/// unchanged.
 fn capture_and_encode(
     filter: SCContentFilter,
     config: SCStreamConfiguration,

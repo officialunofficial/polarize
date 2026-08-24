@@ -26,13 +26,18 @@
 //! - `describe` walks that same tree. It reads eleven attributes per
 //!   node, each a separate `AXUIElementCopyAttributeValue` round-trip to
 //!   the target app, so a large app costs seconds.
-//! - `screenshot` waits on a `ScreenCaptureKit` completion callback that
-//!   `screencapturekit` gives no timeout of its own — bounded to ten
-//!   seconds by `polarize-macos`'s own internal wait (see issue #50),
-//!   but that bound is still far longer than the milliseconds a real
-//!   capture normally takes.
+//! - `screenshot` waits on a `ScreenCaptureKit` completion callback.
+//!   `screencapturekit` gives that wait no timeout of its own.
+//!   `polarize-macos` bounds it to ten seconds instead (see issue #50).
+//!   A real capture still finishes in milliseconds. Ten seconds is
+//!   only the worst-case bound.
+//! - `tap` can hit that same unbounded wait, for an `App`- or
+//!   `Window`-scoped target. `WindowManager::resolve_target_rect` calls
+//!   the same `ScreenCaptureKit` content lookup `screenshot` does. The
+//!   same ten-second bound applies here too.
 //!
-//! `tap` and `keyboard` stay synchronous. Each returns in milliseconds.
+//! `keyboard` stays synchronous. It never touches `ScreenCaptureKit`,
+//! and returns in milliseconds.
 //!
 //! The `polarize-macos` types are all zero-sized unit structs, so a
 //! `blocking` closure constructs fresh ones rather than borrowing `self`
@@ -268,13 +273,14 @@ impl PolarizeServer {
     /// any native call runs; see PINV-4 in `docs/INVARIANTS.md`.
     #[tool(name = "tap")]
     #[tracing::instrument(skip(self))]
-    fn tap(
+    async fn tap(
         &self,
         Parameters(request): Parameters<TapRequest>,
     ) -> Result<Json<TapResponse>, ErrorData> {
-        orchestrate::perform_tap(&self.window, &self.input, &request)
-            .map(Json)
-            .map_err(to_error_data)
+        blocking(move || {
+            orchestrate::perform_tap(&MacWindowManager, &MacInputSynthesizer, &request)
+        })
+        .await
     }
 
     /// Posts synthetic key events: either types a literal string, or
