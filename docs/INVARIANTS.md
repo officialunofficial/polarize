@@ -1960,6 +1960,41 @@ parses as intended. It produces the expected `release.yml` diff. Both
 checks passed without needing any `CODESIGN_*` or notary secret to be
 present.
 
+### PINV-55: a `ScreenCaptureKit` completion wait is bounded, never indefinite
+
+- Always: every `screencapturekit` call that blocks on a completion
+  callback — `content::shareable_content` (used by `screenshot` and by
+  `tap`'s `resolve_target_rect` for an `App`/`Window` target) and
+  `capture_and_encode`'s `SCScreenshotManager::capture_image` call —
+  runs inside `polarize_core::timeout::with_timeout`, bounded by
+  `content::SCREENCAPTUREKIT_CALL_TIMEOUT` (ten seconds). A call that
+  does not answer in time returns `PolarizeError::Platform` naming the
+  timeout, instead of blocking forever. `apps/polarize`'s `screenshot`
+  tool also moved through `blocking()` (matching `describe`), so a
+  timed-out call parks a `tokio` blocking-pool thread, never a worker
+  thread the whole stdio transport depends on.
+- Because: `screencapturekit`'s `SyncCompletion::wait()`
+  (`doom-fish-utils`) blocks a `Condvar` with no timeout of its own,
+  waiting for a Swift completion handler that can go unanswered — see
+  issue #50, where a `screenshot` call hung for 1800 seconds with no
+  response and no error, most likely under stale Screen Recording TCC
+  state after PINV-52's bundle-identity change. A caller with no bound
+  has no way to distinguish "still working" from "will never answer."
+- If violated: a `screenshot` or `App`/`Window`-scoped `tap` call hangs
+  the calling thread indefinitely, with no error surfaced to the MCP
+  caller and no way to recover short of killing the process.
+
+**What this does and does not fix.** The timeout turns a silent,
+unbounded hang into a real, timely `Platform` error. It does not fix
+whatever stops the completion callback from firing in the first place
+— if that cause is genuinely stale TCC state, the real fix is
+re-granting Screen Recording permission to `polarize`'s current bundle
+identity, not this timeout. `f` (the closure `with_timeout` runs) keeps
+running on its own thread past the timeout; there is no way to cancel
+a blocked native call from the outside. A caller that times out
+repeatedly leaks one thread per call — acceptable for an occasional
+stalled call, not for a caller retrying in a tight loop.
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -2969,3 +3004,27 @@ present.
   variable overrides work. The full notarize-staple-upload path has
   not run end to end. It needs the next real tagged release, once the
   three `NOTARY_*` secrets exist, to verify.
+
+- **PINV-55** — the timeout mechanism itself is fully covered by
+  automated `cargo test -p polarize-core` (`timeout::tests`), with no
+  macOS dependency at all: a closure that finishes in time returns its
+  own `Ok` (`with_timeout_returns_the_closures_ok_when_it_finishes_in_time`);
+  one that finishes in time still returns its own `Err` unchanged
+  (`with_timeout_returns_the_closures_own_err_when_it_finishes_in_time`);
+  one that never finishes in time reports a `Platform` timeout error
+  (`with_timeout_reports_a_platform_error_when_the_closure_never_returns_in_time`).
+  `cargo build -p polarize-macos` confirms `SCContentFilter`,
+  `SCStreamConfiguration`, and `CGImage` genuinely satisfy the `Send`
+  bound `with_timeout` needs to move them onto their own thread — a
+  real compile check, not an assumption.
+
+  What is **not** live-verified in this pass: whether a real,
+  successful `screenshot`/`tap` call still completes normally through
+  the added timeout wrapper (it should — the wrapper only bounds an
+  already-real wait, it does not change what runs inside it), and
+  whether the hang this invariant responds to (issue #50) actually
+  stops recurring on a real macOS session under the same conditions
+  that produced it. Both need a human on a real session: one ordinary
+  successful capture, and one repeat of the original window-scoped
+  `screenshot` call that hung, this time confirming it now either
+  succeeds or fails within ten seconds instead of hanging.

@@ -67,7 +67,7 @@ impl ScreenCapture for MacScreenCapture {
         let config = SCStreamConfiguration::new()
             .with_width(display.width())
             .with_height(display.height());
-        capture_and_encode(&filter, &config)
+        capture_and_encode(filter, config)
     }
 
     fn capture_window(
@@ -86,7 +86,7 @@ impl ScreenCapture for MacScreenCapture {
         let config = SCStreamConfiguration::new()
             .with_width(size.width.round() as u32)
             .with_height(size.height.round() as u32);
-        capture_and_encode(&filter, &config)
+        capture_and_encode(filter, config)
     }
 }
 
@@ -98,12 +98,25 @@ impl ScreenCapture for MacScreenCapture {
 /// them. This is an internal implementation detail: it stays invisible to
 /// `polarize-core`'s base64-in-response schema (see `schema.rs`'s
 /// design-decision doc comment).
+///
+/// Takes `filter`/`config` by value, not by reference: the
+/// `SCScreenshotManager::capture_image` call below blocks on a
+/// `Condvar` with no timeout of its own (see issue #50 and
+/// [`content::SCREENCAPTUREKIT_CALL_TIMEOUT`]'s doc), so it runs inside
+/// [`polarize_core::timeout::with_timeout`] on a dedicated thread —
+/// which needs `'static` ownership of everything it captures.
+/// `SCContentFilter`, `SCStreamConfiguration`, and `CGImage` are all
+/// `Send` (the crates mark each so), so only the timeout wait is added
+/// here — nothing about the real capture call changes.
 fn capture_and_encode(
-    filter: &SCContentFilter,
-    config: &SCStreamConfiguration,
+    filter: SCContentFilter,
+    config: SCStreamConfiguration,
 ) -> Result<CapturedImage, PolarizeError> {
-    let image = SCScreenshotManager::capture_image(filter, config)
-        .map_err(|err| PolarizeError::Platform(format!("screen capture failed: {err}")))?;
+    let image =
+        polarize_core::timeout::with_timeout(content::SCREENCAPTUREKIT_CALL_TIMEOUT, move || {
+            SCScreenshotManager::capture_image(&filter, &config)
+                .map_err(|err| PolarizeError::Platform(format!("screen capture failed: {err}")))
+        })?;
     let width = u32::try_from(image.width())
         .map_err(|_| PolarizeError::Platform("captured image width overflows u32".to_string()))?;
     let height = u32::try_from(image.height())

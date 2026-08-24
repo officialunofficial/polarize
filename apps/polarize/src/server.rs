@@ -26,9 +26,13 @@
 //! - `describe` walks that same tree. It reads eleven attributes per
 //!   node, each a separate `AXUIElementCopyAttributeValue` round-trip to
 //!   the target app, so a large app costs seconds.
+//! - `screenshot` waits on a `ScreenCaptureKit` completion callback that
+//!   `screencapturekit` gives no timeout of its own — bounded to ten
+//!   seconds by `polarize-macos`'s own internal wait (see issue #50),
+//!   but that bound is still far longer than the milliseconds a real
+//!   capture normally takes.
 //!
-//! `screenshot`, `tap`, and `keyboard` stay synchronous. Each returns in
-//! milliseconds.
+//! `tap` and `keyboard` stay synchronous. Each returns in milliseconds.
 //!
 //! The `polarize-macos` types are all zero-sized unit structs, so a
 //! `blocking` closure constructs fresh ones rather than borrowing `self`
@@ -131,7 +135,6 @@ use std::sync::Arc;
 /// because the closure must own everything it touches.
 #[derive(Debug, Default)]
 pub struct PolarizeServer {
-    capture: MacScreenCapture,
     input: MacInputSynthesizer,
     window: MacWindowManager,
     clipboard: MacClipboard,
@@ -239,13 +242,11 @@ impl PolarizeServer {
     /// for why.
     #[tool(name = "screenshot")]
     #[tracing::instrument(skip(self))]
-    fn screenshot(
+    async fn screenshot(
         &self,
         Parameters(request): Parameters<ScreenshotRequest>,
     ) -> Result<Json<ScreenshotResponse>, ErrorData> {
-        orchestrate::perform_screenshot(&self.capture, &request)
-            .map(Json)
-            .map_err(to_error_data)
+        blocking(move || orchestrate::perform_screenshot(&MacScreenCapture, &request)).await
     }
 
     /// Walks the `AXUIElement` accessibility tree for the frontmost (or
