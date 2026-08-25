@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/officialunofficial/polarize/releases/tag/v0.3.0) - 2026-08-24
+
+### Bug Fixes
+
+- stop release-plz and dist racing to create the same GitHub Release,
+  and cache CI's cargo deps
+- keyboard skips activation when a target's pid resolves
+- bound ScreenCaptureKit's completion wait, so it can't hang forever
+
+### Features
+
+- give polarize a real app bundle and its own TCC identity
+
+### Documentation
+
+- cut the build-history narrative from the README, keep only the
+  facts
+
 ## [0.2.0](https://github.com/officialunofficial/polarize/releases/tag/v0.2.0) - 2026-08-21
 
 ### Bug Fixes
