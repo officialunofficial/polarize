@@ -140,7 +140,7 @@ The recommended path is npm. The package is scoped, not `polarize` —
 that name is already taken on the public npm registry:
 
 ```sh
-npx @officialunofficial/polarize@latest
+npx @unooo/polarize@latest
 ```
 
 This downloads the release archive for your Mac, verifies its
