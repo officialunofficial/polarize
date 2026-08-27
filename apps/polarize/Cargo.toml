@@ -44,8 +44,8 @@ dist = true
 # internally to compute the next version, so this was blocking every
 # release until added. Keep this in step with the workspace version;
 # release-plz's own version-bump commits update it automatically.
-polarize-core = { path = "../../crates/polarize-core", version = "0.3.0" }
-polarize-macos = { path = "../../crates/polarize-macos", version = "0.3.0" }
+polarize-core = { path = "../../crates/polarize-core", version = "0.4.0" }
+polarize-macos = { path = "../../crates/polarize-macos", version = "0.4.0" }
 # `rmcp`'s "macros" feature re-exports `rmcp-macros`'s `#[tool]`/
 # `#[tool_router]`/`#[tool_handler]` attributes as `rmcp::{tool, ...}`.
 # See `rmcp::lib`'s `pub use rmcp_macros::*`. A direct `rmcp-macros`
