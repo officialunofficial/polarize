@@ -1,0 +1,52 @@
+# Hand-written, not generated. `dist generate --mode ci` wires this
+# file into `.github/workflows/release.yml` as a custom publish job —
+# see `dist-workspace.toml`'s `publish-jobs` key. `release.yml` itself
+# stays fully generated; edit this file instead. See docs/RELEASING.md's
+# "npm publish" section for the full story.
+#
+# `dist` has a built-in `npm` publish job, but it authenticates with a
+# long-lived `NPM_TOKEN` secret. npm deprecated that path in July 2026.
+# Tokens that bypass 2FA lose publish rights around January 2027. npm
+# recommends trusted publishing (OIDC) instead. This job does that. It
+# needs no secret. GitHub mints a short-lived OIDC token, and npm trusts
+# it because the `@unooo/polarize` package registers this repo and
+# workflow as its trusted publisher.
+name: publish-npm
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  # Lets GitHub mint the OIDC token that npm verifies.
+  id-token: write
+  contents: read
+
+jobs:
+  publish-npm:
+    runs-on: ubuntu-latest
+    env:
+      PLAN: ${{ inputs.plan }}
+    steps:
+      - name: Fetch npm package
+        uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-*
+          path: npm/
+          merge-multiple: true
+      - uses: actions/setup-node@v6
+        with:
+          # Trusted publishing needs Node 22.14+ and npm 11.5.1+.
+          node-version: "22.x"
+          registry-url: "https://registry.npmjs.org"
+      - name: Upgrade npm
+        run: npm install -g npm@latest && npm --version
+      - name: Publish
+        run: |
+          for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith("-npm-package.tar.gz")] | any)'); do
+            pkg=$(echo "$release" | jq '.artifacts[] | select(endswith("-npm-package.tar.gz"))' --raw-output)
+            npm publish --access public "./npm/${pkg}"
+          done

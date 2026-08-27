@@ -87,9 +87,62 @@ built artifact gets a signed build-provenance attestation
 (`actions/attest`), so anyone can verify it really came from this
 repo's CI. This needs no secrets of its own.
 
-It does not publish to the npm registry. It does not push to a
-Homebrew tap either. Both need infrastructure this workflow doesn't
-have yet — see "What this doesn't do" below.
+6. Publishes the npm package to the registry as `@unooo/polarize`.
+   See "npm publish" below.
+
+It does not push to a Homebrew tap. That needs infrastructure this
+workflow doesn't have yet — see "What this doesn't do" below.
+
+## npm publish
+
+`dist-workspace.toml` lists `./publish-npm` in `publish-jobs`. That
+is the hand-written `.github/workflows/publish-npm.yml`, not `dist`'s
+built-in `npm` job. It runs after `host` creates the GitHub Release.
+It downloads the generated npm package and runs `npm publish`.
+
+The package is scoped `@unooo/polarize`. The unscoped name `polarize`
+is already taken on the public registry. The `unooo` npm org owns the
+scope. Argent publishes `@swmansion/argent` under its org the same way.
+
+### Why not `NPM_TOKEN`
+
+`dist`'s built-in `npm` publish job authenticates with a long-lived
+`NPM_TOKEN` secret. npm deprecated that path in July 2026. Granular
+tokens that bypass 2FA lost management rights in August 2026. They
+lose publish rights around January 2027. npm recommends trusted
+publishing (OIDC) instead. The custom job uses it. It needs no secret.
+
+Trusted publishing works like this. The job requests `id-token: write`.
+GitHub mints a short-lived OIDC token that names this repo and the
+workflow file. npm checks that token against the trusted publisher
+registered on the package. npm also generates a provenance attestation
+for the publish, with no extra flags.
+
+### One-time bootstrap
+
+npm only lets you register a trusted publisher on a package that
+already exists. So the first version of `@unooo/polarize` was
+published by hand, from a maintainer's laptop, with 2FA. Every later
+version publishes from CI.
+
+If the trusted publisher ever needs re-creating:
+
+1. Open <https://www.npmjs.com/package/@unooo/polarize/access>.
+2. Under "Trusted publisher", pick GitHub Actions.
+3. Organization or user: `officialunofficial`. Repository: `polarize`.
+   Workflow filename: `release.yml`. Environment: leave empty.
+
+The publish job runs as a reusable workflow. GitHub's OIDC token then
+carries two workflow names: the caller (`release.yml`) and the callee
+(`publish-npm.yml`). If a publish fails with a "workflow does not
+match" error, register `publish-npm.yml` instead.
+
+### Failure handling
+
+A failed npm publish does not roll back the GitHub Release. Re-run the
+`publish-npm` job from the Actions UI after the fix. npm refuses to
+publish the same version twice, so a re-run after a partial success
+fails until the next release.
 
 ## Signing
 
@@ -207,13 +260,6 @@ its own signing identity at all.
 
 ## What this doesn't do
 
-- **npm registry publish.** `dist build` produces a ready-to-publish
-  npm package as a release artifact. It's scoped
-  `@officialunofficial/polarize`, matching Argent's own
-  `@swmansion/argent` convention — the unscoped name `polarize` is
-  already taken on the public registry. Nothing in this workflow runs
-  `npm publish` yet. That needs an `NPM_TOKEN` secret and an explicit
-  publish job this repo doesn't have.
 - **Homebrew tap push.** `dist build` produces a ready-to-use formula
   (`polarize.rb`) as a release artifact. Publishing it needs a real tap
   repository, `officialunofficial/homebrew-tap`, which doesn't exist

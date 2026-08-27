@@ -10,9 +10,10 @@ ci = "github"
 # The installers to generate for each app
 installers = ["shell", "npm", "homebrew"]
 # The unscoped name "polarize" is already taken on the public npm
-# registry (confirmed against registry.npmjs.org). Publish under this
-# scope instead, matching Argent's own "@swmansion/argent" convention.
-npm-scope = "@officialunofficial"
+# registry (confirmed against registry.npmjs.org). Publish under the
+# `unooo` npm org instead, the same way Argent publishes
+# "@swmansion/argent" under its org.
+npm-scope = "@unooo"
 # Target platforms to build apps for (Rust target-triple syntax).
 #
 # macOS only. `polarize-macos` links real macOS frameworks
@@ -54,7 +55,15 @@ github-attestations = true
 # key placed after `[dist.github-custom-runners]` silently becomes
 # part of that sub-table instead — confirmed live, the wrong placement
 # parsed as a bogus runner-target entry with no error.
-publish-jobs = ["./build-notarized-app"]
+#
+# `./publish-npm` replaces `dist`'s built-in `npm` publish job. The
+# built-in job needs a long-lived `NPM_TOKEN`, which npm deprecated.
+# The custom job uses trusted publishing (OIDC) instead. See
+# docs/RELEASING.md's "npm publish" section.
+publish-jobs = ["./publish-npm", "./build-notarized-app"]
+[dist.github-custom-job-permissions.publish-npm]
+id-token = "write"
+contents = "read"
 [dist.github-custom-job-permissions.build-notarized-app]
 contents = "write"
 
