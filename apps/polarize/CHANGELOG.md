@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/officialunofficial/polarize/releases/tag/v0.4.0) - 2026-08-27
+
+### Features
+
+- publish @unooo/polarize to npm with trusted publishing
+
 ## [0.3.0](https://github.com/officialunofficial/polarize/releases/tag/v0.3.0) - 2026-08-24
 
 ### Bug Fixes
