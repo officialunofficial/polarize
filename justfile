@@ -58,7 +58,7 @@ version := `awk -F'"' '/^version = /{print $2; exit}' Cargo.toml`
 
 build:
     cargo build --workspace
-    codesign --force --sign {{identity}} --identifier {{identifier}} --options runtime --entitlements {{entitlements}} {{bin}}
+    codesign --force --sign "{{identity}}" --identifier {{identifier}} --options runtime --entitlements {{entitlements}} {{bin}}
     just bundle-app
 
 # Assembles `Polarize.app`, under `dist/`. It builds a real bundle
@@ -83,7 +83,7 @@ bundle-app:
     sed 's/__VERSION__/{{version}}/' {{plist_template}} > {{bundle}}/Contents/Info.plist
     cp {{bin}} {{bundle}}/Contents/MacOS/polarize
     cp apps/polarize/bundle/Polarize.icns {{bundle}}/Contents/Resources/Polarize.icns
-    codesign --force --sign {{identity}} --options runtime --entitlements {{entitlements}} {{bundle}}
+    codesign --force --sign "{{identity}}" --options runtime --entitlements {{entitlements}} {{bundle}}
 
 # Verifies `Polarize.app` is a well-formed, LaunchServices-acceptable
 # bundle. Every check here needs zero TCC grants. See PINV-52's own
@@ -119,3 +119,26 @@ test:
 check:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
+
+# Checks that every `codesign` line in `build` and `bundle-app` still
+# parses as shell when `identity` holds a real Developer ID string.
+# Those strings contain parentheses, e.g.
+# `Developer ID Application: Name (TEAMID)`. An unquoted `{{identity}}`
+# then breaks the recipe with `syntax error near unexpected token '('`.
+# That exact failure broke every notarized-app release job through
+# v0.4.0. This recipe dry-runs both recipes with such an identity, then
+# feeds each generated line through `sh -n`. Nothing executes and
+# nothing gets signed. `.github/workflows/ci.yml` runs this on every
+# push.
+check-quoting:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    id='Developer ID Application: Example Name (ABCDE12345)'
+    for recipe in build bundle-app; do
+        just -n bin=/dev/null identity="$id" "$recipe" 2>&1 \
+            | grep '^codesign' \
+            | while IFS= read -r line; do
+                sh -n -c "$line" || { echo "unparseable $recipe line: $line" >&2; exit 1; }
+            done
+    done
+    echo "check-quoting: ok"

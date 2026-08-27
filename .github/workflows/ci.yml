@@ -43,3 +43,11 @@ jobs:
 
       - name: cargo build
         run: cargo build --workspace
+
+      # `just check-quoting` dry-runs the signing recipes with a real
+      # Developer ID identity string and parses each line with `sh -n`.
+      # It executes nothing. See the recipe's own comment in `justfile`.
+      - uses: extractions/setup-just@v3
+
+      - name: just check-quoting
+        run: just check-quoting
