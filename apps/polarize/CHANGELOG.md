@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/officialunofficial/polarize/releases/tag/v0.4.1) - 2026-08-27
+
+### Bug Fixes
+
+- quote the signing identity in the justfile, so Developer ID strings
+  work
+
 ## [0.4.0](https://github.com/officialunofficial/polarize/releases/tag/v0.4.0) - 2026-08-27
 
 ### Features
