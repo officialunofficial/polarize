@@ -67,20 +67,46 @@ public enum SettingsWindowLocator {
 ///
 /// Placement policy: the panel sits at System Settings' trailing
 /// (right) edge, top-aligned, offset by `edgeMargin` — never on top of
-/// the window it tracks, so the user can still see and use both.
+/// the window it tracks, so the user can still see and use both. The
+/// result is always clamped to the given screen's own bounds (minus
+/// `edgeMargin`), so the panel can never end up partly or fully
+/// off-screen — confirmed live as a real bug: on a screen too narrow
+/// (or a Settings window positioned too far right) for
+/// `edgeMargin`-past-the-trailing-edge to fit, the unclamped panel
+/// landed mostly off the visible display.
 public enum PanelFramePlanner {
     /// The gap, in points, between System Settings' trailing edge and
-    /// the panel's leading edge.
+    /// the panel's leading edge, and the minimum gap the panel keeps
+    /// from every screen edge once clamped.
     public static let edgeMargin: CGFloat = 12
 
     public static func frame(
         overSettingsBounds bounds: CGRect,
+        screenWidth: CGFloat,
         screenHeight: CGFloat,
         panelSize: CGSize
     ) -> CGRect {
         let x = bounds.origin.x + bounds.size.width + edgeMargin
         let y = screenHeight - bounds.origin.y - panelSize.height
-        return CGRect(origin: CGPoint(x: x, y: y), size: panelSize)
+        return clamped(
+            CGRect(origin: CGPoint(x: x, y: y), size: panelSize),
+            screenWidth: screenWidth,
+            screenHeight: screenHeight
+        )
+    }
+
+    /// Keeps `frame` fully within `[edgeMargin, screenWidth/Height -
+    /// edgeMargin]` on both axes. When the panel is wider or taller
+    /// than the screen allows even at zero margin, it clamps to the
+    /// screen's own edge instead of guaranteeing the margin — a
+    /// visually tight fit beats a frame `setFrame` would itself refuse
+    /// or mis-place.
+    private static func clamped(_ frame: CGRect, screenWidth: CGFloat, screenHeight: CGFloat) -> CGRect {
+        let maxX = max(edgeMargin, screenWidth - frame.width - edgeMargin)
+        let maxY = max(edgeMargin, screenHeight - frame.height - edgeMargin)
+        let x = min(max(frame.origin.x, edgeMargin), maxX)
+        let y = min(max(frame.origin.y, edgeMargin), maxY)
+        return CGRect(origin: CGPoint(x: x, y: y), size: frame.size)
     }
 
     /// The panel's frame when no System Settings window can be found —
@@ -97,7 +123,11 @@ public enum PanelFramePlanner {
     ) -> CGRect {
         let x = (screenWidth - panelSize.width) / 2
         let y = (screenHeight - panelSize.height) / 2
-        return CGRect(origin: CGPoint(x: x, y: y), size: panelSize)
+        return clamped(
+            CGRect(origin: CGPoint(x: x, y: y), size: panelSize),
+            screenWidth: screenWidth,
+            screenHeight: screenHeight
+        )
     }
 }
 

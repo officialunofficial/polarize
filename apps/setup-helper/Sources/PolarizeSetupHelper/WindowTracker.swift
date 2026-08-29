@@ -33,6 +33,17 @@ final class WindowTracker {
     private var pollTimer: Timer?
     private var axObserver: AXObserver?
 
+    /// Set while a drag session is in progress (PLZ-8's
+    /// `AppIconDragView`), so the tracker skips repositioning the panel.
+    /// A `Timer` added in `.common` run-loop mode — needed so tracking
+    /// keeps working while the user has, say, a menu open — also keeps
+    /// firing during `NSDraggingSession`'s own event-tracking loop, so
+    /// without this guard the panel gets repositioned out from under an
+    /// in-progress drag every poll interval. Suspected contributor to a
+    /// live "drag doesn't work" report; not isolated as the sole cause,
+    /// so this is a real fix either way, not just a hedge.
+    private var isSuspended = false
+
     /// How often the polling path re-reads the window list. Fast
     /// enough that a dragged System Settings window feels tracked, not
     /// laggy; slow enough to cost nothing noticeable.
@@ -73,6 +84,18 @@ final class WindowTracker {
         pollTimer?.invalidate()
         pollTimer = nil
         axObserver = nil
+    }
+
+    /// Stops repositioning the panel until `resume()`. Does not stop
+    /// the underlying timer/observer — only the frame writes they'd
+    /// otherwise trigger — so tracking resumes exactly where it left
+    /// off once the drag ends.
+    func suspend() {
+        isSuspended = true
+    }
+
+    func resume() {
+        isSuspended = false
     }
 
     // MARK: - Resolving System Settings' process
@@ -199,16 +222,19 @@ final class WindowTracker {
     // MARK: - Shared frame application
 
     private func applyFrame(overSettingsBounds bounds: CGRect) {
-        guard let screenHeight = NSScreen.screens.first?.frame.height else { return }
+        guard !isSuspended else { return }
+        guard let screen = NSScreen.screens.first else { return }
         let frame = PanelFramePlanner.frame(
             overSettingsBounds: bounds,
-            screenHeight: screenHeight,
+            screenWidth: screen.frame.width,
+            screenHeight: screen.frame.height,
             panelSize: panelSize
         )
         panel.setFrame(frame, display: true)
     }
 
     private func applyFallbackFrame() {
+        guard !isSuspended else { return }
         guard let screen = NSScreen.screens.first else { return }
         let frame = PanelFramePlanner.fallbackFrame(
             screenWidth: screen.frame.width,

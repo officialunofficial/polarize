@@ -106,6 +106,7 @@ final class WindowTrackingTests: XCTestCase {
         let bounds = CGRect(x: 100, y: 50, width: 800, height: 600)
         let frame = PanelFramePlanner.frame(
             overSettingsBounds: bounds,
+            screenWidth: 1920,
             screenHeight: 1080,
             panelSize: CGSize(width: 320, height: 200)
         )
@@ -118,11 +119,13 @@ final class WindowTrackingTests: XCTestCase {
         let panelSize = CGSize(width: 320, height: 200)
         let before = PanelFramePlanner.frame(
             overSettingsBounds: CGRect(x: 100, y: 50, width: 800, height: 600),
+            screenWidth: 1920,
             screenHeight: 1080,
             panelSize: panelSize
         )
         let after = PanelFramePlanner.frame(
             overSettingsBounds: CGRect(x: 300, y: 250, width: 800, height: 600),
+            screenWidth: 1920,
             screenHeight: 1080,
             panelSize: panelSize
         )
@@ -135,11 +138,13 @@ final class WindowTrackingTests: XCTestCase {
         let panelSize = CGSize(width: 320, height: 200)
         let smaller = PanelFramePlanner.frame(
             overSettingsBounds: CGRect(x: 0, y: 0, width: 600, height: 400),
+            screenWidth: 1920,
             screenHeight: 1080,
             panelSize: panelSize
         )
         let larger = PanelFramePlanner.frame(
             overSettingsBounds: CGRect(x: 0, y: 0, width: 1000, height: 800),
+            screenWidth: 1920,
             screenHeight: 1080,
             panelSize: panelSize
         )
@@ -149,6 +154,38 @@ final class WindowTrackingTests: XCTestCase {
         // The panel's own size never changes with the tracked window's size.
         XCTAssertEqual(smaller.size, panelSize)
         XCTAssertEqual(larger.size, panelSize)
+    }
+
+    func testFrameClampsToTheScreensTrailingEdgeWhenTheUnclampedXWouldGoOffscreen() {
+        // Settings' own trailing edge sits close to the screen's right
+        // edge, so `bounds.maxX + edgeMargin` alone would place the
+        // panel mostly off-screen.
+        let bounds = CGRect(x: 1700, y: 50, width: 800, height: 600)
+        let panelSize = CGSize(width: 320, height: 200)
+        let frame = PanelFramePlanner.frame(
+            overSettingsBounds: bounds,
+            screenWidth: 1920,
+            screenHeight: 1080,
+            panelSize: panelSize
+        )
+        XCTAssertLessThanOrEqual(frame.maxX, 1920 - PanelFramePlanner.edgeMargin)
+        XCTAssertGreaterThanOrEqual(frame.origin.x, PanelFramePlanner.edgeMargin)
+    }
+
+    func testFrameClampsToTheScreensTopEdgeWhenTheUnclampedYWouldGoOffscreen() {
+        // Settings sits near the very top of the screen, so
+        // `screenHeight - bounds.minY - panelSize.height` alone would
+        // place the panel above the visible top edge.
+        let bounds = CGRect(x: 100, y: 5, width: 800, height: 600)
+        let panelSize = CGSize(width: 320, height: 200)
+        let frame = PanelFramePlanner.frame(
+            overSettingsBounds: bounds,
+            screenWidth: 1920,
+            screenHeight: 1080,
+            panelSize: panelSize
+        )
+        XCTAssertGreaterThanOrEqual(frame.origin.y, PanelFramePlanner.edgeMargin)
+        XCTAssertLessThanOrEqual(frame.maxY, 1080 - PanelFramePlanner.edgeMargin)
     }
 
     func testFallbackFrameCentersThePanelOnScreen() {

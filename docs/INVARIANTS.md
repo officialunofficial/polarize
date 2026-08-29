@@ -3452,12 +3452,47 @@ own entries below).
   resolve back to the exact bundle path the payload was built with.
   `polarize_macos::setup_helper::own_bundle_from_exe_path` (Rust) is
   covered by its own tests resolving `Polarize.app`'s path from the
-  running process, never the helper's. Two things still need a live
-  session: whether a real drag-and-drop actually lands in System
-  Settings' Accessibility/Screen Recording list, and whether the four
-  pasteboard types offered are the ones System Settings' drop target
-  actually accepts on the current macOS version — see the PLZ-8 plan's
-  risk note 2 on the legacy `NSFilenamesPboardType` shape.
+  running process, never the helper's.
+
+  **Live-verified 2026-08-29, against a real signed `dist/Polarize.app`
+  on a real macOS session**, after fixing four real bugs the unit tests
+  above could not catch, because they are all AppKit wiring, not pure
+  logic: (1) `AppIconDragView`'s `mouseDragged` override never fired,
+  because hit-testing resolved to the child `NSImageView`/caption
+  label, not the container — fixed with a `hitTest` override that
+  claims the whole view. (2) the panel's non-key window swallowed the
+  very first click as a mere activation click — fixed with
+  `acceptsFirstMouse(for:) -> true`. (3) even with both of those fixed,
+  the drag still failed to initiate: `dragView`'s own layout constraints
+  never pinned its leading/trailing edges, so its real hit-testable
+  frame was ambiguous and resolved far smaller than where its subviews
+  visually drew (`NSView` does not clip to bounds by default) — fixed
+  by adding explicit leading/trailing constraints. (4) the panel stayed
+  frontmost and mouse-opaque through the whole drag, risking
+  intercepting the drop meant for System Settings underneath it —
+  fixed by adding `NSDraggingSource.draggingSession(_:willBeginAt:)`/
+  `endedAt:operation:)` that make the panel mouse-transparent and order
+  it behind other windows for the duration, plus suspending
+  `WindowTracker` so its polling timer (scheduled in `.common` run-loop
+  mode, which includes the drag's own event-tracking mode) cannot
+  reposition the panel mid-drag. This last pattern is modeled directly
+  on the open-source reference `jaywcjlove/PermissionFlow`'s
+  `AppDragSourceView.onDragStateChange` /
+  `FloatingDropPanel.setDraggingPassthrough`. A fifth, separate live
+  finding in the same session: `NSWorkspace.shared.icon(forFile:)`
+  returned a generic, low-resolution icon for this freshly built,
+  LaunchServices-unindexed bundle — fixed by loading the bundle's own
+  `CFBundleIconFile` directly from `Contents/Resources/` instead
+  (`SetupHelperCore.BundleIconResolver`, covered by
+  `IconResolutionTests`; the direct-vs-`NSWorkspace` size/representation
+  difference was confirmed with a standalone script against the real
+  bundle before writing the fix). With all five fixed, a human
+  confirmed live: the icon renders correctly and the drag now visually
+  initiates and completes. **Not yet independently confirmed**: that the drop actually adds Polarize's row to System
+  Settings' Accessibility/Screen Recording list and flips the real TCC
+  grant (`AXIsProcessTrusted`/`CGPreflightScreenCaptureAccess` reading
+  `true` afterward) — the live check so far confirms the drag mechanism
+  works, not the end TCC outcome.
 - **PINV-60** — since PLZ-10 mapped Automation to its own pane,
   `SettingsPane.urlString` no longer returns `nil` for it, so the
   composed-by-construction argument this entry used to make no longer
@@ -3505,12 +3540,22 @@ own entries below).
   the *helper's own* Accessibility trust, which this feature has no way
   to grant — see the PLZ-7 plan's risk note 2 — so it stays reachable
   only if a user separately grants the helper's own bundle
-  Accessibility by hand). Three things still need a real macOS session:
-  whether `CGWindowListCopyWindowInfo` genuinely returns System
-  Settings' real window bounds with no grant at all, whether the panel
-  actually follows a live moved/resized System Settings window on
-  screen, and a visual confirmation that the panel floats above System
-  Settings without stealing focus.
+  Accessibility by hand).
+
+  **Live-verified 2026-08-29**: `CGWindowListCopyWindowInfo` polling
+  does genuinely return System Settings' real window bounds with no
+  grant at all, and the panel does float above System Settings without
+  stealing focus. One real bug found live and fixed: `PanelFramePlanner.frame`
+  never clamped its result to the screen's own bounds (it did not even
+  take a `screenWidth` parameter, so it structurally could not clamp
+  horizontally) — a Settings window positioned close enough to a
+  screen's trailing or top edge placed the panel partly or fully
+  off-screen. Fixed by clamping both `frame` and `fallbackFrame` to
+  `[edgeMargin, screenWidth/Height - edgeMargin]` on each axis, covered
+  by two new `WindowTrackingTests` cases. Still needs a real macOS
+  session: whether the panel actually follows a *live* moved/resized
+  System Settings window smoothly, frame by frame, rather than the
+  static-bounds check already confirmed above.
 - **PINV-63** — the fallback-selection logic (an `open` call reporting
   failure → the top-level pane plus on-screen instructions) is enforced
   by `SetupHelperCoreTests.testOpenReturningFalseTriggersExactlyOneFallbackAttempt`

@@ -51,7 +51,7 @@ final class AppIconDragView: NSView, NSDraggingSource {
 
     init(payload: DragPayload, bundlePath: String) {
         self.payload = payload
-        imageView = NSImageView(image: NSWorkspace.shared.icon(forFile: bundlePath))
+        imageView = NSImageView(image: Self.icon(forBundleAt: bundlePath))
         super.init(frame: .zero)
 
         imageView.translatesAutoresizingMaskIntoConstraints = false
@@ -81,11 +81,88 @@ final class AppIconDragView: NSView, NSDraggingSource {
         fatalError("init(coder:) is not supported")
     }
 
+    /// Loads a bundle's own icon straight from `Contents/Resources/`
+    /// instead of `NSWorkspace.shared.icon(forFile:)`. Confirmed live:
+    /// `NSWorkspace` returns a generic, low-resolution icon for a
+    /// freshly built, non-installed bundle LaunchServices has not yet
+    /// indexed — exactly the case for a bundle the helper was just
+    /// handed via `--for-bundle`. Falls back to `NSWorkspace` only if
+    /// the direct load fails (see `IconResolutionTests` in
+    /// `SetupHelperCore` for the pure path-joining logic this wraps).
+    private static func icon(forBundleAt bundlePath: String) -> NSImage {
+        if let bundle = Bundle(path: bundlePath),
+            let iconFileName = bundle.infoDictionary?["CFBundleIconFile"] as? String
+        {
+            let iconPath = BundleIconResolver.iconPath(bundlePath: bundlePath, iconFileName: iconFileName)
+            if let direct = NSImage(contentsOfFile: iconPath) {
+                return direct
+            }
+        }
+        return NSWorkspace.shared.icon(forFile: bundlePath)
+    }
+
+    /// Claims every point inside this view's own bounds for itself,
+    /// rather than letting hit-testing resolve to `imageView`/the
+    /// caption label. Without this override, a click inside the icon
+    /// area hit-tests to the child `NSImageView`, which has no drag
+    /// override of its own, so `mouseDragged` below never fires — the
+    /// view that actually received the mouse-down was never this one.
+    /// A real, necessary fix, but on its own not sufficient to make a
+    /// live drag succeed — see `onDragStateChange` below for the other
+    /// half.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let localPoint = convert(point, from: superview)
+        return bounds.contains(localPoint) ? self : nil
+    }
+
+    /// Lets a click register on the very first click, even though the
+    /// panel that hosts this view can never become key
+    /// (`FloatingHelperPanel.canBecomeKey == false`, by design — see
+    /// its own doc comment). Without this override, AppKit swallows the
+    /// first click on a non-key window as an activation click and never
+    /// delivers it to this view at all.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    /// Notifies the caller when a drag session starts and ends, so
+    /// `main.swift` can make the panel mouse-transparent and drop it
+    /// behind other windows for the duration — see `draggingSession`
+    /// below. Modeled directly on `jaywcjlove/PermissionFlow`'s
+    /// `AppDragSourceView.onDragStateChange`, the open-source reference
+    /// this drag mechanism was built from: its own panel calls this
+    /// exact pattern "drag-friendly mode." Without it, the panel stays
+    /// frontmost and mouse-opaque through the whole drag, and can
+    /// intercept the drop meant for System Settings underneath it —
+    /// the likely reason a live drag did not work even after the
+    /// `hitTest`/`acceptsFirstMouse` fixes above landed.
+    var onDragStateChange: ((Bool) -> Void)?
+
+    private var mouseDownPoint: NSPoint?
+    private var hasBegunDragging = false
+
+    override func mouseDown(with event: NSEvent) {
+        mouseDownPoint = convert(event.locationInWindow, from: nil)
+        hasBegunDragging = false
+    }
+
     override func mouseDragged(with event: NSEvent) {
+        guard !hasBegunDragging, let mouseDownPoint else { return }
+        let currentPoint = convert(event.locationInWindow, from: nil)
+        let distance = hypot(currentPoint.x - mouseDownPoint.x, currentPoint.y - mouseDownPoint.y)
+        guard distance > 4 else { return }
+
+        hasBegunDragging = true
         let writer = DragPayloadPasteboardWriter(payload: payload)
         let draggingItem = NSDraggingItem(pasteboardWriter: writer)
         draggingItem.setDraggingFrame(imageView.frame, contents: imageView.image)
-        beginDraggingSession(with: [draggingItem], event: event, source: self)
+        let session = beginDraggingSession(with: [draggingItem], event: event, source: self)
+        session.animatesToStartingPositionsOnCancelOrFail = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        mouseDownPoint = nil
+        hasBegunDragging = false
     }
 
     func draggingSession(
@@ -100,5 +177,19 @@ final class AppIconDragView: NSView, NSDraggingSource {
         @unknown default:
             return []
         }
+    }
+
+    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool {
+        true
+    }
+
+    func draggingSession(_ session: NSDraggingSession, willBeginAt screenPoint: NSPoint) {
+        onDragStateChange?(true)
+    }
+
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        onDragStateChange?(false)
+        mouseDownPoint = nil
+        hasBegunDragging = false
     }
 }

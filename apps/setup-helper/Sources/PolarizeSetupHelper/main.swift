@@ -60,7 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             needed: needed,
             outcome: outcome,
             dragPayload: dragPayload,
-            bundlePath: bundlePath
+            bundlePath: bundlePath,
+            onDragStateChange: { [weak self] isDragging in
+                self?.setDraggingPassthrough(isDragging)
+            }
         )
         panel.orderFront(nil)
         self.panel = panel
@@ -70,6 +73,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.tracker = tracker
 
         installSuccessSignalHandler()
+    }
+
+    /// Switches the panel into a drag-friendly mode: mouse-transparent
+    /// and ordered behind other windows, so it can never intercept the
+    /// drop meant for System Settings underneath it, and pauses window
+    /// tracking so it can't reposition the panel out from under an
+    /// in-progress drag. Modeled on `jaywcjlove/PermissionFlow`'s
+    /// `FloatingDropPanel.setDraggingPassthrough`.
+    @MainActor
+    private func setDraggingPassthrough(_ isDragging: Bool) {
+        panel?.ignoresMouseEvents = isDragging
+        panel?.alphaValue = isDragging ? 0.72 : 1.0
+        if isDragging {
+            panel?.orderBack(nil)
+            tracker?.suspend()
+        } else {
+            panel?.orderFront(nil)
+            tracker?.resume()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -180,7 +202,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         needed: [NeededPermission],
         outcome: LaunchOutcome,
         dragPayload: DragPayload?,
-        bundlePath: String?
+        bundlePath: String?,
+        onDragStateChange: @escaping (Bool) -> Void
     ) -> NSView {
         let backing = NSVisualEffectView()
         backing.translatesAutoresizingMaskIntoConstraints = false
@@ -211,11 +234,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let dragPayload, let bundlePath {
             let dragView = AppIconDragView(payload: dragPayload, bundlePath: bundlePath)
+            dragView.onDragStateChange = onDragStateChange
             dragView.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview(dragView)
             NSLayoutConstraint.activate([
                 dragView.topAnchor.constraint(equalTo: text.bottomAnchor, constant: 16),
-                dragView.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+                // Explicit leading/trailing (not just centerX) so
+                // Auto Layout can actually resolve dragView's width.
+                // Without these, its width is ambiguous and resolves
+                // near zero — the icon/caption still draw where their
+                // own constraints put them relative to dragView's
+                // origin, since NSView doesn't clip to bounds by
+                // default, but dragView's real hit-testable frame ends
+                // up far smaller than what's visually drawn. Confirmed
+                // live: this is why the icon rendered but was
+                // completely unclickable, even with the `hitTest`
+                // override on `AppIconDragView` itself.
+                dragView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+                dragView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
                 dragView.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -20),
             ])
         }
