@@ -3,17 +3,33 @@
 // and opens the matching System Settings pane. All parsing, pane
 // mapping, and fallback selection live in `SetupHelperCore`, a plain
 // module with no AppKit import — this file only wires that pure logic
-// to `NSWorkspace.shared.open` and renders the window text. It calls
-// no TCC-touching API of any kind — no `AXIsProcessTrusted`, no
-// `CGPreflightScreenCaptureAccess`, no Apple Event send.
-// `NSWorkspace.shared.open` on a settings URL is not such an API: it
-// opens an app, it does not request a grant. See PINV-58 in
+// to `NSWorkspace.shared.open` and renders the window text.
+//
+// This file calls exactly one TCC-adjacent API, and it is
+// non-prompting: `WindowTracker` reads the helper's own
+// `AXIsProcessTrusted()` once, at launch, purely to pick between two
+// window-tracking mechanisms (PINV-62). That read never prompts, never
+// answers for Polarize's own bundle, and is never shown to the user as
+// Polarize's grant state — PINV-56 and PINV-58 both stay satisfied.
+// `NSWorkspace.shared.open` on a settings URL is not a TCC API either:
+// it opens an app, it does not request a grant. See PINV-58 in
 // `docs/INVARIANTS.md` for the rule this file must keep holding.
 import AppKit
 import SetupHelperCore
 
+/// A borderless, non-activating panel that floats over System
+/// Settings without ever taking key/main status or focus away from
+/// whatever the user is doing.
+final class FloatingHelperPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var window: NSWindow?
+    private var panel: FloatingHelperPanel?
+    private var tracker: WindowTracker?
+
+    private static let panelSize = NSSize(width: 420, height: 200)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let needed = ArgvParser.parse(Array(CommandLine.arguments.dropFirst()))
@@ -22,34 +38,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return NSWorkspace.shared.open(url)
         }
 
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 300),
-            styleMask: [.titled, .closable, .miniaturizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Polarize Setup Helper"
-        window.contentView = Self.makeMessageView(needed: needed, outcome: outcome)
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        self.window = window
+        let panel = Self.makePanel()
+        panel.contentView = Self.makeMessageView(needed: needed, outcome: outcome)
+        panel.orderFront(nil)
+        self.panel = panel
+
+        let tracker = WindowTracker(panel: panel, panelSize: Self.panelSize)
+        tracker.start()
+        self.tracker = tracker
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
 
-    /// Builds the window's text so it is never blank (PINV-63), even
-    /// on the fallback path.
+    /// Builds the floating panel itself: borderless, never key/main,
+    /// floating above ordinary windows, visible on every Space
+    /// (including a full-screen one), and never opaque — the content
+    /// view below draws its own translucent card so the message text
+    /// stays legible against whatever sits behind the panel.
+    @MainActor
+    private static func makePanel() -> FloatingHelperPanel {
+        let panel = FloatingHelperPanel(
+            contentRect: NSRect(origin: .zero, size: panelSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = .floating
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.isReleasedWhenClosed = false
+        return panel
+    }
+
+    /// Builds the panel's text on a translucent rounded backing, so it
+    /// is never blank (PINV-63) and stays readable on a fully
+    /// transparent window, even on the fallback path.
     @MainActor
     private static func makeMessageView(needed: [NeededPermission], outcome: LaunchOutcome) -> NSView {
+        let backing = NSVisualEffectView()
+        backing.translatesAutoresizingMaskIntoConstraints = false
+        backing.material = .hudWindow
+        backing.state = .active
+        backing.wantsLayer = true
+        backing.layer?.cornerRadius = 14
+        backing.layer?.masksToBounds = true
+
         let text = NSTextField(wrappingLabelWithString: message(for: needed, outcome: outcome))
         text.translatesAutoresizingMaskIntoConstraints = false
         text.font = .systemFont(ofSize: 13)
 
         let container = NSView()
+        container.addSubview(backing)
         container.addSubview(text)
         NSLayoutConstraint.activate([
+            backing.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            backing.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            backing.topAnchor.constraint(equalTo: container.topAnchor),
+            backing.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             text.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
             text.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
             text.topAnchor.constraint(equalTo: container.topAnchor, constant: 20),
@@ -90,6 +139,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
-app.setActivationPolicy(.regular)
-app.activate(ignoringOtherApps: true)
+// `.accessory`, with no `activate(ignoringOtherApps:)` call: the
+// helper never gets a Dock icon, never becomes the frontmost app, and
+// never steals focus or key/main status from whatever the user is
+// doing — see the header comment and PINV-62.
+app.setActivationPolicy(.accessory)
 app.run()

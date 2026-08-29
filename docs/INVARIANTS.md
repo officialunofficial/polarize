@@ -2051,14 +2051,21 @@ poll-and-terminate wait loop), `polarize-macos`'s `setup_helper` module
 (locating and spawning the real process) and its `permission_bootstrap`
 non-prompting re-reads, and `apps/polarize/src/main.rs`'s rewired
 `request_permissions`. PLZ-6 built the helper's deep-link pane
-navigation and fallback selection. `SetupHelperCore` is a pure Swift
-module with no AppKit import. It parses the `--needs` argv. It maps
-Accessibility and Screen Recording to their System Settings anchors.
-It picks the fallback pane when the mapped anchor fails to open. See
-the enforcement checklist entries below for exactly what each invariant
-has and has not yet had verified. The helper's drag gesture and window
-tracking are still unbuilt. PINV-59, PINV-60, and PINV-62 stay GAP
-until that lands.
+navigation and fallback selection. PLZ-7 built the helper's window
+tracking: `SetupHelperCore`'s `WindowTracking.swift` holds the pure
+logic — locating System Settings' own window in a raw window list,
+planning the panel's on-screen frame, and choosing a tracking strategy
+— and `PolarizeSetupHelper`'s `WindowTracker.swift` wires that logic to
+the real `CGWindowListCopyWindowInfo` and `AXObserver` calls.
+`main.swift`'s window is now a non-activating `NSPanel` that floats
+over System Settings and follows it, never taking key/main status or
+stealing focus. `SetupHelperCore` is a pure Swift module with no
+AppKit import. It parses the `--needs` argv. It maps Accessibility and
+Screen Recording to their System Settings anchors. It picks the
+fallback pane when the mapped anchor fails to open. See the
+enforcement checklist entries below for exactly what each invariant has
+and has not yet had verified. The helper's drag gesture is still
+unbuilt. PINV-59 and PINV-60 stay GAP until that lands.
 
 ### PINV-56: the helper never answers for Polarize's own permission grant
 
@@ -3298,14 +3305,19 @@ until that lands.
 PLZ-4 built the helper's own empty-window skeleton; PLZ-5 built the
 Rust side that triggers, launches, and owns the helper's lifecycle;
 PLZ-6 built the helper's deep-link pane mapping and fallback selection
-in `SetupHelperCore`. PINV-56, 57, 61, and 64 are enforced below by
-real `cargo test` runs today; 65 follows from 56 and 61 by
-construction. PINV-63 is now enforced at the logic level by
+in `SetupHelperCore`; PLZ-7 built the helper's window tracking —
+`SetupHelperCore`'s `WindowTracking.swift` (pure) and
+`PolarizeSetupHelper`'s `WindowTracker.swift` (the real
+`CGWindowListCopyWindowInfo`/`AXObserver` wiring) — plus the
+non-activating floating `NSPanel` in `main.swift`. PINV-56, 57, 61, and
+64 are enforced below by real `cargo test` runs today; 65 follows from
+56 and 61 by construction. PINV-63 is now enforced at the logic level by
 `SetupHelperCoreTests`, run in CI's `swift test` step; whether each
 anchor and the fallback pane actually open the right pane on a real,
 current macOS version still needs a live session (see PINV-63's own
-entry below). PINV-59, PINV-60, and PINV-62 describe the helper's
-still-unbuilt drag gesture and window tracking, and stay design-time
+entry below). PINV-62 is now enforced at the logic level too, by
+`WindowTrackingTests` (see its own entry below); PINV-59 and PINV-60
+describe the helper's still-unbuilt drag gesture, and stay design-time
 **GAP**s.
 
 - **PINV-56** — enforced by
@@ -3327,16 +3339,25 @@ still-unbuilt drag gesture and window tracking, and stay design-time
   a "granted after the real prompt" result yields an empty needed set,
   which `request_permissions` returns on without ever calling
   `launch_helper_and_wait`. No live session needed for this part.
-- **PINV-58** — re-inspected for PLZ-6:
+- **PINV-58** — re-inspected for PLZ-6 and PLZ-7:
   `apps/setup-helper/Sources/PolarizeSetupHelper/main.swift` now calls
   `NSWorkspace.shared.open` on a System Settings URL, and the rule
   still holds — opening an app is not a TCC-prompting API, so this
   adds no `AXIsProcessTrustedWithOptions`, `CGRequestScreenCaptureAccess`,
-  or Apple Event send. `SetupHelperCore` itself imports only
-  `Foundation`, not AppKit, and calls no permission API at all. A
-  link-time/XCTest check that the helper binary calls no such API, and
-  a live-session confirmation that no consent dialog appears for its
-  own bundle identity, remain open.
+  or Apple Event send. PLZ-7's `WindowTracker.swift` adds exactly one
+  more permission-adjacent call: a single, non-prompting
+  `AXIsProcessTrusted()` read (never
+  `AXIsProcessTrustedWithOptions` with a prompting option), used only
+  to pick `TrackingStrategyPicker`'s branch. It reads the *helper's
+  own* trust — never Polarize's, so PINV-56 stays satisfied — and its
+  result is never shown to the user as any kind of grant state, only
+  used internally to choose a tracking mechanism, so it prompts nothing
+  and requests nothing (PINV-58 itself stays satisfied). `SetupHelperCore`
+  itself still imports only `Foundation`, not AppKit, and calls no
+  permission API at all. A link-time/XCTest check that the helper
+  binary calls no *prompting* permission API, and a live-session
+  confirmation that no consent dialog appears for its own bundle
+  identity, remain open.
 - **PINV-59** — GAP: not yet implemented. The pasteboard writer's data
   mapping is a pure function once built — an XCTest can assert it
   always resolves to the Polarize.app URL it was given, never the
@@ -3353,11 +3374,27 @@ still-unbuilt drag gesture and window tracking, and stay design-time
   `HelperChild`: the wait loop always returns within its deadline and
   always calls `terminate` before returning, regardless of whether the
   child ever exits on its own.
-- **PINV-62** — GAP: not yet implemented. The pure selection logic
-  (prefer `AXObserver` only once Accessibility is already known
-  granted, else `CGWindowListCopyWindowInfo`) is testable without a
-  live session. Whether `CGWindowListCopyWindowInfo` genuinely returns
-  System Settings' real window bounds needs a real macOS session.
+- **PINV-62** — enforced at the logic level by `WindowTrackingTests`
+  (`apps/setup-helper/Tests/SetupHelperCoreTests/WindowTrackingTests.swift`):
+  `SettingsWindowLocator.pick` matches by owner PID, layer, and
+  on-screen state alone — never by title, so it needs no Screen
+  Recording grant either — and is covered against decoy windows on
+  other PIDs, higher layers, and off-screen; `PanelFramePlanner.frame`'s
+  CG-to-Cocoa y-flip and its tracking of a moved/resized window are
+  covered with concrete numbers; `TrackingStrategyPicker.pick` is
+  covered on both branches. `WindowTracker.swift`
+  (`apps/setup-helper/Sources/PolarizeSetupHelper/WindowTracker.swift`)
+  wires that logic to the real `CGWindowListCopyWindowInfo` polling
+  path (needs no permission) and an `AXObserver` upgrade path (needs
+  the *helper's own* Accessibility trust, which this feature has no way
+  to grant — see the PLZ-7 plan's risk note 2 — so it stays reachable
+  only if a user separately grants the helper's own bundle
+  Accessibility by hand). Three things still need a real macOS session:
+  whether `CGWindowListCopyWindowInfo` genuinely returns System
+  Settings' real window bounds with no grant at all, whether the panel
+  actually follows a live moved/resized System Settings window on
+  screen, and a visual confirmation that the panel floats above System
+  Settings without stealing focus.
 - **PINV-63** — the fallback-selection logic (an `open` call reporting
   failure → the top-level pane plus on-screen instructions) is enforced
   by `SetupHelperCoreTests.testOpenReturningFalseTriggersExactlyOneFallbackAttempt`
