@@ -2050,10 +2050,14 @@ triggers, launches, and owns its lifecycle: `polarize-core`'s
 poll-and-terminate wait loop), `polarize-macos`'s `setup_helper` module
 (locating and spawning the real process) and its `permission_bootstrap`
 non-prompting re-reads, and `apps/polarize/src/main.rs`'s rewired
-`request_permissions`. See the enforcement checklist entries below for
-exactly what each invariant has and has not yet had verified. The
-helper's own guided UI — the drag gesture, deep-link pane navigation,
-window tracking — is still unbuilt; PINV-58 through PINV-63 stay GAP
+`request_permissions`. PLZ-6 built the helper's deep-link pane
+navigation and fallback selection. `SetupHelperCore` is a pure Swift
+module with no AppKit import. It parses the `--needs` argv. It maps
+Accessibility and Screen Recording to their System Settings anchors.
+It picks the fallback pane when the mapped anchor fails to open. See
+the enforcement checklist entries below for exactly what each invariant
+has and has not yet had verified. The helper's drag gesture and window
+tracking are still unbuilt. PINV-59, PINV-60, and PINV-62 stay GAP
 until that lands.
 
 ### PINV-56: the helper never answers for Polarize's own permission grant
@@ -3292,11 +3296,16 @@ until that lands.
   or fail within ten seconds, never hang.
 
 PLZ-4 built the helper's own empty-window skeleton; PLZ-5 built the
-Rust side that triggers, launches, and owns the helper's lifecycle.
-PINV-56, 57, 61, and 64 are enforced below by real `cargo test` runs
-today; 65 follows from 56 and 61 by construction. PINV-58 through
-PINV-63 describe the helper's still-unbuilt guided UI (drag gesture,
-deep-link pane navigation, window tracking) and stay design-time
+Rust side that triggers, launches, and owns the helper's lifecycle;
+PLZ-6 built the helper's deep-link pane mapping and fallback selection
+in `SetupHelperCore`. PINV-56, 57, 61, and 64 are enforced below by
+real `cargo test` runs today; 65 follows from 56 and 61 by
+construction. PINV-63 is now enforced at the logic level by
+`SetupHelperCoreTests`, run in CI's `swift test` step; whether each
+anchor and the fallback pane actually open the right pane on a real,
+current macOS version still needs a live session (see PINV-63's own
+entry below). PINV-59, PINV-60, and PINV-62 describe the helper's
+still-unbuilt drag gesture and window tracking, and stay design-time
 **GAP**s.
 
 - **PINV-56** — enforced by
@@ -3318,12 +3327,16 @@ deep-link pane navigation, window tracking) and stay design-time
   a "granted after the real prompt" result yields an empty needed set,
   which `request_permissions` returns on without ever calling
   `launch_helper_and_wait`. No live session needed for this part.
-- **PINV-58** — GAP for the helper's guided UI, which is unbuilt. The
-  skeleton was re-inspected for PLZ-5 and still calls no prompting
-  permission API — `apps/setup-helper/Sources/PolarizeSetupHelper/main.swift`
-  is unchanged from PLZ-4. A link-time/XCTest check that the helper
-  binary calls no such API, and a live-session confirmation that no
-  consent dialog appears for its own bundle identity, remain open.
+- **PINV-58** — re-inspected for PLZ-6:
+  `apps/setup-helper/Sources/PolarizeSetupHelper/main.swift` now calls
+  `NSWorkspace.shared.open` on a System Settings URL, and the rule
+  still holds — opening an app is not a TCC-prompting API, so this
+  adds no `AXIsProcessTrustedWithOptions`, `CGRequestScreenCaptureAccess`,
+  or Apple Event send. `SetupHelperCore` itself imports only
+  `Foundation`, not AppKit, and calls no permission API at all. A
+  link-time/XCTest check that the helper binary calls no such API, and
+  a live-session confirmation that no consent dialog appears for its
+  own bundle identity, remain open.
 - **PINV-59** — GAP: not yet implemented. The pasteboard writer's data
   mapping is a pure function once built — an XCTest can assert it
   always resolves to the Polarize.app URL it was given, never the
@@ -3345,10 +3358,19 @@ deep-link pane navigation, window tracking) and stay design-time
   granted, else `CGWindowListCopyWindowInfo`) is testable without a
   live session. Whether `CGWindowListCopyWindowInfo` genuinely returns
   System Settings' real window bounds needs a real macOS session.
-- **PINV-63** — GAP: not yet implemented. The fallback-selection logic
-  (unknown anchor → top-level pane plus instructions) is testable
-  without a live session. Whether the fallback pane itself still opens
-  on a real, current macOS version needs a live session, re-checked on
+- **PINV-63** — the fallback-selection logic (an `open` call reporting
+  failure → the top-level pane plus on-screen instructions) is enforced
+  by `SetupHelperCoreTests.testOpenReturningFalseTriggersExactlyOneFallbackAttempt`
+  (`apps/setup-helper/Tests/SetupHelperCoreTests/PermissionPaneTests.swift`):
+  a fake `open` closure returning `false` for the mapped pane always
+  triggers exactly one further call, with the fallback URL string, and
+  `main.swift` always renders plain instruction text alongside it, so
+  the window is never blank. This enforcement covers only "the mapped
+  `open` call reported failure" — System Settings often opens
+  *somewhere* even for a bad anchor, returning `true`, so true
+  wrong-pane detection still needs PINV-62's window tracking. Whether
+  each anchor and the fallback pane actually open the right pane on a
+  real, current macOS version still needs a live session, re-checked on
   each new macOS release.
 - **PINV-64** — enforced at logic level by the same `wait_for_grants_or_close`
   tests as PINV-61, plus
