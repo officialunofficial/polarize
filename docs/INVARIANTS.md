@@ -2039,9 +2039,22 @@ without limit.
 The invariants below (PINV-56 through PINV-65) describe the guided
 permission helper proposed in PLZ-3: a Swift AppKit helper, launched
 from `--request-permissions`, that guides a user through a denied
-Accessibility, Screen Recording, or Automation grant. No code for it
-exists yet. Each invariant states a design-level property the
-implementation must hold once built.
+Accessibility, Screen Recording, or Automation grant. Each invariant
+states a design-level property the implementation must hold.
+
+PLZ-4 built the helper's own skeleton
+(`apps/setup-helper/Sources/PolarizeSetupHelper/main.swift`): a plain
+window, no TCC-touching API of any kind. PLZ-5 built the Rust side that
+triggers, launches, and owns its lifecycle: `polarize-core`'s
+`bootstrap` module (the launch decision, the argv builder, and the
+poll-and-terminate wait loop), `polarize-macos`'s `setup_helper` module
+(locating and spawning the real process) and its `permission_bootstrap`
+non-prompting re-reads, and `apps/polarize/src/main.rs`'s rewired
+`request_permissions`. See the enforcement checklist entries below for
+exactly what each invariant has and has not yet had verified. The
+helper's own guided UI — the drag gesture, deep-link pane navigation,
+window tracking — is still unbuilt; PINV-58 through PINV-63 stay GAP
+until that lands.
 
 ### PINV-56: the helper never answers for Polarize's own permission grant
 
@@ -3278,29 +3291,39 @@ implementation must hold once built.
   `screenshot` call that hung. That repeat should now either succeed
   or fail within ten seconds, never hang.
 
-PINV-56 through PINV-65 (the guided permission helper, PLZ-3) have no
-code yet, so every entry below is a design-time **GAP**. Each names
-what would enforce it once built.
+PLZ-4 built the helper's own empty-window skeleton; PLZ-5 built the
+Rust side that triggers, launches, and owns the helper's lifecycle.
+PINV-56, 57, 61, and 64 are enforced below by real `cargo test` runs
+today; 65 follows from 56 and 61 by construction. PINV-58 through
+PINV-63 describe the helper's still-unbuilt guided UI (drag gesture,
+deep-link pane navigation, window tracking) and stay design-time
+**GAP**s.
 
-- **PINV-56** — GAP: not yet implemented. The claim that
-  `AXIsProcessTrusted`/`CGPreflightScreenCaptureAccess` answer for the
-  calling process alone is an OS-documented fact, not something this
-  repo can exercise in CI. Once built, a unit test can assert the
-  helper's own launch arguments and IPC surface carry no field for a
-  self-reported permission status at all — there is nowhere for one to
-  leak through.
-- **PINV-57** — GAP: not yet implemented. Fully testable, once built,
-  with `cargo test -p polarize-core`/`polarize-macos` against a fake
-  permission-check trait: assert the real-prompt call always precedes
-  the helper-launch decision, and that a "granted after the real
-  prompt" result never launches the helper. No live session needed for
-  this part.
-- **PINV-58** — GAP: not yet implemented. A weak check is possible
-  without a live session — an XCTest or link-time check that the
-  helper's binary calls no prompting permission API at all. The
-  stronger version needs a real macOS session: run the helper
-  standalone and confirm no consent dialog appears for its own bundle
-  identity.
+- **PINV-56** — enforced by
+  `polarize_core::bootstrap::tests::helper_args_never_carries_a_status_or_result_field`
+  (`crates/polarize-core/src/bootstrap.rs`): `NeededPermission` and
+  `helper_args` carry only permission names and an Automation target —
+  there is no field anywhere in the helper's launch argv for a
+  self-reported status to occupy. The underlying OS-documented claim
+  that `AXIsProcessTrusted`/`CGPreflightScreenCaptureAccess` answer for
+  the calling process alone is still not something this repo can
+  exercise in CI; `polarize_macos::permission_bootstrap::check_accessibility`/
+  `check_screen_recording` read it only from `apps/polarize`'s own
+  process, never the helper's, by construction — the helper process
+  calls no such API at all (PINV-58).
+- **PINV-57** — enforced by `polarize_core::bootstrap::tests::needed_permissions_*`
+  (`crates/polarize-core/src/bootstrap.rs`): `apps/polarize/src/main.rs`'s
+  `request_permissions` calls the three real-prompt functions first,
+  unconditionally, then feeds their results into `needed_permissions`;
+  a "granted after the real prompt" result yields an empty needed set,
+  which `request_permissions` returns on without ever calling
+  `launch_helper_and_wait`. No live session needed for this part.
+- **PINV-58** — GAP for the helper's guided UI, which is unbuilt. The
+  skeleton was re-inspected for PLZ-5 and still calls no prompting
+  permission API — `apps/setup-helper/Sources/PolarizeSetupHelper/main.swift`
+  is unchanged from PLZ-4. A link-time/XCTest check that the helper
+  binary calls no such API, and a live-session confirmation that no
+  consent dialog appears for its own bundle identity, remain open.
 - **PINV-59** — GAP: not yet implemented. The pasteboard writer's data
   mapping is a pure function once built — an XCTest can assert it
   always resolves to the Polarize.app URL it was given, never the
@@ -3310,10 +3333,13 @@ what would enforce it once built.
   session, once built: a table-driven test asserting only Accessibility
   and Screen Recording map to a drag-enabled pane, and Automation never
   does.
-- **PINV-61** — GAP: not yet implemented. Testable with `cargo test -p
-  polarize-core` against a fake child-process handle, once built:
-  assert the command's own exit path never blocks past a bounded
-  wait-then-terminate on a helper child that never exits on its own.
+- **PINV-61** — enforced by
+  `polarize_core::bootstrap::tests::a_helper_that_never_exits_still_returns_bounded_by_the_deadline_and_is_terminated`
+  and the other `wait_for_grants_or_close` tests
+  (`crates/polarize-core/src/bootstrap.rs`), against a fake
+  `HelperChild`: the wait loop always returns within its deadline and
+  always calls `terminate` before returning, regardless of whether the
+  child ever exits on its own.
 - **PINV-62** — GAP: not yet implemented. The pure selection logic
   (prefer `AXObserver` only once Accessibility is already known
   granted, else `CGWindowListCopyWindowInfo`) is testable without a
@@ -3324,16 +3350,31 @@ what would enforce it once built.
   without a live session. Whether the fallback pane itself still opens
   on a real, current macOS version needs a live session, re-checked on
   each new macOS release.
-- **PINV-64** — GAP: not yet implemented. Testable as an integration
-  test, once built: spawn the bootstrap command against a stub helper
-  binary that ignores termination signals, then assert the parent still
-  exits and the child process is gone afterward. A real AppKit helper
-  actually tearing down still needs a live session.
-- **PINV-65** — GAP: not yet implemented. Follows directly from PINV-56
-  and PINV-61 by construction, once both are enforced: if the helper
-  never reads its own status (PINV-56) and the parent alone decides
-  completion (PINV-61), there is only one read left to disagree with.
-  No independent test is needed beyond PINV-56's and PINV-61's own
+- **PINV-64** — enforced at logic level by the same `wait_for_grants_or_close`
+  tests as PINV-61, plus
+  `polarize_macos::setup_helper::tests::terminate_kills_and_reaps_a_real_child_process_that_never_exits_on_its_own`
+  (`crates/polarize-macos/src/setup_helper.rs`), a real-process
+  integration test: it spawns `/bin/sleep 1000` through the same
+  `HelperChild` implementation `apps/polarize` uses, calls `terminate`,
+  and asserts the process is no longer running afterward. `polarize`
+  spawns the helper directly with `std::process::Command`, never
+  through `open`/`NSWorkspace`, specifically so it stays this
+  process's real child (see `setup_helper.rs`'s module doc comment).
+  `Child::kill` is `SIGKILL` with no SIGTERM-then-SIGKILL ladder — fine
+  for today's plain-window skeleton, a residual gap for a later helper
+  with real UI state to save on exit. A real AppKit helper actually
+  tearing down, and the Ctrl-C/user-cancel path (a directly spawned
+  child shares the parent's foreground process group, so `SIGINT`
+  reaches it too, but this is unverified against a real terminal
+  session), still need a live macOS session.
+- **PINV-65** — holds by construction, now that both 56 and 61 are
+  enforced: `wait_for_grants_or_close`'s own `WaitResult` is built from
+  the same `poll` call that decided the loop's outcome (checked before
+  `still_running` on every iteration — see
+  `a_grant_observed_after_the_helper_already_exited_still_reports_all_granted`),
+  and `apps/polarize/src/main.rs` prints its final report straight from
+  that `WaitResult`, never from a second read. No independent test is
+  needed beyond PINV-56's and PINV-61's own
   coverage.
 - **PINV-66** — the inside-out signing order and per-arch build are
   verified locally: `just verify-bundle` runs `codesign --verify

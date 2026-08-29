@@ -11,7 +11,7 @@
 //! registers a functional grant.
 
 use crate::ax_ffi;
-use objc2_core_graphics::CGRequestScreenCaptureAccess;
+use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
 use polarize_core::script::AutomationCheck;
 
 /// Shows the system Accessibility consent alert (if not already
@@ -35,4 +35,33 @@ pub fn request_screen_recording() -> bool {
 /// not granted once for the whole binary.
 pub fn request_automation(target_app_name: &str) -> AutomationCheck {
     crate::applescript::request_automation(target_app_name)
+}
+
+// ---- non-prompting re-reads, for the guided helper's poll loop --------
+//
+// Every function below reads current permission state without ever
+// showing a system dialog. `--request-permissions` uses these — not the
+// three prompting functions above — to poll while the guided helper
+// window is open, and to build its final report. See PINV-56, which
+// requires that only `apps/polarize`'s own process, never the helper,
+// ever reads or reports Polarize's own grant state.
+
+/// Re-reads Accessibility trust without prompting. Wraps
+/// `AXIsProcessTrusted` — `ax_ffi` is crate-private, so this is its
+/// public, non-prompting face for the rest of `apps/polarize`.
+pub fn check_accessibility() -> bool {
+    // SAFETY: `AXIsProcessTrusted` takes no arguments and only reads
+    // process-local TCC state.
+    unsafe { ax_ffi::AXIsProcessTrusted() }
+}
+
+/// Re-reads Screen Recording trust without prompting.
+pub fn check_screen_recording() -> bool {
+    CGPreflightScreenCaptureAccess()
+}
+
+/// Re-reads Automation permission for one target app, without prompting
+/// and without sending a script.
+pub fn check_automation(target_app_name: &str) -> AutomationCheck {
+    crate::applescript::check_automation(target_app_name)
 }

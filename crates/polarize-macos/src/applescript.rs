@@ -242,6 +242,16 @@ pub fn request_automation(target_app_name: &str) -> AutomationCheck {
 
     let _ = crate::disclaimed_spawn::send_bootstrap_script(target_app_name);
 
+    check_automation(target_app_name)
+}
+
+/// Re-reads Automation permission for one target app, without prompting
+/// and without sending any script. This is the read-only tail
+/// [`request_automation`] already runs after its real script send,
+/// factored out so the guided permission helper's poll loop
+/// (`polarize_core::bootstrap::wait_for_grants_or_close`) can re-check
+/// state on its own, non-prompting schedule. See PINV-56.
+pub fn check_automation(target_app_name: &str) -> AutomationCheck {
     let identifier = AppIdentifier {
         bundle_id: Some(target_app_name.to_string()),
         app_name: Some(target_app_name.to_string()),

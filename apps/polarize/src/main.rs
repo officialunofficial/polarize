@@ -199,6 +199,12 @@ const AUTOMATION_BOOTSTRAP_TARGET: &str = "Finder";
 /// names which app this call bootstraps; run this once per target app
 /// `run_applescript` needs to reach, e.g.
 /// `./target/debug/polarize --request-permissions Messages`.
+///
+/// # PINV-57
+///
+/// The three real-prompt calls below always run first, for every
+/// permission, before this function may even consider launching the
+/// guided helper. See `polarize_core::bootstrap::needed_permissions`.
 fn request_permissions(automation_target: &str) {
     println!("Requesting Accessibility permission...");
     let accessibility = polarize_macos::permission_bootstrap::request_accessibility();
@@ -212,18 +218,157 @@ fn request_permissions(automation_target: &str) {
     let automation = polarize_macos::permission_bootstrap::request_automation(automation_target);
     println!("  Automation ({automation_target}): {automation:?}");
 
-    if !accessibility
-        || !screen_recording
-        || automation != polarize_core::script::AutomationCheck::Permitted
-    {
-        println!(
-            "\nIf a system dialog appeared, approve it, then run \
-             `./target/debug/polarize --request-permissions {automation_target}` again to \
-             confirm.\n\
-             `run_applescript` against any other app (Mail, Safari, Music, Notes, …) needs \
-             its own bootstrap run first — \
-             `./target/debug/polarize --request-permissions <App Name>` — \
-             Automation is granted per target app, not once for the whole binary."
-        );
+    let needed = polarize_core::bootstrap::needed_permissions(
+        accessibility,
+        screen_recording,
+        automation,
+        automation_target,
+    );
+
+    if needed.is_empty() {
+        // Every real prompt already succeeded — nothing to hand off to
+        // the helper. See PINV-57's fast path.
+        return;
     }
+
+    launch_helper_and_wait(automation_target, needed);
+}
+
+/// Locates and spawns the guided permission helper for `needed`, waits
+/// for grants (or the helper's own exit, or a deadline) via
+/// `polarize_core::bootstrap::wait_for_grants_or_close`, and prints the
+/// final report from that same wait's last read (PINV-65).
+///
+/// A helper that cannot be located or spawned is a graceful,
+/// non-fatal condition (AC 4): this warns and falls straight through to
+/// the final report, built from one more non-prompting re-read, instead
+/// of aborting `--request-permissions` itself.
+fn launch_helper_and_wait(
+    automation_target: &str,
+    needed: Vec<polarize_core::bootstrap::NeededPermission>,
+) {
+    let helper_exe = match polarize_macos::setup_helper::locate_helper() {
+        Ok(path) => path,
+        Err(err) => {
+            println!("\nCould not locate the guided permission helper: {err}");
+            print_current_report(automation_target);
+            return;
+        }
+    };
+
+    let args = polarize_core::bootstrap::helper_args(&needed);
+    let permission_names = needed
+        .iter()
+        .map(describe_needed_permission)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut child = match polarize_macos::setup_helper::spawn_helper(&helper_exe, &args) {
+        Ok(child) => {
+            println!(
+                "\nStill missing: {permission_names}. Opening the guided setup helper \
+                 ({})...",
+                helper_exe.display()
+            );
+            child
+        }
+        Err(err) => {
+            println!("\nCould not launch the guided permission helper: {err}");
+            print_current_report(automation_target);
+            return;
+        }
+    };
+
+    let clock = polarize_core::wait::SystemClock::new();
+    let sleeper = polarize_core::bootstrap::SystemSleeper;
+    let target = automation_target.to_string();
+    let result = polarize_core::bootstrap::wait_for_grants_or_close(
+        &mut child,
+        &clock,
+        &sleeper,
+        polarize_core::bootstrap::DEFAULT_WAIT_DEADLINE_MS,
+        polarize_core::bootstrap::DEFAULT_WAIT_POLL_INTERVAL_MS,
+        || poll_needed_permissions(&target),
+    );
+
+    match result.outcome {
+        polarize_core::bootstrap::WaitOutcome::AllGranted => {
+            println!("\nAll requested permissions are now granted.");
+        }
+        polarize_core::bootstrap::WaitOutcome::HelperExited => {
+            println!("\nThe guided setup helper window closed.");
+        }
+        polarize_core::bootstrap::WaitOutcome::TimedOut => {
+            println!("\nTimed out waiting for the guided setup helper.");
+        }
+    }
+    print_final_report_from_needed(automation_target, &result.still_needed);
+}
+
+/// Re-reads every real permission state through the non-prompting
+/// checks, and returns what `needed_permissions` still finds missing.
+/// This is the `poll` closure `wait_for_grants_or_close` drives — see
+/// PINV-56 (never a prompting call here) and PINV-65 (this exact read
+/// backs both the helper's early close and the terminal's report).
+fn poll_needed_permissions(
+    automation_target: &str,
+) -> Vec<polarize_core::bootstrap::NeededPermission> {
+    let accessibility = polarize_macos::permission_bootstrap::check_accessibility();
+    let screen_recording = polarize_macos::permission_bootstrap::check_screen_recording();
+    let automation = polarize_macos::permission_bootstrap::check_automation(automation_target);
+    polarize_core::bootstrap::needed_permissions(
+        accessibility,
+        screen_recording,
+        automation,
+        automation_target,
+    )
+}
+
+fn describe_needed_permission(permission: &polarize_core::bootstrap::NeededPermission) -> String {
+    use polarize_core::bootstrap::NeededPermission;
+    match permission {
+        NeededPermission::Accessibility => "Accessibility".to_string(),
+        NeededPermission::ScreenRecording => "Screen Recording".to_string(),
+        NeededPermission::Automation { target } => format!("Automation ({target})"),
+    }
+}
+
+/// Prints the final report from one fresh non-prompting re-read. Used
+/// on the graceful launch-failure path (AC 4), where no wait loop ever
+/// ran to produce a `still_needed` set of its own.
+fn print_current_report(automation_target: &str) {
+    let needed = poll_needed_permissions(automation_target);
+    print_final_report_from_needed(automation_target, &needed);
+}
+
+/// Prints the closing "run again" hint from a `still_needed` set,
+/// exactly as returned by the same read that decided the wait loop's
+/// outcome — never a second, independent read (PINV-65). An empty set
+/// prints nothing further: everything is granted.
+fn print_final_report_from_needed(
+    automation_target: &str,
+    still_needed: &[polarize_core::bootstrap::NeededPermission],
+) {
+    if still_needed.is_empty() {
+        return;
+    }
+    let missing = still_needed
+        .iter()
+        .map(describe_needed_permission)
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("\nStill missing: {missing}.");
+    print_retry_hint(automation_target);
+}
+
+fn print_retry_hint(automation_target: &str) {
+    println!(
+        "\nIf a system dialog appeared, approve it, then run \
+         `./target/debug/polarize --request-permissions {automation_target}` again to \
+         confirm.\n\
+         `run_applescript` against any other app (Mail, Safari, Music, Notes, …) needs \
+         its own bootstrap run first — \
+         `./target/debug/polarize --request-permissions <App Name>` — \
+         Automation is granted per target app, not once for the whole binary."
+    );
 }
