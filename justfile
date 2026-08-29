@@ -56,10 +56,35 @@ plist_template := "apps/polarize/bundle/Info.plist.in"
 # `CARGO_PKG_VERSION`.
 version := `awk -F'"' '/^version = /{print $2; exit}' Cargo.toml`
 
+# `PolarizeSetupHelper` is a nested AppKit helper, built with SwiftPM
+# and signed into `Polarize.app` alongside the Rust binary (PLZ-4). It
+# ships as a skeleton today; PLZ-3 fills in its guided-permission flow
+# later. See PINV-66 in docs/INVARIANTS.md.
+helper_pkg := "apps/setup-helper"
+helper_name := "PolarizeSetupHelper"
+helper_identifier := "com.officialunofficial.polarize.setup-helper"
+helper_plist_template := helper_pkg + "/bundle/Info.plist.in"
+helper_bundle := bundle + "/Contents/Resources/" + helper_name + ".app"
+# SwiftPM's `--arch` takes Apple's short arch name (`arm64`/`x86_64`),
+# not `just`'s own `arch()` output (`aarch64`/`x86_64`), and not a Rust
+# target triple either — hence the translation instead of reusing
+# either directly. Overridable, so CI can pass the matrix arch it is
+# actually building for.
+helper_arch := if arch() == "aarch64" { "arm64" } else { "x86_64" }
+
 build:
     cargo build --workspace
     codesign --force --sign "{{identity}}" --identifier {{identifier}} --options runtime --entitlements {{entitlements}} {{bin}}
     just bundle-app
+
+# Builds `PolarizeSetupHelper` via SwiftPM, in release mode, for one
+# architecture — never a universal binary (PINV-54's rule extends to
+# this helper too, see PINV-66). Fails with a clear error, rather than
+# skipping silently, when no Swift toolchain is on PATH: `just build`
+# needs one from now on.
+build-helper:
+    command -v swift >/dev/null || { echo "error: building the setup helper needs a Swift toolchain (install Xcode or the Command Line Tools)" >&2; exit 1; }
+    swift build -c release --package-path {{helper_pkg}} --arch {{helper_arch}}
 
 # Assembles `Polarize.app`, under `dist/`. It builds a real bundle
 # directory — `Contents/{Info.plist,MacOS/polarize,Resources/Polarize.icns}`
@@ -78,11 +103,22 @@ build:
 # via `sips`. It was packed with `iconutil` last. A flat, unmasked
 # square here would show hard corners in the Dock, next to every
 # rounded system icon.
-bundle-app:
+#
+# `PolarizeSetupHelper.app` nests under `Contents/Resources/` (PLZ-3's
+# own placement decision). It is signed first, with no entitlements of
+# its own — it touches no TCC API (PINV-58) — then the outer bundle
+# signs last. That order is deliberate: a nested bundle must already
+# carry a valid signature before the bundle around it is sealed, or
+# `codesign --verify --deep` on the outer bundle fails. See PINV-66.
+bundle-app: build-helper
     mkdir -p {{bundle}}/Contents/MacOS {{bundle}}/Contents/Resources
     sed 's/__VERSION__/{{version}}/' {{plist_template}} > {{bundle}}/Contents/Info.plist
     cp {{bin}} {{bundle}}/Contents/MacOS/polarize
     cp apps/polarize/bundle/Polarize.icns {{bundle}}/Contents/Resources/Polarize.icns
+    mkdir -p {{helper_bundle}}/Contents/MacOS
+    sed 's/__VERSION__/{{version}}/' {{helper_plist_template}} > {{helper_bundle}}/Contents/Info.plist
+    cp "$(swift build -c release --package-path {{helper_pkg}} --arch {{helper_arch}} --show-bin-path)/{{helper_name}}" {{helper_bundle}}/Contents/MacOS/{{helper_name}}
+    codesign --force --sign "{{identity}}" --options runtime {{helper_bundle}}
     codesign --force --sign "{{identity}}" --options runtime --entitlements {{entitlements}} {{bundle}}
 
 # Verifies `Polarize.app` is a well-formed, LaunchServices-acceptable
@@ -90,8 +126,10 @@ bundle-app:
 # "not automatable" note for what this cannot check.
 verify-bundle: bundle-app
     plutil -lint {{bundle}}/Contents/Info.plist
+    plutil -lint {{helper_bundle}}/Contents/Info.plist
     codesign --verify --strict --deep {{bundle}}
     codesign -dv {{bundle}} 2>&1 | grep -q "Identifier={{identifier}}"
+    codesign -dv {{helper_bundle}} 2>&1 | grep -q "Identifier={{helper_identifier}}"
     # Asks LaunchServices to resolve the bundle by identity, with no
     # launch — checkable with zero TCC grants. PINV-44 documented a
     # bare binary failing this with `-600` (`kLSApplicationNotFoundErr`)

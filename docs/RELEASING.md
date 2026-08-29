@@ -219,6 +219,40 @@ ticket with `xcrun stapler staple`. It uploads the stapled result as
 an extra release asset — alongside, not instead of, the existing
 npm/shell-installer/Homebrew channels.
 
+### The nested `PolarizeSetupHelper.app` helper
+
+`just bundle-app` also builds and signs a second, nested bundle:
+`Polarize.app/Contents/Resources/PolarizeSetupHelper.app`, a small
+Swift AppKit app built with SwiftPM (`apps/setup-helper`). It ships as
+a skeleton today — one plain window, no permission logic yet. PLZ-3
+fills that in later; see PINV-56 through PINV-65 in
+[`docs/INVARIANTS.md`](INVARIANTS.md).
+
+Three rules govern how it signs, all covered by PINV-66:
+
+- **Inside-out order.** The nested helper signs first, with no
+  entitlements of its own. The outer `Polarize.app` signs last. A
+  nested bundle needs a valid signature *before* the bundle around it
+  is sealed, or `codesign --verify --deep` on the outer bundle fails.
+- **A secure timestamp on both.** This job's post-build re-sign step
+  (see "Signing" above for why a timestamp matters at all) re-signs
+  the nested helper with `--timestamp` first, then the outer bundle,
+  in that same order. Apple's notary service checks every piece of
+  signed code inside a submission, not only the outer bundle — an
+  un-timestamped nested binary can fail notarization on its own.
+- **One helper arch per target triple, same as the outer bundle.**
+  `justfile`'s `helper_arch` variable drives SwiftPM's own `--arch`
+  flag. This job derives it from `matrix.target`
+  (`aarch64-apple-darwin` → `arm64`, `x86_64-apple-darwin` →
+  `x86_64`) and passes it through explicitly. No `lipo` merge step
+  exists for the helper, matching the outer bundle's own
+  one-bundle-per-triple rule ("Two bundles, not one universal binary"
+  below).
+
+`just build-helper` fails with a clear, actionable error — not a
+silent skip — when no Swift toolchain is on `PATH`. `just build` now
+needs one locally; see CONTRIBUTING.md.
+
 Four decisions, made by the repo owner, shape this job:
 
 - **Additional asset, not a replacement.** The bare-binary channels

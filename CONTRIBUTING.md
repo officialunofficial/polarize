@@ -29,8 +29,13 @@ Use `just build` instead of `cargo build --workspace` day to day. It
 re-signs the binary with a stable local identity afterward. It also
 assembles `dist/Polarize.app` — a real bundle around that same binary.
 This is needed for Automation's own identity (PINV-52 in
-`docs/INVARIANTS.md`). `just verify-bundle` checks the bundle's
-structure and signature. Grant Accessibility and Screen Recording
+`docs/INVARIANTS.md`). `just build` also needs a Swift toolchain on
+`PATH` now — it builds `PolarizeSetupHelper`, a nested AppKit helper,
+via SwiftPM (`apps/setup-helper`), and signs it into the bundle
+alongside `polarize` (PINV-66). Xcode or the Command Line Tools
+provide `swift`; `just build` fails with a clear error if neither is
+installed. `just verify-bundle` checks the bundle's structure and
+signature. Grant Accessibility and Screen Recording
 once, with `./target/debug/polarize --request-permissions`. Grant
 Automation for a given target app through the bundle instead:
 `./dist/Polarize.app/Contents/MacOS/polarize --request-permissions <App Name>`.
