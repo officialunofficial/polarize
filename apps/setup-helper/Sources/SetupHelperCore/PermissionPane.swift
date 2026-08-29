@@ -70,14 +70,26 @@ extension String {
 
 /// Maps each permission to its System Settings deep link.
 ///
-/// Automation has no pane mapping in this slice — its real grant
-/// mechanism is a live Apple Event send (PINV-60), not a settings pane
-/// — so `urlString(for:)` returns `nil` for it, and the helper skips
-/// deep-linking for an automation-only launch entirely.
+/// Automation's real grant mechanism is a live Apple Event send
+/// (PINV-57), not a settings pane — but the pane still matters: the
+/// Automation pane is where the user finds Polarize's row for the
+/// target app and flips its checkbox (PLZ-10), so `urlString(for:)`
+/// maps it to `Privacy_Automation`, the same undocumented anchor
+/// pattern as Accessibility and Screen Recording below. That anchor is
+/// unverified on a live macOS session — see the PLZ-10 manual-follow-up
+/// list in `docs/INVARIANTS.md`; PINV-63's fallback pane covers a wrong
+/// or drifted one. `.unknown` still maps to `nil`, so a future
+/// Rust-side addition this build does not recognize never opens a
+/// pane.
 public enum SettingsPane {
     /// The top-level Privacy & Security pane, opened when a mapped
     /// permission's own anchor fails to resolve (PINV-63).
     public static let fallbackURLString = "x-apple.systempreferences:com.apple.preference.security"
+
+    /// Automation's own anchor (PLZ-10). See this enum's doc comment
+    /// for its provenance and unverified status.
+    public static let automationURLString =
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
 
     public static func urlString(for permission: NeededPermission) -> String? {
         switch permission {
@@ -85,7 +97,9 @@ public enum SettingsPane {
             return "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
         case .screenRecording:
             return "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
-        case .automation, .unknown:
+        case .automation:
+            return automationURLString
+        case .unknown:
             return nil
         }
     }
@@ -101,9 +115,11 @@ public enum LaunchOutcome: Equatable {
     /// (PINV-63). The window must still show plain instructions — see
     /// `main.swift`.
     case fellBackToInstructions(permission: NeededPermission, fallbackURLString: String)
-    /// No permission in the set maps to a pane — an automation-only
-    /// launch, or an empty set. The helper opens nothing and shows its
-    /// plain window (PLZ-4 behavior).
+    /// No permission in the set maps to a pane — an empty set, or a set
+    /// naming only `.unknown` permissions. The helper opens nothing and
+    /// shows its plain window (PLZ-4 behavior). Since PLZ-10, Automation
+    /// always maps to a pane, so this case no longer covers an
+    /// automation-only launch.
     case nothingToOpen
 }
 
@@ -114,7 +130,15 @@ public enum LaunchOutcome: Equatable {
 /// opens only that one — System Settings can show only one pane at a
 /// time, so a multi-permission launch does not attempt every mapped
 /// permission in turn (see `docs/INVARIANTS.md`'s PLZ-6 risk note on
-/// this exact choice). `open` is the seam for `NSWorkspace.shared.open`;
+/// this exact choice). This strict-argv-order rule now also decides
+/// which pane opens when Automation is mixed with a draggable
+/// permission (Accessibility or Screen Recording) — the Rust side
+/// always emits them in the fixed order Accessibility, Screen
+/// Recording, Automation (`polarize_core::bootstrap::needed_permissions`),
+/// so a mixed launch opens a drag-capable pane first in practice; this
+/// is a cross-language ordering coupling enforced by nothing in this
+/// file (PLZ-10 open question 1 in `docs/INVARIANTS.md`). `open` is the
+/// seam for `NSWorkspace.shared.open`;
 /// it is never called more than twice — once for the mapped pane, and
 /// once more for the fallback pane only if the first call reports
 /// failure.

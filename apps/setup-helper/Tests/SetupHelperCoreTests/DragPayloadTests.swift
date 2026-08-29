@@ -142,6 +142,33 @@ final class DragPayloadTests: XCTestCase {
         )
     }
 
+    // PLZ-10: since `SettingsPane.urlString` now maps Automation to a
+    // real anchor, `.openedPane`/`.fellBackToInstructions` alone no
+    // longer imply a draggable permission. This is the direct
+    // regression test for the explicit rule in `DragSourcePlanner`:
+    // even with a real, non-nil Automation pane URL, no drag payload is
+    // offered — Automation's only grant mechanism is a live Apple Event
+    // send, never a drag.
+    func testPayloadIsNilForAnOpenedAutomationPaneEvenWithARealURL() {
+        let outcome = LaunchOutcome.openedPane(
+            permission: .automation(target: "Finder"),
+            urlString: SettingsPane.automationURLString
+        )
+        XCTAssertNil(
+            DragSourcePlanner.payload(outcome: outcome, bundlePath: "/Applications/Polarize.app")
+        )
+    }
+
+    func testPayloadIsNilForAFallenBackAutomationPaneEvenWithARealURL() {
+        let outcome = LaunchOutcome.fellBackToInstructions(
+            permission: .automation(target: "Finder"),
+            fallbackURLString: SettingsPane.fallbackURLString
+        )
+        XCTAssertNil(
+            DragSourcePlanner.payload(outcome: outcome, bundlePath: "/Applications/Polarize.app")
+        )
+    }
+
     func testPayloadIsNilWhenTheBundlePathIsTheHelpersOwnEvenIfOutcomeIsMapped() {
         let outcome = LaunchOutcome.openedPane(
             permission: .accessibility,
@@ -157,10 +184,12 @@ final class DragPayloadTests: XCTestCase {
 
     // Table-driven over every `NeededPermission` case an outcome could
     // name, run through `LaunchPlanner` first exactly as the helper
-    // does — automation-only and empty sets both yield `.nothingToOpen`
-    // by composition (`SettingsPane.urlString` returns `nil` for
-    // Automation), so no Automation-specific branch is needed anywhere
-    // in this file.
+    // does. Since PLZ-10, Automation opens a real pane like Accessibility
+    // and Screen Recording do, so `DragSourcePlanner` must reject it by
+    // its explicit `supportsDragGrant` rule, not by `LaunchOutcome`
+    // shape — an empty set or an unknown-only set still yields
+    // `.nothingToOpen`, but an automation-only or automation-first set
+    // now yields `.openedPane` with no payload.
     func testDragPayloadNonNilOnlyForAccessibilityOrScreenRecordingOutcomes() {
         let cases: [(needed: [NeededPermission], expectPayload: Bool)] = [
             ([.accessibility], true),
@@ -168,7 +197,8 @@ final class DragPayloadTests: XCTestCase {
             ([.automation(target: "Finder")], false),
             ([], false),
             ([.unknown("some-future-permission")], false),
-            ([.automation(target: "Finder"), .accessibility], true),
+            ([.automation(target: "Finder"), .accessibility], false),
+            ([.accessibility, .automation(target: "Finder")], true),
         ]
 
         for testCase in cases {

@@ -2089,8 +2089,25 @@ swap in a success view (`SetupHelperCore`'s `SuccessPlan.swift`, wired
 to the real `DispatchSource`/`exit` calls in `main.swift`) before the
 window closes. The helper still reads no permission API anywhere in
 this path; it only reacts to a signal the parent's own read decided to
-send. See the enforcement checklist entries below for exactly what each
-invariant has and has not yet had verified.
+send. PLZ-10 closed the one remaining gap in the Automation path: the
+helper now maps Automation to its own pane
+(`SettingsPane.automationURLString`, `Privacy_Automation`), so an
+automation-only launch opens System Settings, tracks its window, and
+waits, exactly like Accessibility and Screen Recording already did.
+The drag view still never shows for Automation — `DragSourcePlanner`
+now switches on the outcome's own permission
+(`NeededPermission.supportsDragGrant`) instead of relying on
+`SettingsPane.urlString` returning `nil`, because that `nil` no longer
+holds now that Automation maps to a real anchor. `main.swift`'s
+instruction text also names the Automation target ("Allow Polarize to
+control `<target>` in the Automation list") rather than the generic
+"enable Polarize" copy, since Automation's checkbox lives under a
+per-target row the user must find. No Rust-side change was needed for
+PLZ-10 — PINV-57's real Apple Event send and the poll loop that reads
+`check_automation` already worked before this pane existed; the pane
+only gives the user somewhere to act once the row appears. See the
+enforcement checklist entries below for exactly what each invariant
+has and has not yet had verified.
 
 ### PINV-56: the helper never answers for Polarize's own permission grant
 
@@ -3357,11 +3374,18 @@ grant-path success state — `polarize_core::bootstrap`'s
 branch only), `polarize_macos::setup_helper::HelperProcess`'s real
 `SIGUSR1` send (the `HelperChild` implementation), and
 `SetupHelperCore`'s `SuccessPlan.swift` (pure) wired to a real
-`DispatchSource`/`exit` pair in `main.swift`. PINV-56, 57, 61, and
+`DispatchSource`/`exit` pair in `main.swift`. PLZ-10 mapped Automation
+to its own pane in `SetupHelperCore`'s `PermissionPane.swift`
+(`SettingsPane.automationURLString`) and rewrote `DragPayload.swift`'s
+`DragSourcePlanner` to reject Automation by an explicit
+`NeededPermission.supportsDragGrant` rule rather than by
+`SettingsPane.urlString` returning `nil` for it — that `nil` no longer
+holds. PINV-56, 57, 61, and
 64 are enforced below by real `cargo test` runs today; 65 follows from
 56 and 61 by construction. PINV-63 is now enforced at the logic level by
 `SetupHelperCoreTests`, run in CI's `swift test` step; whether each
-anchor and the fallback pane actually open the right pane on a real,
+anchor (Accessibility, Screen Recording, and, since PLZ-10, Automation)
+and the fallback pane actually open the right pane on a real,
 current macOS version still needs a live session (see PINV-63's own
 entry below). PINV-62 is now enforced at the logic level too, by
 `WindowTrackingTests` (see its own entry below); PINV-59 and PINV-60 are
@@ -3434,18 +3458,31 @@ own entries below).
   pasteboard types offered are the ones System Settings' drop target
   actually accepts on the current macOS version — see the PLZ-8 plan's
   risk note 2 on the legacy `NSFilenamesPboardType` shape.
-- **PINV-60** — enforced at the logic level by
-  `DragPayloadTests.testDragPayloadNonNilOnlyForAccessibilityOrScreenRecordingOutcomes`,
-  a table-driven test over every `NeededPermission` case
-  `LaunchPlanner` can be asked to route: a drag payload is non-nil only
-  when the launch actually opened (or fell back to) the Accessibility
-  or Screen Recording pane, and nil for an automation-only, empty, or
-  unknown-only launch. `DragSourcePlanner` adds no Automation-specific
-  branch of its own — the restriction holds by composition with
-  `SettingsPane.urlString`, which already returns `nil` for Automation.
-  Whether the real TCC grant actually flips after a live drop —
-  confirmed with `AXIsProcessTrusted`/`CGPreflightScreenCaptureAccess`
-  read from Polarize's own process — needs a live session.
+- **PINV-60** — since PLZ-10 mapped Automation to its own pane,
+  `SettingsPane.urlString` no longer returns `nil` for it, so the
+  composed-by-construction argument this entry used to make no longer
+  holds. `DragSourcePlanner.payload` now switches explicitly on the
+  outcome's own permission, via `NeededPermission.supportsDragGrant`
+  (`true` only for Accessibility and Screen Recording), and this is
+  enforced at the logic level by two groups of tests in
+  `DragPayloadTests`
+  (`apps/setup-helper/Tests/SetupHelperCoreTests/DragPayloadTests.swift`):
+  `testPayloadIsNilForAnOpenedAutomationPaneEvenWithARealURL` and
+  `testPayloadIsNilForAFallenBackAutomationPaneEvenWithARealURL`
+  construct an `.openedPane`/`.fellBackToInstructions` outcome carrying
+  Automation's real, non-nil anchor and assert `nil` payload directly —
+  the regression test for the exact case the old composed argument
+  could no longer cover. `testDragPayloadNonNilOnlyForAccessibilityOrScreenRecordingOutcomes`
+  stays a table-driven test over every `NeededPermission` case
+  `LaunchPlanner` can be asked to route, updated for PLZ-10: Automation
+  paired ahead of a draggable permission (`[.automation, .accessibility]`)
+  now expects no payload, because strict argv order (`LaunchPlanner`'s
+  own rule, see its doc comment and PLZ-10's open question 1) opens the
+  Automation pane first, and Automation never supports a drag
+  regardless of pane order. Whether the real TCC grant actually flips
+  after a live drop — confirmed with
+  `AXIsProcessTrusted`/`CGPreflightScreenCaptureAccess` read from
+  Polarize's own process — needs a live session.
 - **PINV-61** — enforced by
   `polarize_core::bootstrap::tests::a_helper_that_never_exits_still_returns_bounded_by_the_deadline_and_is_terminated`
   and the other `wait_for_grants_or_close` tests
@@ -3477,6 +3514,8 @@ own entries below).
 - **PINV-63** — the fallback-selection logic (an `open` call reporting
   failure → the top-level pane plus on-screen instructions) is enforced
   by `SetupHelperCoreTests.testOpenReturningFalseTriggersExactlyOneFallbackAttempt`
+  and, since PLZ-10, its Automation-anchor counterpart
+  `testAutomationAnchorFailingToOpenTriggersExactlyOneFallbackAttempt`
   (`apps/setup-helper/Tests/SetupHelperCoreTests/PermissionPaneTests.swift`):
   a fake `open` closure returning `false` for the mapped pane always
   triggers exactly one further call, with the fallback URL string, and
@@ -3485,9 +3524,11 @@ own entries below).
   `open` call reported failure" — System Settings often opens
   *somewhere* even for a bad anchor, returning `true`, so true
   wrong-pane detection still needs PINV-62's window tracking. Whether
-  each anchor and the fallback pane actually open the right pane on a
-  real, current macOS version still needs a live session, re-checked on
-  each new macOS release.
+  each anchor — Accessibility, Screen Recording, and, since PLZ-10,
+  Automation (`Privacy_Automation`, unverified on any live macOS session
+  as of this writing) — and the fallback pane actually open the right
+  pane on a real, current macOS version still needs a live session,
+  re-checked on each new macOS release.
 - **PINV-64** — enforced at logic level by the same `wait_for_grants_or_close`
   tests as PINV-61, plus
   `polarize_macos::setup_helper::tests::terminate_kills_and_reaps_a_real_child_process_that_never_exits_on_its_own`
@@ -3535,7 +3576,22 @@ own entries below).
   run, that toggling Accessibility and Screen Recording by hand in
   System Settings actually drives the helper's window through this
   exact success frame before it closes, and does not, for example,
-  leave the panel blank or frozen for the grace window.
+  leave the panel blank or frozen for the grace window. PLZ-10 adds the
+  same open question for Automation specifically: whether toggling a
+  target app's row in the Automation pane by hand actually flips
+  `check_automation`'s non-prompting `AEDeterminePermissionToAutomateTarget`
+  read to `Permitted`, driving this same success frame and close. Two
+  more items are outstanding for a live macOS session, per the PLZ-10
+  plan's own risk notes: whether `Privacy_Automation` actually resolves
+  to the Automation pane at all (a wrong anchor degrades gracefully via
+  PINV-63's fallback, but the acceptance criterion "opens the Automation
+  pane" then fails silently, since `open` often still returns `true` for
+  a bad anchor); and whether Polarize's row for the launch's own target
+  app is actually visible in that pane by the time the helper opens it —
+  `request_permissions` runs the real Apple Event send
+  (`request_automation`) before ever launching the helper, so TCC should
+  already hold a recorded decision, but this is unverified in this
+  sandboxed run.
 - **PINV-66** — the inside-out signing order and per-arch build are
   verified locally: `just verify-bundle` runs `codesign --verify
   --strict --deep` against the assembled `Polarize.app` and confirms

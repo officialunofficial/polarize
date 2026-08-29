@@ -93,22 +93,42 @@ public struct DragPayload: Equatable {
 ///
 /// # PINV-60
 ///
-/// Composed entirely from existing logic — `LaunchOutcome` already
-/// carries `.nothingToOpen` for an automation-only or empty launch,
-/// because `SettingsPane.urlString` already returns `nil` for
-/// Automation and unknown permissions. No Automation-specific branch
-/// lives here: the drag view is offered only when `LaunchPlanner`
-/// actually mapped the launch to a pane (`.openedPane` or
-/// `.fellBackToInstructions`), which by construction only ever happens
-/// for Accessibility or Screen Recording.
+/// Since PLZ-10, `SettingsPane.urlString` maps Automation to a real
+/// pane, so `LaunchOutcome` alone no longer distinguishes "a draggable
+/// permission's pane opened" from "the Automation pane opened" — both
+/// are `.openedPane` (or `.fellBackToInstructions`). Automation's grant
+/// mechanism is still a live Apple Event send, not a drag, so this is
+/// now an explicit rule rather than a composed one: switch on the
+/// outcome's own `permission` and return `nil` for `.automation` (and
+/// `.unknown`, unreachable here but named for completeness) via
+/// `NeededPermission.supportsDragGrant`. Never remove this switch to
+/// "just check `.openedPane`" again — that would silently re-offer a
+/// drag affordance for a permission a drag can never grant.
 public enum DragSourcePlanner {
     public static func payload(outcome: LaunchOutcome, bundlePath: String?) -> DragPayload? {
         switch outcome {
         case .nothingToOpen:
             return nil
-        case .openedPane, .fellBackToInstructions:
-            guard let bundlePath else { return nil }
+        case .openedPane(let permission, _), .fellBackToInstructions(let permission, _):
+            guard permission.supportsDragGrant, let bundlePath else { return nil }
             return DragPayload(bundlePath: bundlePath)
+        }
+    }
+}
+
+extension NeededPermission {
+    /// Whether dragging Polarize's own app icon into this permission's
+    /// System Settings row can grant it. `true` only for Accessibility
+    /// and Screen Recording — Finder-style drag-to-list is a real macOS
+    /// TCC affordance for those two panes. `false` for Automation, whose
+    /// only grant mechanism is a live Apple Event send (PINV-57), and
+    /// for `.unknown`, which names no pane at all.
+    var supportsDragGrant: Bool {
+        switch self {
+        case .accessibility, .screenRecording:
+            return true
+        case .automation, .unknown:
+            return false
         }
     }
 }

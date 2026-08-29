@@ -232,15 +232,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let dragHint = hasDragPayload ? " Or drag this icon into the list." : ""
 
         switch outcome {
-        case .openedPane:
-            return "\(needLine)\nOpen System Settings > Privacy & Security and enable Polarize.\(dragHint)"
-        case .fellBackToInstructions:
+        case .openedPane(let permission, _):
+            return "\(needLine)\n\(enableInstruction(for: permission)).\(dragHint)"
+        case .fellBackToInstructions(let permission, _):
             return
                 "\(needLine)\nSystem Settings could not open the exact pane. "
-                + "Open System Settings > Privacy & Security, find the matching entry, and enable Polarize."
+                + "Open System Settings > Privacy & Security, find the matching entry, and \(enableInstruction(for: permission, capitalized: false))."
                 + dragHint
         case .nothingToOpen:
-            return "\(needLine)\nGrant Automation access to Polarize when macOS prompts for it."
+            // PLZ-10: Automation always maps to a pane now, so this
+            // path only ever fires for an empty set or a set naming
+            // only `.unknown` permissions — never for Automation.
+            return "\(needLine)\nOpen System Settings > Privacy & Security and enable Polarize."
+        }
+    }
+
+    /// The pane-opened instruction sentence, worded per permission.
+    /// Automation's checkbox lives under its target app's own row, so
+    /// naming that target (rather than the generic "enable Polarize")
+    /// is the difference between a usable instruction and a dead end.
+    private static func enableInstruction(for permission: NeededPermission, capitalized: Bool = true) -> String {
+        switch permission {
+        case .automation(let target):
+            let verb = capitalized ? "Allow" : "allow"
+            return "\(verb) Polarize to control \(target) in the Automation list"
+        case .accessibility, .screenRecording, .unknown:
+            let verb = capitalized ? "Open" : "open"
+            return "\(verb) System Settings > Privacy & Security and enable Polarize"
         }
     }
 

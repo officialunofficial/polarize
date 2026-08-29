@@ -84,9 +84,11 @@ public enum PanelFramePlanner {
     }
 
     /// The panel's frame when no System Settings window can be found —
-    /// an automation-only launch that never opened Settings, or the
-    /// user quit Settings mid-flow. Centers the panel on the given
-    /// screen rather than hiding it, so there is always a visible
+    /// an empty or unknown-only launch that never opened Settings (see
+    /// `LaunchOutcome.nothingToOpen`; since PLZ-10 this no longer
+    /// includes an automation-only launch, which does open Settings),
+    /// or the user quit Settings mid-flow. Centers the panel on the
+    /// given screen rather than hiding it, so there is always a visible
     /// window with a path forward (PINV-63's same spirit).
     public static func fallbackFrame(
         screenWidth: CGFloat,
