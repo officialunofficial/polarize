@@ -173,6 +173,12 @@ permissions:
 polarize --request-permissions
 ```
 
+If a permission stays not granted after its system dialog, the
+command is designed to open a guided setup helper window — but only
+when `polarize` runs from inside `Polarize.app` (the notarized release
+asset). A bare-binary install, such as the npm or shell-installer path
+above, falls back to a printed report of what is still missing.
+
 See [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md) for exactly which
 permission each tool needs, and when `polarize` does and doesn't
 prompt.
@@ -338,10 +344,14 @@ That is what actually registers a functional grant. Approve the system
 dialogs it triggers. Then run the flag again to confirm both
 permissions report `true`.
 
-This flag is a one-time setup helper. No MCP tool call uses it. Every
-real `describe`/`tap`/`keyboard`/`screenshot` call still preflights
-with the non-prompting checks — PINV-10/PINV-11 in
-`docs/INVARIANTS.md`.
+This flag is a one-time bootstrap step, separate from the guided setup
+helper app described in `docs/PERMISSIONS.md`. No MCP tool call uses
+it. Every real `describe`/`tap`/`keyboard`/`screenshot` call still
+preflights with the non-prompting checks — PINV-10/PINV-11 in
+`docs/INVARIANTS.md`. A bare `target/debug/polarize` run does not
+launch the guided helper on a denial, unless `POLARIZE_SETUP_HELPER`
+points at a built helper executable — the helper is normally only
+reachable from inside `Polarize.app`.
 
 If Screen Recording still reports `false` after you approve the
 dialog, check your *terminal app* too (Ghostty, iTerm, Terminal.app,

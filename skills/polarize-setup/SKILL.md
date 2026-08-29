@@ -1,7 +1,7 @@
 ---
 name: polarize-setup
 description: This skill should be used when polarize's MCP tools fail with a permission error, or when a user asks to set up, grant, or troubleshoot polarize's macOS Accessibility, Screen Recording, or Automation access.
-version: 0.1.0
+version: 0.2.0
 ---
 
 # polarize setup
@@ -31,15 +31,40 @@ polarize needs three macOS permissions, granted once per Mac: Accessibility, Scr
    polarize --request-permissions
    ```
 
-   This triggers three separate system dialogs: Accessibility, Screen
-   Recording, and Automation. Approve each one.
+   This always triggers three separate system dialogs first:
+   Accessibility, Screen Recording, and Automation. Approve each one.
+   On a fresh install, these dialogs are the whole flow.
 
-3. If a dialog does not appear for a permission already denied once,
-   macOS will not re-prompt. Open System Settings > Privacy &
-   Security, find "Polarize" under Accessibility and Screen Recording,
-   and enable it directly.
+   If a permission is still not granted after its dialog, the command
+   is designed to open a guided setup helper window for it — but only
+   when `polarize` runs from inside `Polarize.app` (the notarized
+   release asset, or a `just build` output). A bare `polarize` binary
+   cannot locate the helper. In that case the command prints "Could
+   not locate the guided permission helper" and falls straight to step
+   4 below.
 
-4. Restart this Claude Code session. polarize's MCP tools only see a
+3. If the guided setup helper opens, it floats a small window over
+   System Settings and does not steal focus:
+   - For Accessibility or Screen Recording, it opens the matching
+     Privacy & Security pane. Enable Polarize in the list, or drag the
+     Polarize icon the window shows into that list.
+   - For Automation, it opens the Automation pane. No drag applies
+     here. Find Polarize's row for the named app and allow it.
+
+   The terminal command polls for the grant on its own. Once every
+   requested permission is granted, the helper shows a short success
+   message, then closes by itself. Closing the helper window early is
+   safe — the command still finishes and prints what is still missing.
+   After 5 minutes with no grant, the command times out and prints the
+   same report.
+
+4. Fall back to the manual path when the helper does not open, opens
+   an unrecognized System Settings pane, closes early, or times out.
+   Open System Settings > Privacy & Security, find "Polarize" under
+   Accessibility, Screen Recording, or Automation, and enable it
+   directly.
+
+5. Restart this Claude Code session. polarize's MCP tools only see a
    fresh permission grant after their process restarts.
 
 ## Reference

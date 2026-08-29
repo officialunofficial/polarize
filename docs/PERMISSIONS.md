@@ -46,6 +46,51 @@ calls the OS's own prompting APIs (`AXIsProcessTrustedWithOptions`,
 permission is now granted. No MCP tool call uses this flag. See
 PINV-11 in [`INVARIANTS.md`](INVARIANTS.md).
 
+## The guided setup helper
+
+`--request-permissions` always attempts the three real system prompts
+above first, for every permission, before it may launch anything else
+(PINV-57). A permission still not granted after its own prompt — a
+real denial, or an inconclusive Automation preflight — is a permission
+the command hands to a guided setup helper window.
+
+The helper never reads or reports Polarize's own grant state, and it
+never requests a TCC grant of its own (PINV-56, PINV-58). It only
+opens the matching System Settings pane, floats a small window over
+it, and waits. For Accessibility or Screen Recording, the window also
+offers a drag target: dragging Polarize's own icon into the System
+Settings list is an alternative to the list's own checkbox (PINV-59).
+Automation gets no drag, because its grant is per target app, not a
+list entry a bundle can be dropped into (PINV-60).
+
+The parent `polarize --request-permissions` process, never the helper,
+decides when the command finishes. It polls the same non-prompting
+checks described above on its own schedule. It owns the helper's
+lifecycle end to end: closing the helper window early does not block
+the command from finishing, and the command always terminates the
+helper before it exits, including after a 300-second deadline (PINV-
+61, PINV-64). The terminal's final report and whatever the helper last
+displayed always come from that same single read (PINV-65).
+
+If a System Settings pane anchor does not resolve — for example, on a
+future macOS version — the helper falls back to the top-level Privacy
+& Security pane plus plain-text instructions, instead of hanging or
+crashing (PINV-63).
+
+The helper is only reachable from a bundled run. `locate_helper`
+resolves it relative to `Polarize.app/Contents/Resources/`, or from
+the `POLARIZE_SETUP_HELPER` environment variable. A bare binary — the
+shape every npm and shell-installer path installs today — has neither,
+so the command prints that it could not locate the helper and falls
+straight through to the same final report, with no window to open.
+This is a graceful fallback, not an error: the command still finishes
+and reports what remains missing.
+
+These behaviors are designed to this contract; they still need
+confirming on a real macOS session — see PINV-56 through PINV-65 in
+[`INVARIANTS.md`](INVARIANTS.md) for exactly what each one has, and
+has not, had verified live.
+
 ## Why a permission grant can disappear after an upgrade
 
 macOS ties an Accessibility or Screen Recording grant to a binary's
