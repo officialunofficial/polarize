@@ -14,7 +14,17 @@
 // `NSWorkspace.shared.open` on a settings URL is not a TCC API either:
 // it opens an app, it does not request a grant. See PINV-58 in
 // `docs/INVARIANTS.md` for the rule this file must keep holding.
+//
+// PLZ-9 adds one more reaction, and it is not a permission read either:
+// a `SIGUSR1` from the parent process means "my own read says every
+// requested permission is now granted," and the helper swaps in a
+// success view, then quits — see `SuccessPlan` in `SetupHelperCore` for
+// the pure text/timing and `polarize_core::bootstrap::wait_for_grants_or_close`
+// for the parent side that sends the signal and still `SIGKILL`s the
+// helper afterward regardless (PINV-64 stays exactly as strict as it
+// was).
 import AppKit
+import Dispatch
 import SetupHelperCore
 
 /// A borderless, non-activating panel that floats over System
@@ -25,9 +35,11 @@ final class FloatingHelperPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: FloatingHelperPanel?
     private var tracker: WindowTracker?
+    private var successSignalSource: DispatchSourceSignal?
 
     /// Taller than PLZ-7's plain-text 200pt to fit the drag row
     /// (PLZ-8) beneath the instruction text, when one shows.
@@ -56,10 +68,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let tracker = WindowTracker(panel: panel, panelSize: Self.panelSize)
         tracker.start()
         self.tracker = tracker
+
+        installSuccessSignalHandler()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    /// Reacts to the parent's `SIGUSR1` (PLZ-9): swaps in the success
+    /// view, then quits after `SuccessPlan.quitDelaySeconds`. Calls no
+    /// permission API — it only reacts to a signal the parent process
+    /// sent, after the parent's own non-prompting re-read already
+    /// decided every requested permission is granted (PINV-56, PINV-58).
+    ///
+    /// `signal(SIGUSR1, SIG_IGN)` first, so the raw POSIX signal never
+    /// terminates the process before `DispatchSource` gets a chance to
+    /// dispatch its handler onto the main queue — this is
+    /// `DispatchSource.makeSignalSource`'s own documented setup
+    /// requirement. The dispatch source itself is retained on `self`;
+    /// an unretained source would be deallocated (and cancelled)
+    /// immediately after this method returns.
+    private func installSuccessSignalHandler() {
+        signal(SIGUSR1, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        source.setEventHandler { [weak self] in
+            // Safe: `.main` queue dispatches serially on the main
+            // thread, exactly like `WindowTracker.swift`'s own
+            // `Timer` callback above it in this same codebase.
+            MainActor.assumeIsolated {
+                self?.handleAllGrantedSignal()
+            }
+        }
+        source.resume()
+        successSignalSource = source
+    }
+
+    @MainActor
+    private func handleAllGrantedSignal() {
+        tracker?.stop()
+        panel?.contentView = Self.makeSuccessView()
+        DispatchQueue.main.asyncAfter(deadline: .now() + SuccessPlan.quitDelaySeconds) {
+            exit(0)
+        }
+    }
+
+    /// Builds the success view: the same translucent rounded card the
+    /// instruction view uses, holding only `SuccessPlan.message` — a
+    /// fact the parent process reported, never anything the helper
+    /// checked for itself.
+    @MainActor
+    private static func makeSuccessView() -> NSView {
+        let backing = NSVisualEffectView()
+        backing.translatesAutoresizingMaskIntoConstraints = false
+        backing.material = .hudWindow
+        backing.state = .active
+        backing.wantsLayer = true
+        backing.layer?.cornerRadius = 14
+        backing.layer?.masksToBounds = true
+
+        let text = NSTextField(wrappingLabelWithString: SuccessPlan.message)
+        text.translatesAutoresizingMaskIntoConstraints = false
+        text.font = .systemFont(ofSize: 13)
+
+        let container = NSView()
+        container.addSubview(backing)
+        container.addSubview(text)
+        NSLayoutConstraint.activate([
+            backing.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            backing.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            backing.topAnchor.constraint(equalTo: container.topAnchor),
+            backing.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            text.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            text.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
+            text.topAnchor.constraint(equalTo: container.topAnchor, constant: 20),
+        ])
+        return container
     }
 
     /// Builds the floating panel itself: borderless, never key/main,

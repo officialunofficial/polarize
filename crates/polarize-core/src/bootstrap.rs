@@ -125,6 +125,19 @@ pub const DEFAULT_WAIT_DEADLINE_MS: u64 = 300_000;
 /// checks whether the helper is still open.
 pub const DEFAULT_WAIT_POLL_INTERVAL_MS: u64 = 1_000;
 
+/// How long `wait_for_grants_or_close` waits, after telling the helper
+/// every permission is granted, before it kills the helper (PLZ-9).
+/// Gives the helper time to swap in and paint its success frame before
+/// the window vanishes.
+///
+/// Cross-language coupling: `SetupHelperCore`'s own quit delay
+/// (`SuccessPlan.quitDelaySeconds` in
+/// `apps/setup-helper/Sources/SetupHelperCore/SuccessPlan.swift`) must
+/// stay well under this value, or the helper's `SIGKILL` could land
+/// before it finishes rendering the success frame. No shared constant
+/// enforces this — only the comment on each side.
+pub const GRANT_SUCCESS_GRACE_MS: u64 = 1_500;
+
 /// A running helper child process, from the wait loop's point of view.
 ///
 /// [`polarize_macos`](../../polarize_macos/index.html)'s real
@@ -134,6 +147,13 @@ pub trait HelperChild {
     /// Whether the child is still running. `false` once it has exited,
     /// on its own or otherwise.
     fn still_running(&mut self) -> bool;
+    /// Tells the child the parent's own read says every requested
+    /// permission is now granted, so it can show a success frame before
+    /// it closes (PLZ-9). A courtesy notification only — the child is
+    /// still forcibly ended by a following [`Self::terminate`] call, so
+    /// a child that never reacts, or a stale binary with no handler for
+    /// it, still gets closed.
+    fn notify_all_granted(&mut self);
     /// Ends the child, and waits for it to actually exit. Safe to call
     /// on a child that has already exited.
     fn terminate(&mut self);
@@ -194,9 +214,18 @@ pub struct WaitResult {
 /// still reports "all granted," not "helper exited" — the permission
 /// read, not the window's own lifecycle, is authoritative.
 ///
-/// - Always: returns within `deadline_ms` of when it was called (plus at
-///   most one `poll`/`still_running` call's own real cost), and always
-///   calls `child.terminate()` exactly once before returning.
+/// On the grant path only (PLZ-9), this calls `child.notify_all_granted()`
+/// before `child.terminate()`, then sleeps `grace_ms` between the two —
+/// giving the helper time to show a success frame instead of vanishing
+/// mid-sentence. `notify_all_granted` is never called on the
+/// `HelperExited` or `TimedOut` paths: sending it there would risk a
+/// false "Granted!" flash on a window that never actually saw every
+/// permission land.
+///
+/// - Always: returns within `deadline_ms` of when it was called, plus
+///   `grace_ms` on the grant path only (plus at most one
+///   `poll`/`still_running` call's own real cost), and always calls
+///   `child.terminate()` exactly once before returning.
 /// - Because: the helper is a launched child UI a user is free to close,
 ///   ignore, or never see finish — `--request-permissions` must still
 ///   finish and print a real report from the terminal alone (PINV-61),
@@ -211,6 +240,7 @@ pub fn wait_for_grants_or_close<C, S, H, F>(
     sleeper: &S,
     deadline_ms: u64,
     poll_interval_ms: u64,
+    grace_ms: u64,
     mut poll: F,
 ) -> WaitResult
 where
@@ -225,6 +255,8 @@ where
     loop {
         let still_needed = poll();
         if still_needed.is_empty() {
+            child.notify_all_granted();
+            sleeper.sleep_ms(grace_ms);
             child.terminate();
             return WaitResult {
                 outcome: WaitOutcome::AllGranted,
@@ -452,11 +484,15 @@ mod tests {
     }
 
     /// A helper child a test drives by hand: `still_running` reports
-    /// whatever `running` currently holds, and `terminate` is counted so
-    /// a test can assert it always runs.
+    /// whatever `running` currently holds, `terminate` and
+    /// `notify_all_granted` are each counted so a test can assert how
+    /// often they ran, and `call_log` records the order the two were
+    /// called in.
     struct FakeChild {
         running: bool,
         terminate_calls: RefCell<u32>,
+        notify_calls: RefCell<u32>,
+        call_log: RefCell<Vec<&'static str>>,
     }
 
     impl FakeChild {
@@ -464,6 +500,8 @@ mod tests {
             Self {
                 running: true,
                 terminate_calls: RefCell::new(0),
+                notify_calls: RefCell::new(0),
+                call_log: RefCell::new(Vec::new()),
             }
         }
 
@@ -471,6 +509,8 @@ mod tests {
             Self {
                 running: false,
                 terminate_calls: RefCell::new(0),
+                notify_calls: RefCell::new(0),
+                call_log: RefCell::new(Vec::new()),
             }
         }
     }
@@ -480,8 +520,14 @@ mod tests {
             self.running
         }
 
+        fn notify_all_granted(&mut self) {
+            *self.notify_calls.borrow_mut() += 1;
+            self.call_log.borrow_mut().push("notify");
+        }
+
         fn terminate(&mut self) {
             *self.terminate_calls.borrow_mut() += 1;
+            self.call_log.borrow_mut().push("terminate");
             self.running = false;
         }
     }
@@ -502,6 +548,7 @@ mod tests {
             &sleeper,
             DEFAULT_WAIT_DEADLINE_MS,
             DEFAULT_WAIT_POLL_INTERVAL_MS,
+            0,
             Vec::new,
         );
 
@@ -510,8 +557,13 @@ mod tests {
         assert_eq!(*child.terminate_calls.borrow(), 1);
         assert_eq!(
             sleeper.calls.get(),
+            1,
+            "a grant on the first poll must not wait between polls, only the one grace sleep (0ms here) runs"
+        );
+        assert_eq!(
+            clock.now_ms(),
             0,
-            "a grant on the first poll must not wait"
+            "grace_ms is 0, so the grace sleep advances nothing"
         );
     }
 
@@ -527,12 +579,18 @@ mod tests {
             &sleeper,
             2_000,
             500,
+            0,
             accessibility_still_needed,
         );
 
         assert_eq!(result.outcome, WaitOutcome::TimedOut);
         assert_eq!(result.still_needed, accessibility_still_needed());
         assert_eq!(*child.terminate_calls.borrow(), 1);
+        assert_eq!(
+            *child.notify_calls.borrow(),
+            0,
+            "a timeout must never notify"
+        );
         assert_eq!(clock.now_ms(), 2_000, "must not overshoot the deadline");
     }
 
@@ -548,6 +606,7 @@ mod tests {
             &sleeper,
             DEFAULT_WAIT_DEADLINE_MS,
             DEFAULT_WAIT_POLL_INTERVAL_MS,
+            0,
             accessibility_still_needed,
         );
 
@@ -556,6 +615,11 @@ mod tests {
         // the child process itself carried — PINV-65.
         assert_eq!(result.still_needed, accessibility_still_needed());
         assert_eq!(*child.terminate_calls.borrow(), 1);
+        assert_eq!(
+            *child.notify_calls.borrow(),
+            0,
+            "a helper that exited on its own must never be told it succeeded"
+        );
     }
 
     #[test]
@@ -573,6 +637,7 @@ mod tests {
             &sleeper,
             DEFAULT_WAIT_DEADLINE_MS,
             DEFAULT_WAIT_POLL_INTERVAL_MS,
+            0,
             Vec::new,
         );
 
@@ -592,6 +657,7 @@ mod tests {
             &sleeper,
             DEFAULT_WAIT_DEADLINE_MS,
             1_000,
+            0,
             || {
                 let n = poll_calls.get();
                 poll_calls.set(n + 1);
@@ -605,8 +671,16 @@ mod tests {
 
         assert_eq!(result.outcome, WaitOutcome::AllGranted);
         assert_eq!(poll_calls.get(), 3);
-        assert_eq!(sleeper.calls.get(), 2);
-        assert_eq!(clock.now_ms(), 2_000);
+        assert_eq!(
+            sleeper.calls.get(),
+            3,
+            "two polling sleeps plus the final (0ms) grace sleep on the grant"
+        );
+        assert_eq!(
+            clock.now_ms(),
+            2_000,
+            "grace_ms is 0, so the grace sleep adds no time"
+        );
     }
 
     #[test]
@@ -623,11 +697,82 @@ mod tests {
             &sleeper,
             2_500,
             1_000,
+            0,
             accessibility_still_needed,
         );
 
         assert_eq!(sleeper.calls.get(), 3);
         assert_eq!(clock.now_ms(), 2_500);
+    }
+
+    #[test]
+    fn all_granted_notifies_before_terminating_and_sleeps_for_exactly_one_grace_period() {
+        let clock = FakeClock::default();
+        let sleeper = FakeSleeper::new(&clock);
+        let mut child = FakeChild::running();
+
+        let result = wait_for_grants_or_close(
+            &mut child,
+            &clock,
+            &sleeper,
+            DEFAULT_WAIT_DEADLINE_MS,
+            DEFAULT_WAIT_POLL_INTERVAL_MS,
+            GRANT_SUCCESS_GRACE_MS,
+            Vec::new,
+        );
+
+        assert_eq!(result.outcome, WaitOutcome::AllGranted);
+        assert_eq!(*child.notify_calls.borrow(), 1);
+        assert_eq!(*child.terminate_calls.borrow(), 1);
+        assert_eq!(
+            *child.call_log.borrow(),
+            vec!["notify", "terminate"],
+            "notify_all_granted must run before terminate"
+        );
+        assert_eq!(
+            sleeper.calls.get(),
+            1,
+            "exactly one grace sleep, no polling sleep on an immediate grant"
+        );
+        assert_eq!(clock.now_ms(), GRANT_SUCCESS_GRACE_MS);
+    }
+
+    #[test]
+    fn helper_exited_never_calls_notify_all_granted() {
+        let clock = FakeClock::default();
+        let sleeper = FakeSleeper::new(&clock);
+        let mut child = FakeChild::already_exited();
+
+        let _ = wait_for_grants_or_close(
+            &mut child,
+            &clock,
+            &sleeper,
+            DEFAULT_WAIT_DEADLINE_MS,
+            DEFAULT_WAIT_POLL_INTERVAL_MS,
+            GRANT_SUCCESS_GRACE_MS,
+            accessibility_still_needed,
+        );
+
+        assert_eq!(*child.notify_calls.borrow(), 0);
+    }
+
+    #[test]
+    fn timed_out_never_calls_notify_all_granted() {
+        let clock = FakeClock::default();
+        let sleeper = FakeSleeper::new(&clock);
+        let mut child = FakeChild::running();
+
+        let _ = wait_for_grants_or_close(
+            &mut child,
+            &clock,
+            &sleeper,
+            2_000,
+            500,
+            GRANT_SUCCESS_GRACE_MS,
+            accessibility_still_needed,
+        );
+
+        assert_eq!(*child.notify_calls.borrow(), 0);
     }
 
     #[test]

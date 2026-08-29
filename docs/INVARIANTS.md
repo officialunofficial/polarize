@@ -2077,9 +2077,20 @@ drag view only for an Accessibility or Screen Recording launch that
 actually opened a pane. `PolarizeSetupHelper`'s
 `DragSourceView.swift` wires that pure payload to a real
 `NSDraggingSource`/`NSPasteboardWriting` drag session, showing
-Polarize's own icon beneath the instruction text. See the enforcement
-checklist entries below for exactly what each invariant has and has
-not yet had verified.
+Polarize's own icon beneath the instruction text. PLZ-9 closed the one
+remaining gap in PINV-65's literal reading: on the grant path, the
+helper's last visible frame used to still say "still needs" right up
+until `wait_for_grants_or_close` `SIGKILL`ed it, even though the
+terminal went on to report success. Now the parent sends `SIGUSR1`
+first — a courtesy notification, never a substitute for the following
+`SIGKILL` — and `wait_for_grants_or_close` sleeps for
+`GRANT_SUCCESS_GRACE_MS` before terminating, so the helper has time to
+swap in a success view (`SetupHelperCore`'s `SuccessPlan.swift`, wired
+to the real `DispatchSource`/`exit` calls in `main.swift`) before the
+window closes. The helper still reads no permission API anywhere in
+this path; it only reacts to a signal the parent's own read decided to
+send. See the enforcement checklist entries below for exactly what each
+invariant has and has not yet had verified.
 
 ### PINV-56: the helper never answers for Polarize's own permission grant
 
@@ -2197,10 +2208,15 @@ not yet had verified.
 - Always: the helper is always a child process of the `polarize
   --request-permissions` invocation, and that invocation always
   terminates its helper child before the command itself exits —
-  success, timeout, or user-cancel alike.
+  success, timeout, or user-cancel alike. On the grant path (PLZ-9),
+  the parent may first send `SIGUSR1` as a courtesy notification and
+  sleep for a bounded grace period, but the following `SIGKILL` still
+  always runs, unconditionally, on every path.
 - Because: an orphaned helper would keep floating a window over System
   Settings, or keep holding a drag target open, after the command that
-  explains its purpose has already ended.
+  explains its purpose has already ended. A courtesy notification that
+  could ever substitute for the kill would reopen exactly that risk for
+  a helper binary that never reacts to it.
 - If violated: a stray helper process or window survives after
   `--request-permissions` exits, confusing a later, unrelated System
   Settings session.
@@ -2210,14 +2226,23 @@ not yet had verified.
 - Always: exactly one permission-state read — the one `apps/polarize`'s
   own process performs — backs both the terminal's final report and the
   moment the helper closes. The helper never performs an independent
-  status read that could disagree with it.
+  status read that could disagree with it. On the grant path (PLZ-9),
+  the helper's own success frame is driven by that same read too: the
+  parent only ever sends `SIGUSR1` from inside the `AllGranted` branch,
+  after the same poll that already decided the terminal's own "All
+  requested permissions are now granted" report — never from a second,
+  independent check.
 - Because: PINV-56 already establishes the helper cannot correctly read
   Polarize's own grant state on its own. A second, independent read
   anywhere in this flow reintroduces the same disagreement risk
   PINV-56 rules out for the helper specifically.
 - If violated: a user sees the helper close on "Granted", then reads a
   "still not determined" result in the terminal from the same run, or
-  the reverse.
+  the reverse. Before PLZ-9, a narrower version of this also held: the
+  helper's last visible frame still said "still needs" right up to the
+  moment it was killed, even on a run whose terminal went on to report
+  success — a mismatch between the last frame shown and the report
+  printed, from the very same read.
 
 ### PINV-66: `PolarizeSetupHelper.app` signs inside-out, one arch at a time, before the outer bundle seals
 
@@ -3326,7 +3351,13 @@ in `SetupHelperCore`; PLZ-7 built the helper's window tracking —
 non-activating floating `NSPanel` in `main.swift`; PLZ-8 built the
 helper's drag gesture — `SetupHelperCore`'s `DragPayload.swift` (pure)
 and `PolarizeSetupHelper`'s `DragSourceView.swift` (the real
-`NSDraggingSource`/`NSPasteboardWriting` wiring). PINV-56, 57, 61, and
+`NSDraggingSource`/`NSPasteboardWriting` wiring); PLZ-9 built the
+grant-path success state — `polarize_core::bootstrap`'s
+`notify_all_granted`/`GRANT_SUCCESS_GRACE_MS` (pure, the `AllGranted`
+branch only), `polarize_macos::setup_helper::HelperProcess`'s real
+`SIGUSR1` send (the `HelperChild` implementation), and
+`SetupHelperCore`'s `SuccessPlan.swift` (pure) wired to a real
+`DispatchSource`/`exit` pair in `main.swift`. PINV-56, 57, 61, and
 64 are enforced below by real `cargo test` runs today; 65 follows from
 56 and 61 by construction. PINV-63 is now enforced at the logic level by
 `SetupHelperCoreTests`, run in CI's `swift test` step; whether each
@@ -3375,7 +3406,15 @@ own entries below).
   permission API at all. PLZ-8's `DragSourceView.swift`
   (`apps/setup-helper/Sources/PolarizeSetupHelper/DragSourceView.swift`)
   adds `NSPasteboard` writing and `NSWorkspace.shared.icon(forFile:)` —
-  neither is TCC-adjacent, so PINV-58 stays satisfied there too. A
+  neither is TCC-adjacent, so PINV-58 stays satisfied there too.
+  Re-inspected again for PLZ-9: `main.swift`'s new
+  `installSuccessSignalHandler` calls `signal(SIGUSR1, SIG_IGN)` and
+  `DispatchSource.makeSignalSource(signal:queue:)` — a POSIX signal
+  registration and a GCD dispatch source, neither one a permission API
+  of any kind — and its handler calls only `NSPanel.contentView`,
+  `DispatchQueue.main.asyncAfter`, and `exit(0)`. `SetupHelperCore`'s
+  `SuccessPlan.swift` stays a plain `Foundation`-only module with two
+  constants and no API call at all. PINV-58 stays satisfied. A
   link-time/XCTest check that the helper binary calls no *prompting*
   permission API, and a live-session confirmation that no consent
   dialog appears for its own bundle identity, remain open.
@@ -3459,22 +3498,44 @@ own entries below).
   spawns the helper directly with `std::process::Command`, never
   through `open`/`NSWorkspace`, specifically so it stays this
   process's real child (see `setup_helper.rs`'s module doc comment).
-  `Child::kill` is `SIGKILL` with no SIGTERM-then-SIGKILL ladder — fine
-  for today's plain-window skeleton, a residual gap for a later helper
-  with real UI state to save on exit. A real AppKit helper actually
-  tearing down, and the Ctrl-C/user-cancel path (a directly spawned
-  child shares the parent's foreground process group, so `SIGINT`
-  reaches it too, but this is unverified against a real terminal
-  session), still need a live macOS session.
+  `Child::kill` is still `SIGKILL`, unconditionally, on every path.
+  PLZ-9 replaces the old bare-SIGKILL teardown (previously this entry's
+  own noted "residual gap for a later helper with real UI") with a
+  grace-bounded `SIGUSR1`-then-`SIGKILL` reality on the grant path
+  only: `all_granted_notifies_before_terminating_and_sleeps_for_exactly_one_grace_period`
+  and `notify_all_granted_signals_a_real_child_that_has_no_handler_installed`
+  (`crates/polarize-macos/src/setup_helper.rs`) confirm `SIGUSR1`'s
+  default disposition terminates a real child with no handler
+  installed — so a stale helper binary still dies — and that
+  `terminate`'s `SIGKILL` still runs, unconditionally, right after. A
+  real AppKit helper actually tearing down on `SIGUSR1` (as opposed to
+  a bare `/bin/sleep` stand-in with no handler), and the Ctrl-C/
+  user-cancel path (a directly spawned child shares the parent's
+  foreground process group, so `SIGINT` reaches it too, but this is
+  unverified against a real terminal session), still need a live macOS
+  session.
 - **PINV-65** — holds by construction, now that both 56 and 61 are
   enforced: `wait_for_grants_or_close`'s own `WaitResult` is built from
   the same `poll` call that decided the loop's outcome (checked before
   `still_running` on every iteration — see
   `a_grant_observed_after_the_helper_already_exited_still_reports_all_granted`),
   and `apps/polarize/src/main.rs` prints its final report straight from
-  that `WaitResult`, never from a second read. No independent test is
-  needed beyond PINV-56's and PINV-61's own
-  coverage.
+  that `WaitResult`, never from a second read. PLZ-9 additionally
+  enforces the grant-path frame the helper shows before it closes:
+  `all_granted_notifies_before_terminating_and_sleeps_for_exactly_one_grace_period`
+  confirms `notify_all_granted` runs only from inside the `AllGranted`
+  branch, ordered strictly before `terminate`, from that exact same
+  `poll` read; `helper_exited_never_calls_notify_all_granted` and
+  `timed_out_never_calls_notify_all_granted` confirm the other two
+  outcomes never send it, so a helper that never actually saw every
+  permission land can never flash a false success frame
+  (`crates/polarize-core/src/bootstrap.rs`). No independent test is
+  needed beyond PINV-56's and PINV-61's own coverage. Outstanding for a
+  live macOS session (AC 4 in the PLZ-9 plan): confirming, on a real
+  run, that toggling Accessibility and Screen Recording by hand in
+  System Settings actually drives the helper's window through this
+  exact success frame before it closes, and does not, for example,
+  leave the panel blank or frozen for the grace window.
 - **PINV-66** — the inside-out signing order and per-arch build are
   verified locally: `just verify-bundle` runs `codesign --verify
   --strict --deep` against the assembled `Polarize.app` and confirms

@@ -290,6 +290,7 @@ fn launch_helper_and_wait(
         &sleeper,
         polarize_core::bootstrap::DEFAULT_WAIT_DEADLINE_MS,
         polarize_core::bootstrap::DEFAULT_WAIT_POLL_INTERVAL_MS,
+        polarize_core::bootstrap::GRANT_SUCCESS_GRACE_MS,
         || poll_needed_permissions(&target),
     );
 

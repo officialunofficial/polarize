@@ -15,6 +15,27 @@ use std::process::{Child, Command, Stdio};
 
 use polarize_core::bootstrap::HelperChild;
 
+/// `SIGUSR1`'s numeric value on Darwin (`<sys/signal.h>`). Sent by
+/// [`HelperProcess::notify_all_granted`] as a courtesy "the parent's
+/// read says you're done" signal (PLZ-9) — never a substitute for
+/// [`HelperProcess::terminate`]'s `SIGKILL`, which still runs
+/// unconditionally after the grace sleep in
+/// `polarize_core::bootstrap::wait_for_grants_or_close`. `SIGUSR1`'s
+/// default disposition is also "terminate the process," so a stale
+/// helper binary with no handler installed for it still dies rather
+/// than hanging around.
+const SIGUSR1: i32 = 30;
+
+// No `libc` dependency exists in this crate (`self_responsibility.rs`'s
+// own module doc comment explains why every module that needs a raw
+// libSystem call declares it locally rather than sharing one). `kill`
+// is a plain, zero-cost link against libSystem, exactly like that
+// module's own `kill` declaration — this is a separate declaration in
+// a separate module, not a duplicate symbol.
+unsafe extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
 /// Overrides where [`locate_helper`] looks, bypassing the bundle-relative
 /// resolution entirely. Set this for a dev build (`target/debug/polarize`
 /// has no `Contents/Resources/…` sibling to find) or for a test that
@@ -167,14 +188,37 @@ pub fn spawn_helper(helper_exe: &Path, args: &[String]) -> std::io::Result<Helpe
 #[derive(Debug)]
 pub struct HelperProcess(pub Child);
 
-/// `terminate` sends `SIGKILL` (via [`Child::kill`]) and reaps the
-/// process with [`Child::wait`]. A plain-window skeleton has no
-/// in-progress state a forceful kill could corrupt, so there is no
-/// SIGTERM-then-SIGKILL ladder here; a future helper with real UI state
-/// to save on exit would need one.
+/// The SIGUSR1-then-SIGKILL ladder PLZ-9 adds: `notify_all_granted`
+/// sends `SIGUSR1`, a courtesy notification the helper can use to show
+/// a success frame; `terminate` still sends `SIGKILL` (via
+/// [`Child::kill`]) and reaps the process with [`Child::wait`]
+/// unconditionally, after `polarize_core::bootstrap`'s grace sleep. A
+/// plain-window skeleton has no in-progress state a forceful kill could
+/// corrupt, and now that a real UI has a way to react first, there is
+/// still no true SIGTERM-then-SIGKILL ladder here — `SIGUSR1` only ever
+/// buys the helper a bounded head start, never a veto, over the
+/// `SIGKILL` that always follows.
 impl HelperChild for HelperProcess {
     fn still_running(&mut self) -> bool {
         matches!(self.0.try_wait(), Ok(None))
+    }
+
+    fn notify_all_granted(&mut self) {
+        // Guarded by `still_running`: `try_wait` only reaps on an
+        // actual exit, so an unreaped child's pid cannot have been
+        // recycled by the OS for an unrelated process yet. A child
+        // that already exited on its own gets no signal — there is
+        // nothing left to notify.
+        if self.still_running() {
+            // SAFETY: `kill` is `<signal.h>`'s well-known libSystem
+            // function; `self.0.id()` is a real pid this process just
+            // spawned and confirmed (via `still_running`, above) is
+            // still live. A signal send to a live pid this process
+            // owns has no further precondition.
+            unsafe {
+                kill(self.0.id() as i32, SIGUSR1);
+            }
+        }
     }
 
     fn terminate(&mut self) {
@@ -312,6 +356,67 @@ mod tests {
             !child.still_running(),
             "terminate must leave the child not running"
         );
+    }
+
+    /// PLZ-9's own testable seam: `notify_all_granted` sends `SIGUSR1`,
+    /// whose default disposition is "terminate the process" — so a
+    /// real child with no handler installed for it (exactly what a
+    /// stale helper binary, or a plain `/bin/sleep` stand-in, looks
+    /// like) exits from the signal alone. `terminate` afterward is then
+    /// a no-op, same as it is for any already-exited child.
+    #[test]
+    fn notify_all_granted_signals_a_real_child_that_has_no_handler_installed() {
+        let mut child = HelperProcess(
+            Command::new("/bin/sleep")
+                .arg("1000")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn /bin/sleep"),
+        );
+
+        assert!(
+            child.still_running(),
+            "a freshly spawned long sleep must still be running"
+        );
+
+        child.notify_all_granted();
+
+        // Give the signal a moment to actually land before checking —
+        // `still_running` calls `try_wait`, which does not block.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while child.still_running() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        assert!(
+            !child.still_running(),
+            "SIGUSR1's default disposition must have terminated the child"
+        );
+
+        // `terminate` on an already-exited child is a documented no-op.
+        child.terminate();
+        assert!(!child.still_running());
+    }
+
+    #[test]
+    fn notify_all_granted_is_a_no_op_on_a_child_that_already_exited() {
+        let mut child = HelperProcess(
+            Command::new("/usr/bin/true")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn /usr/bin/true"),
+        );
+        let _ = child.0.wait();
+
+        // Must not panic or attempt to signal a pid that may have been
+        // recycled by the OS for an unrelated process.
+        child.notify_all_granted();
+
+        assert!(!child.still_running());
     }
 
     #[test]
