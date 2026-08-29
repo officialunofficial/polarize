@@ -29,17 +29,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: FloatingHelperPanel?
     private var tracker: WindowTracker?
 
-    private static let panelSize = NSSize(width: 420, height: 200)
+    /// Taller than PLZ-7's plain-text 200pt to fit the drag row
+    /// (PLZ-8) beneath the instruction text, when one shows.
+    private static let panelSize = NSSize(width: 420, height: 280)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let needed = ArgvParser.parse(Array(CommandLine.arguments.dropFirst()))
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        let needed = ArgvParser.parse(arguments)
+        let bundlePath = ArgvParser.bundlePath(arguments)
         let outcome = LaunchPlanner.run(needed: needed) { urlString in
             guard let url = URL(string: urlString) else { return false }
             return NSWorkspace.shared.open(url)
         }
+        let dragPayload = DragSourcePlanner.payload(outcome: outcome, bundlePath: bundlePath)
 
         let panel = Self.makePanel()
-        panel.contentView = Self.makeMessageView(needed: needed, outcome: outcome)
+        panel.contentView = Self.makeMessageView(
+            needed: needed,
+            outcome: outcome,
+            dragPayload: dragPayload,
+            bundlePath: bundlePath
+        )
         panel.orderFront(nil)
         self.panel = panel
 
@@ -76,9 +86,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Builds the panel's text on a translucent rounded backing, so it
     /// is never blank (PINV-63) and stays readable on a fully
-    /// transparent window, even on the fallback path.
+    /// transparent window, even on the fallback path. Adds the drag
+    /// row (PLZ-8) beneath the text only when `dragPayload` is
+    /// non-nil — `DragSourcePlanner` already restricts that to an
+    /// Accessibility or Screen Recording launch with a known bundle
+    /// path (PINV-59, PINV-60).
     @MainActor
-    private static func makeMessageView(needed: [NeededPermission], outcome: LaunchOutcome) -> NSView {
+    private static func makeMessageView(
+        needed: [NeededPermission],
+        outcome: LaunchOutcome,
+        dragPayload: DragPayload?,
+        bundlePath: String?
+    ) -> NSView {
         let backing = NSVisualEffectView()
         backing.translatesAutoresizingMaskIntoConstraints = false
         backing.material = .hudWindow
@@ -87,7 +106,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         backing.layer?.cornerRadius = 14
         backing.layer?.masksToBounds = true
 
-        let text = NSTextField(wrappingLabelWithString: message(for: needed, outcome: outcome))
+        let text = NSTextField(
+            wrappingLabelWithString: message(for: needed, outcome: outcome, hasDragPayload: dragPayload != nil)
+        )
         text.translatesAutoresizingMaskIntoConstraints = false
         text.font = .systemFont(ofSize: 13)
 
@@ -103,20 +124,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             text.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
             text.topAnchor.constraint(equalTo: container.topAnchor, constant: 20),
         ])
+
+        if let dragPayload, let bundlePath {
+            let dragView = AppIconDragView(payload: dragPayload, bundlePath: bundlePath)
+            dragView.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(dragView)
+            NSLayoutConstraint.activate([
+                dragView.topAnchor.constraint(equalTo: text.bottomAnchor, constant: 16),
+                dragView.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+                dragView.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -20),
+            ])
+        }
         return container
     }
 
-    private static func message(for needed: [NeededPermission], outcome: LaunchOutcome) -> String {
+    private static func message(
+        for needed: [NeededPermission],
+        outcome: LaunchOutcome,
+        hasDragPayload: Bool
+    ) -> String {
         let names = needed.map(name(for:)).joined(separator: ", ")
         let needLine = names.isEmpty ? "Polarize needs no further permission." : "Polarize still needs: \(names)."
+        let dragHint = hasDragPayload ? " Or drag this icon into the list." : ""
 
         switch outcome {
         case .openedPane:
-            return "\(needLine)\nOpen System Settings > Privacy & Security and enable Polarize."
+            return "\(needLine)\nOpen System Settings > Privacy & Security and enable Polarize.\(dragHint)"
         case .fellBackToInstructions:
             return
                 "\(needLine)\nSystem Settings could not open the exact pane. "
                 + "Open System Settings > Privacy & Security, find the matching entry, and enable Polarize."
+                + dragHint
         case .nothingToOpen:
             return "\(needLine)\nGrant Automation access to Polarize when macOS prompts for it."
         }

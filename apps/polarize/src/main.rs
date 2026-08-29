@@ -256,7 +256,9 @@ fn launch_helper_and_wait(
         }
     };
 
-    let args = polarize_core::bootstrap::helper_args(&needed);
+    let own_bundle = polarize_macos::setup_helper::own_bundle_path();
+    let own_bundle_arg = own_bundle.as_deref().and_then(|path| path.to_str());
+    let args = polarize_core::bootstrap::helper_args(&needed, own_bundle_arg);
     let permission_names = needed
         .iter()
         .map(describe_needed_permission)

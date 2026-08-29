@@ -2062,10 +2062,24 @@ over System Settings and follows it, never taking key/main status or
 stealing focus. `SetupHelperCore` is a pure Swift module with no
 AppKit import. It parses the `--needs` argv. It maps Accessibility and
 Screen Recording to their System Settings anchors. It picks the
-fallback pane when the mapped anchor fails to open. See the
-enforcement checklist entries below for exactly what each invariant has
-and has not yet had verified. The helper's drag gesture is still
-unbuilt. PINV-59 and PINV-60 stay GAP until that lands.
+fallback pane when the mapped anchor fails to open. PLZ-8 built the
+helper's drag gesture: `polarize_macos::setup_helper::own_bundle_path`
+resolves Polarize's own running bundle path (never the helper's), and
+`polarize_core::bootstrap::helper_args` carries it to the helper as a
+trailing `--for-bundle <path>` flag. `SetupHelperCore`'s
+`DragPayload.swift` stays a pure module: `ArgvParser.bundlePath` reads
+that flag, `DragPayload.init?` builds the four Finder-drag pasteboard
+representations (`public.file-url`, `public.url`,
+`NSFilenamesPboardType`, `public.utf8-plain-text`) and structurally
+refuses to build a payload naming the helper's own
+`PolarizeSetupHelper.app` bundle, and `DragSourcePlanner` shows the
+drag view only for an Accessibility or Screen Recording launch that
+actually opened a pane. `PolarizeSetupHelper`'s
+`DragSourceView.swift` wires that pure payload to a real
+`NSDraggingSource`/`NSPasteboardWriting` drag session, showing
+Polarize's own icon beneath the instruction text. See the enforcement
+checklist entries below for exactly what each invariant has and has
+not yet had verified.
 
 ### PINV-56: the helper never answers for Polarize's own permission grant
 
@@ -3309,22 +3323,26 @@ in `SetupHelperCore`; PLZ-7 built the helper's window tracking —
 `SetupHelperCore`'s `WindowTracking.swift` (pure) and
 `PolarizeSetupHelper`'s `WindowTracker.swift` (the real
 `CGWindowListCopyWindowInfo`/`AXObserver` wiring) — plus the
-non-activating floating `NSPanel` in `main.swift`. PINV-56, 57, 61, and
+non-activating floating `NSPanel` in `main.swift`; PLZ-8 built the
+helper's drag gesture — `SetupHelperCore`'s `DragPayload.swift` (pure)
+and `PolarizeSetupHelper`'s `DragSourceView.swift` (the real
+`NSDraggingSource`/`NSPasteboardWriting` wiring). PINV-56, 57, 61, and
 64 are enforced below by real `cargo test` runs today; 65 follows from
 56 and 61 by construction. PINV-63 is now enforced at the logic level by
 `SetupHelperCoreTests`, run in CI's `swift test` step; whether each
 anchor and the fallback pane actually open the right pane on a real,
 current macOS version still needs a live session (see PINV-63's own
 entry below). PINV-62 is now enforced at the logic level too, by
-`WindowTrackingTests` (see its own entry below); PINV-59 and PINV-60
-describe the helper's still-unbuilt drag gesture, and stay design-time
-**GAP**s.
+`WindowTrackingTests` (see its own entry below); PINV-59 and PINV-60 are
+now enforced at the logic level too, by `DragPayloadTests` (see their
+own entries below).
 
 - **PINV-56** — enforced by
   `polarize_core::bootstrap::tests::helper_args_never_carries_a_status_or_result_field`
   (`crates/polarize-core/src/bootstrap.rs`): `NeededPermission` and
-  `helper_args` carry only permission names and an Automation target —
-  there is no field anywhere in the helper's launch argv for a
+  `helper_args` carry only permission names, an Automation target, and
+  (since PLZ-8) Polarize's own bundle path behind a `--for-bundle` flag
+  — there is no field anywhere in the helper's launch argv for a
   self-reported status to occupy. The underlying OS-documented claim
   that `AXIsProcessTrusted`/`CGPreflightScreenCaptureAccess` answer for
   the calling process alone is still not something this repo can
@@ -3354,19 +3372,41 @@ describe the helper's still-unbuilt drag gesture, and stay design-time
   used internally to choose a tracking mechanism, so it prompts nothing
   and requests nothing (PINV-58 itself stays satisfied). `SetupHelperCore`
   itself still imports only `Foundation`, not AppKit, and calls no
-  permission API at all. A link-time/XCTest check that the helper
-  binary calls no *prompting* permission API, and a live-session
-  confirmation that no consent dialog appears for its own bundle
-  identity, remain open.
-- **PINV-59** — GAP: not yet implemented. The pasteboard writer's data
-  mapping is a pure function once built — an XCTest can assert it
-  always resolves to the Polarize.app URL it was given, never the
-  helper's own bundle URL. Whether the drop actually lands correctly in
-  System Settings still needs a live session.
-- **PINV-60** — GAP: not yet implemented. Fully testable without a live
-  session, once built: a table-driven test asserting only Accessibility
-  and Screen Recording map to a drag-enabled pane, and Automation never
-  does.
+  permission API at all. PLZ-8's `DragSourceView.swift`
+  (`apps/setup-helper/Sources/PolarizeSetupHelper/DragSourceView.swift`)
+  adds `NSPasteboard` writing and `NSWorkspace.shared.icon(forFile:)` —
+  neither is TCC-adjacent, so PINV-58 stays satisfied there too. A
+  link-time/XCTest check that the helper binary calls no *prompting*
+  permission API, and a live-session confirmation that no consent
+  dialog appears for its own bundle identity, remain open.
+- **PINV-59** — enforced at the logic level by `DragPayloadTests`
+  (`apps/setup-helper/Tests/SetupHelperCoreTests/DragPayloadTests.swift`):
+  `DragPayload.init?(bundlePath:)` structurally rejects any path
+  naming, or nested inside, `PolarizeSetupHelper.app` — the one bundle
+  identity the drag must never carry — and every one of the four
+  pasteboard representations (`public.file-url`, `public.url`,
+  `NSFilenamesPboardType`, `public.utf8-plain-text`) is asserted to
+  resolve back to the exact bundle path the payload was built with.
+  `polarize_macos::setup_helper::own_bundle_from_exe_path` (Rust) is
+  covered by its own tests resolving `Polarize.app`'s path from the
+  running process, never the helper's. Two things still need a live
+  session: whether a real drag-and-drop actually lands in System
+  Settings' Accessibility/Screen Recording list, and whether the four
+  pasteboard types offered are the ones System Settings' drop target
+  actually accepts on the current macOS version — see the PLZ-8 plan's
+  risk note 2 on the legacy `NSFilenamesPboardType` shape.
+- **PINV-60** — enforced at the logic level by
+  `DragPayloadTests.testDragPayloadNonNilOnlyForAccessibilityOrScreenRecordingOutcomes`,
+  a table-driven test over every `NeededPermission` case
+  `LaunchPlanner` can be asked to route: a drag payload is non-nil only
+  when the launch actually opened (or fell back to) the Accessibility
+  or Screen Recording pane, and nil for an automation-only, empty, or
+  unknown-only launch. `DragSourcePlanner` adds no Automation-specific
+  branch of its own — the restriction holds by composition with
+  `SettingsPane.urlString`, which already returns `nil` for Automation.
+  Whether the real TCC grant actually flips after a live drop —
+  confirmed with `AXIsProcessTrusted`/`CGPreflightScreenCaptureAccess`
+  read from Polarize's own process — needs a live session.
 - **PINV-61** — enforced by
   `polarize_core::bootstrap::tests::a_helper_that_never_exits_still_returns_bounded_by_the_deadline_and_is_terminated`
   and the other `wait_for_grants_or_close` tests

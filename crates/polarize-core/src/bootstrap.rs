@@ -7,9 +7,10 @@
 //! 1. [`needed_permissions`] — decides which permissions still need the
 //!    guided helper, after the real system prompts already ran.
 //! 2. [`helper_args`] — builds the helper's argv from that decision. The
-//!    argv carries only permission names, never a status field — see
-//!    PINV-56's note that the helper cannot correctly read Polarize's
-//!    own grant state and so must never be asked to report one.
+//!    argv carries only permission names and, when known, Polarize's own
+//!    bundle path (PINV-59) — never a status field. See PINV-56's note
+//!    that the helper cannot correctly read Polarize's own grant state
+//!    and so must never be asked to report one.
 //! 3. [`wait_for_grants_or_close`] — the poll-and-terminate loop that
 //!    decides when `--request-permissions` may stop waiting on the
 //!    helper window. See PINV-61, PINV-64, and PINV-65.
@@ -82,15 +83,21 @@ pub fn needed_permissions(
 
 /// Builds the guided helper's launch arguments from the still-needed
 /// set: one `--needs <name>` pair per permission, `Automation` carrying
-/// its target as `automation:<target>`.
+/// its target as `automation:<target>`, plus one trailing
+/// `--for-bundle <path>` pair when `own_bundle` is known.
 ///
 /// One launch names every missing permission — the helper does not get
-/// relaunched once per permission. The result never carries a status or
-/// result field; only [`needed_permissions`]'s own boolean/enum inputs
-/// ever decide what is missing, and that decision is made once, by
+/// relaunched once per permission. `own_bundle` is Polarize's own
+/// bundle path, resolved by `polarize_macos::setup_helper::own_bundle_path`
+/// — never the helper's own bundle (PINV-59). It is `None` for an
+/// unbundled dev run, in which case no `--for-bundle` flag is emitted
+/// at all and the helper's drag view stays unrendered, which is
+/// safe-by-default. The result never carries a status or result field;
+/// only [`needed_permissions`]'s own boolean/enum inputs ever decide
+/// what is missing, and that decision is made once, by
 /// `apps/polarize`, before the helper ever starts. See PINV-56.
-pub fn helper_args(needed: &[NeededPermission]) -> Vec<String> {
-    let mut args = Vec::with_capacity(needed.len() * 2);
+pub fn helper_args(needed: &[NeededPermission], own_bundle: Option<&str>) -> Vec<String> {
+    let mut args = Vec::with_capacity(needed.len() * 2 + 2);
     for permission in needed {
         args.push("--needs".to_string());
         args.push(match permission {
@@ -98,6 +105,10 @@ pub fn helper_args(needed: &[NeededPermission]) -> Vec<String> {
             NeededPermission::ScreenRecording => "screen-recording".to_string(),
             NeededPermission::Automation { target } => format!("automation:{target}"),
         });
+    }
+    if let Some(bundle) = own_bundle {
+        args.push("--for-bundle".to_string());
+        args.push(bundle.to_string());
     }
     args
 }
@@ -294,19 +305,22 @@ mod tests {
     // ---- helper_args --------------------------------------------------
 
     #[test]
-    fn helper_args_is_empty_for_no_needed_permission() {
-        assert!(helper_args(&[]).is_empty());
+    fn helper_args_is_empty_for_no_needed_permission_and_no_bundle_path() {
+        assert!(helper_args(&[], None).is_empty());
     }
 
     #[test]
     fn helper_args_names_one_permission_per_needs_flag() {
-        let args = helper_args(&[
-            NeededPermission::Accessibility,
-            NeededPermission::ScreenRecording,
-            NeededPermission::Automation {
-                target: "Finder".to_string(),
-            },
-        ]);
+        let args = helper_args(
+            &[
+                NeededPermission::Accessibility,
+                NeededPermission::ScreenRecording,
+                NeededPermission::Automation {
+                    target: "Finder".to_string(),
+                },
+            ],
+            None,
+        );
         assert_eq!(
             args,
             vec![
@@ -322,8 +336,9 @@ mod tests {
 
     /// The testable half of PINV-56/PINV-65: the argv surface has no
     /// place for a self-reported permission status to leak through.
-    /// Every value after a `--needs` flag names a permission (and, for
-    /// Automation, its target) — never a word like "granted" or
+    /// Every flag is either `--needs` (naming a permission, and for
+    /// Automation its target) or `--for-bundle` (naming Polarize's own
+    /// bundle path, PINV-59) — never a word like "granted" or
     /// "denied", which would mean the helper's launch line was carrying
     /// a status this module never computed.
     #[test]
@@ -335,12 +350,17 @@ mod tests {
                 target: "Finder".to_string(),
             },
         ];
-        let args = helper_args(&needed);
+        let args = helper_args(&needed, Some("/Applications/Polarize.app"));
 
-        // Every flag is "--needs", paired with exactly one value.
-        assert_eq!(args.len(), needed.len() * 2);
+        // Every flag is "--needs" or "--for-bundle", each paired with
+        // exactly one value.
+        assert_eq!(args.len() % 2, 0);
         for pair in args.chunks(2) {
-            assert_eq!(pair[0], "--needs");
+            assert!(
+                pair[0] == "--needs" || pair[0] == "--for-bundle",
+                "unexpected flag {:?}",
+                pair[0]
+            );
         }
         // No value anywhere spells out a granted/denied/trusted-style
         // status word.
@@ -363,6 +383,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn helper_args_appends_for_bundle_when_the_bundle_path_is_known() {
+        let args = helper_args(
+            &[NeededPermission::Accessibility],
+            Some("/Applications/Polarize.app"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--needs",
+                "accessibility",
+                "--for-bundle",
+                "/Applications/Polarize.app",
+            ]
+        );
+    }
+
+    #[test]
+    fn helper_args_omits_for_bundle_when_the_bundle_path_is_unknown() {
+        let args = helper_args(&[NeededPermission::Accessibility], None);
+        assert_eq!(args, vec!["--needs", "accessibility"]);
     }
 
     // ---- wait_for_grants_or_close --------------------------------------

@@ -81,6 +81,44 @@ fn resolve_from_exe_path(exe: &Path) -> Option<PathBuf> {
     Some(contents_dir.join(HELPER_RELATIVE_TO_CONTENTS))
 }
 
+/// The pure half of [`own_bundle_path`]: given this process's own
+/// executable path, resolves `Polarize.app` itself — the bundle this
+/// exe runs inside, not the helper's. `None` when `exe` does not sit
+/// inside a `<name>.app/Contents/MacOS/` directory at all, e.g. a bare
+/// `target/debug/polarize` dev build.
+///
+/// Kept separate from [`own_bundle_path`] so this resolution can be
+/// unit-tested against made-up paths, with no real bundle on disk. See
+/// PINV-59: the drag payload must always name Polarize's own bundle,
+/// never the helper's — this is the one place that bundle path gets
+/// resolved, from the running Polarize process's own location.
+fn own_bundle_from_exe_path(exe: &Path) -> Option<PathBuf> {
+    let macos_dir = exe.parent()?;
+    if macos_dir.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents_dir = macos_dir.parent()?;
+    if contents_dir.file_name()? != "Contents" {
+        return None;
+    }
+    let bundle_dir = contents_dir.parent()?;
+    let name = bundle_dir.file_name()?.to_str()?;
+    if !name.ends_with(".app") {
+        return None;
+    }
+    Some(bundle_dir.to_path_buf())
+}
+
+/// Resolves `Polarize.app`'s own bundle path from
+/// `std::env::current_exe()`, for the setup helper's `--for-bundle`
+/// argv flag (PINV-59). Returns `None` for an unbundled dev run — the
+/// helper's drag view then simply does not render, which is
+/// safe-by-default rather than guessing at a bundle path.
+pub fn own_bundle_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    own_bundle_from_exe_path(&exe)
+}
+
 /// Finds `PolarizeSetupHelper`'s executable.
 ///
 /// [`HELPER_PATH_ENV_VAR`], when set, always wins. Otherwise this
@@ -177,6 +215,35 @@ mod tests {
     fn resolve_from_exe_path_returns_none_when_the_exe_has_no_parent() {
         let exe = Path::new("polarize");
         assert_eq!(resolve_from_exe_path(exe), None);
+    }
+
+    // ---- own_bundle_from_exe_path (pure) ------------------------------
+
+    #[test]
+    fn own_bundle_from_exe_path_finds_polarize_app_from_its_bundled_binary() {
+        let exe = Path::new("/Applications/Polarize.app/Contents/MacOS/polarize");
+        assert_eq!(
+            own_bundle_from_exe_path(exe),
+            Some(PathBuf::from("/Applications/Polarize.app"))
+        );
+    }
+
+    #[test]
+    fn own_bundle_from_exe_path_returns_none_for_a_bare_dev_binary() {
+        let exe = Path::new("/Users/dev/polarize/target/debug/polarize");
+        assert_eq!(own_bundle_from_exe_path(exe), None);
+    }
+
+    #[test]
+    fn own_bundle_from_exe_path_returns_none_when_the_grandparent_does_not_end_in_dot_app() {
+        let exe = Path::new("/Applications/NotAnApp/Contents/MacOS/polarize");
+        assert_eq!(own_bundle_from_exe_path(exe), None);
+    }
+
+    #[test]
+    fn own_bundle_from_exe_path_returns_none_when_the_exe_has_no_parent() {
+        let exe = Path::new("polarize");
+        assert_eq!(own_bundle_from_exe_path(exe), None);
     }
 
     // ---- locate_helper (env override path) ---------------------------

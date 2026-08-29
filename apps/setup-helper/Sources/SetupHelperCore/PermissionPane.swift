@@ -26,9 +26,11 @@ public enum NeededPermission: Equatable {
 /// `polarize_core::bootstrap::helper_args` emits them:
 /// `"accessibility"`, `"screen-recording"`, or `"automation:<target>"`.
 /// A `--needs` flag with no following value, or any other argument, is
-/// ignored rather than treated as an error — the helper's argv carries
-/// no other flags today, and tolerating unrecognized shape keeps this
-/// parser from crashing on a future addition.
+/// ignored rather than treated as an error — this parser only ever
+/// reads `--needs` pairs, skipping past every other flag the argv
+/// carries (such as `--for-bundle`, read separately by
+/// `ArgvParser.bundlePath` in `DragPayload.swift`), so an unrecognized
+/// shape never crashes it.
 public enum ArgvParser {
     public static func parse(_ arguments: [String]) -> [NeededPermission] {
         var needed: [NeededPermission] = []
