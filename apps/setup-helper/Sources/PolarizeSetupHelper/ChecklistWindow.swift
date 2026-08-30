@@ -143,7 +143,7 @@ final class ChecklistWindow: NSWindow {
         icon.setAccessibilityLabel(item.title)
         if resolvedIcon.isSymbol {
             icon.contentTintColor = .controlAccentColor
-            icon.symbolConfiguration = .init(pointSize: 32, weight: .regular)
+            icon.symbolConfiguration = .init(pointSize: 42, weight: .regular)
         } else {
             icon.imageScaling = .scaleProportionallyUpOrDown
         }
@@ -256,8 +256,8 @@ final class ChecklistWindow: NSWindow {
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: rowMargin),
             icon.centerYAnchor.constraint(equalTo: card.centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 44),
-            icon.heightAnchor.constraint(equalToConstant: 44),
+            icon.widthAnchor.constraint(equalToConstant: 56),
+            icon.heightAnchor.constraint(equalToConstant: 56),
 
             title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 14),
             title.topAnchor.constraint(equalTo: card.topAnchor, constant: 12),
