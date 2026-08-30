@@ -2117,10 +2117,14 @@ has and has not yet had verified.
   Polarize's own grant state. Only `apps/polarize`'s own running
   process reads and reports Polarize's grant state.
 - Because: `AXIsProcessTrusted` and `CGPreflightScreenCaptureAccess`
-  report the calling process's own trust, not a named process's trust.
-  The helper and `polarize` are two different bundle identities. A
-  status call made inside the helper answers for the helper, never for
-  Polarize.
+  report the calling process's own trust. Each is a live check of
+  whichever process makes the call, not a lookup by name. The helper
+  and `polarize` are two separate running processes, whatever their
+  bundle identity. Since PINV-66, both do share one
+  `CFBundleIdentifier`. Whether that alone makes TCC treat a status
+  call inside the helper as equivalent to one inside `polarize` is
+  unverified. This rule does not depend on that answer. It holds
+  regardless, as defense-in-depth against either outcome.
 - If violated: the helper could show "Granted" while Polarize itself
   remains untrusted, or the reverse, because it is reading and
   reporting the wrong process's TCC state.
@@ -2148,23 +2152,38 @@ has and has not yet had verified.
   drives the drag/wait UI.
 - Because: giving the helper its own prompting path would create a
   fourth permission a user has to reason about, on top of Polarize's own
-  Accessibility, Screen Recording, and Automation.
-- If violated: macOS shows a consent dialog for the helper's own bundle
-  identity, and a user could grant Accessibility to the helper instead
-  of to Polarize — a grant that does nothing for Polarize's own tools.
+  Accessibility, Screen Recording, and Automation. Since PINV-66, the
+  helper also shares Polarize's own `CFBundleIdentifier`. Whether that
+  makes a helper-triggered prompt land on Polarize's real grant is
+  unverified either way (see PINV-56). That makes this rule matter
+  more, not less. An unplanned prompt from the helper is now a real
+  risk to Polarize's own grant state, not a contained mistake confined
+  to an unrelated identity.
+- If violated: macOS shows a consent dialog triggered from inside the
+  helper, for a grant no user action asked for, at a moment the guided
+  flow never intended to interrupt with one.
 
-### PINV-59: a drag payload always names Polarize's own bundle, never the helper's
+### PINV-59: a drag payload always names Polarize's own bundle, resolved from Polarize's own running process
 
 - Always: the drag source's pasteboard writer resolves the dragged app
-  URL from the running `Polarize.app`'s own bundle — never the helper's
-  own `.app` bundle.
-- Because: System Settings' Accessibility/Screen Recording lists grant
-  trust to whatever bundle identity gets dropped into them. The
-  identity that needs the grant is Polarize's, not the helper's.
+  URL from `polarize_macos::setup_helper::own_bundle_path` — resolved
+  from `apps/polarize`'s own running process, carried to the helper as
+  an explicit `--for-bundle` argv flag. It never assumes, derives, or
+  falls back to wherever the helper's own executable happens to be
+  running from.
+- Because: since PINV-66, the helper is no longer a separate `.app`
+  with a different bundle identity. It is a loose sibling executable
+  inside `Polarize.app` itself, sharing Polarize's own
+  `CFBundleIdentifier`. Resolving "its own location" would likely now
+  give the same answer as resolving Polarize's. This invariant
+  predates that merge. It stays in place anyway. It is a stricter,
+  more explicit contract than "happens to resolve the same." It costs
+  nothing to keep. It would still hold even if a future change
+  separated the two identities again.
 - If violated: the user drags an icon that looks right, System Settings
   shows a new list entry, and the drop feels successful — but it grants
-  the helper's identity, and Polarize's own preflight check still
-  reports not-granted.
+  whatever the helper's own executable location happened to resolve
+  to, not the value `polarize` itself computed and handed over.
 
 ### PINV-60: only Accessibility and Screen Recording ever get a drag gesture
 
@@ -2261,29 +2280,57 @@ has and has not yet had verified.
   success — a mismatch between the last frame shown and the report
   printed, from the very same read.
 
-### PINV-66: `PolarizeSetupHelper.app` signs inside-out, one arch at a time, before the outer bundle seals
+### PINV-66: `PolarizeSetupHelper` shares Polarize's own bundle identity, and signs one arch at a time before the outer bundle seals
+
+`PolarizeSetupHelper` originally nested as its own `.app`, under
+`Contents/Resources/`, with its own separate `CFBundleIdentifier`.
+Rejected on live review: a user browsing Finder or a Privacy & Security
+pane saw two different apps, "Polarize" and "PolarizeSetupHelper",
+where only one was ever meant to be visible. This invariant now
+describes the merged, single-bundle layout that replaced it.
 
 - Always: `justfile`'s `bundle-app` builds `PolarizeSetupHelper` for
-  exactly one architecture (`helper_arch`, translated from `arch()`'s
-  own output or overridden by the caller — never a universal binary),
-  signs the resulting `PolarizeSetupHelper.app` first, with no
-  entitlements, then signs the outer `Polarize.app` last.
+  exactly one architecture. `helper_arch` sets it, translated from
+  `arch()`'s own output or overridden by the caller. It is never a
+  universal binary. The build places it as a loose Mach-O binary
+  directly in `Polarize.app`'s own `Contents/MacOS/`, beside
+  `polarize`. It never sits inside a nested `.app` of its own. It
+  signs first, carrying `--identifier com.officialunofficial.polarize`
+  explicitly. That is the exact identifier `polarize`'s own bundled
+  `Info.plist` carries. The outer `Polarize.app` signs last.
   `.github/workflows/build-notarized-app.yml`'s release re-sign step
-  follows the same order, adding `--timestamp` to the nested bundle
-  before the outer one. `build-helper` fails with a clear error,
-  rather than skipping silently, when no Swift toolchain is on PATH.
-- Because: `codesign --verify --deep --strict` on an outer bundle
-  fails if a nested bundle it contains carries no valid signature of
-  its own — the nested code must already be sealed before the bundle
-  around it is. A notarization submission needs a secure timestamp on
-  every signed piece of code it contains, nested helper included, not
-  only the outer bundle. PINV-54 already commits `Polarize.app` itself
-  to one bundle per target triple, never a `lipo` universal binary;
-  this invariant extends that same commitment to the nested helper.
-- If violated: `just verify-bundle`'s `codesign --verify --strict
-  --deep` fails locally, or a release's notarization submission is
-  refused for a nested binary missing a secure timestamp, or a
-  contributor's build fails opaquely with no Swift toolchain installed
+  follows the same order. It adds `--timestamp` to the helper binary
+  before the outer bundle. `build-helper` fails with a clear error,
+  rather than skipping silently, when no Swift toolchain is on `PATH`.
+- Because: a loose Mach-O binary gets no `CFBundleIdentifier` merely
+  from sitting inside a bundle. This differs from the one executable
+  an `Info.plist` actually names via `CFBundleExecutable`. That one
+  executable does inherit the Info.plist's identity automatically at
+  sign time. Confirmed live, in a throwaway test bundle: signing a
+  loose sibling executable with no `--identifier` gives it an
+  unstable, content-hash-derived identifier instead (`helper-<hash>`).
+  That identifier is not `polarize`'s own. Passing `--identifier`
+  explicitly is what makes the two binaries carry the same identity.
+  LaunchServices, TCC, and System Settings then all resolve them to
+  one app. Confirmed live, same test: signing the outer bundle
+  afterward does not clobber the helper's separately-set signature.
+  `codesign --verify --deep --strict` on the outer bundle does walk
+  into and validate a loose sibling executable, the same way it would
+  a nested bundle. An explicit second `codesign -dv` check on the
+  helper binary is still worth keeping in `verify-bundle`, though.
+  `--deep` alone confirms the signature is valid. It does not confirm
+  the signature carries the identifier this invariant requires. A
+  notarization submission needs a secure timestamp on every signed
+  piece of code it contains, the helper included, not only the outer
+  bundle. PINV-54 already commits `Polarize.app` itself to one bundle
+  per target triple, never a `lipo` universal binary. This invariant
+  extends that same commitment to the helper binary.
+- If violated: `just verify-bundle`'s `codesign -dv` identifier check
+  on the helper binary fails locally. Or the helper shows up as a
+  separately-named, separately-iconed app in Finder or a Privacy &
+  Security pane again. Or a release's notarization submission is
+  refused for a helper binary missing a secure timestamp. Or a
+  contributor's build fails opaquely with no Swift toolchain installed,
   instead of a clear, actionable error.
 
 The four invariants below (PINV-67 through PINV-70) came out of a live
@@ -3741,21 +3788,28 @@ it never needed that heuristic.
   (`request_automation`) before ever launching the helper, so TCC should
   already hold a recorded decision, but this is unverified in this
   sandboxed run.
-- **PINV-66** — the inside-out signing order and per-arch build are
-  verified locally: `just verify-bundle` runs `codesign --verify
-  --strict --deep` against the assembled `Polarize.app` and confirms
-  both the outer and nested bundle's `CFBundleIdentifier`, under the
-  local `polarize-dev` identity. `helper_arch` was overridden by hand
-  to confirm both `arm64` and `x86_64` builds produce a correctly
-  architected nested binary that still passes that same verify. The
-  Swift-toolchain guard in `build-helper` was confirmed to print its
-  clear error and exit non-zero when `swift` is temporarily removed
-  from `PATH`. `just check-quoting` confirms both new `codesign` lines
-  still parse correctly against a real Developer ID identity string.
-  **Not automated**: the real Developer ID `--timestamp` re-sign in
-  `build-notarized-app.yml`, and the notarization submission that
-  depends on it, still need a real tagged release to verify end to
-  end — the same gap PINV-54 already names for the outer bundle.
+- **PINV-66** — **Live-verified 2026-08-30**, on a real signed
+  `dist/Polarize.app`, rebuilt fresh with `rm -rf dist/Polarize.app &&
+  just verify-bundle`. `codesign -dv` on both
+  `Contents/MacOS/polarize` and `Contents/MacOS/PolarizeSetupHelper`
+  showed the exact same `Identifier=com.officialunofficial.polarize`.
+  `codesign --verify --strict --deep` passed against the assembled
+  bundle. `open -Ra` resolved it as one LaunchServices entry. The
+  identifier-sharing mechanism itself was also confirmed live
+  beforehand, in a disposable throwaway test bundle built and signed
+  by hand outside `dist/`. A loose sibling binary needs an explicit
+  `--identifier` at sign time. A later outer-bundle sign does not
+  clobber it. `just check-quoting` and `cargo fmt`/`clippy`/`cargo test
+  --workspace` all passed clean on the same pass. **Not re-verified
+  this pass**: `helper_arch` was not overridden to `x86_64` this
+  session — only the local `arm64` build ran. The underlying
+  mechanism (`--identifier` at sign time) is architecture-independent.
+  That makes this a lower-risk gap than before. It is still an open
+  gap, though, not a confirmed one. **Not automated**: the real Developer ID
+  `--timestamp` re-sign in `build-notarized-app.yml`, and the
+  notarization submission that depends on it, still need a real tagged
+  release to verify end to end — the same gap PINV-54 already names
+  for the outer bundle.
 
 - **PINV-67** — not automatable: no test can assert what a real
   `NSButton`'s rendered chrome looks like on screen. Enforced instead

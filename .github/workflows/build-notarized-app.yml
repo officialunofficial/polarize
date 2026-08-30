@@ -89,18 +89,21 @@ jobs:
       # `just bundle-app` signs without `--timestamp` — correct for a
       # local, self-signed `polarize-dev` build (see justfile), where
       # a secure timestamp buys nothing. A notarizable release build
-      # needs one on every signed piece of code, nested helper
-      # included, so this step re-signs both afterward with it added.
-      # The nested `PolarizeSetupHelper.app` re-signs first, then the
-      # outer bundle — the same inside-out order `bundle-app` itself
-      # follows. See PINV-66 in docs/INVARIANTS.md.
+      # needs one on every signed piece of code, the helper included,
+      # so this step re-signs both afterward with it added. The helper
+      # binary re-signs first, carrying `--identifier` explicitly —
+      # Polarize's own identifier. It is a loose sibling executable in
+      # `Contents/MacOS/`, not a nested bundle with an `Info.plist` of
+      # its own to read one from. The outer bundle signs last. See
+      # PINV-66 in docs/INVARIANTS.md.
       - name: Assemble and sign Polarize.app
         run: |
           HELPER_ARCH=$([ "${{ matrix.target }}" = "aarch64-apple-darwin" ] && echo arm64 || echo x86_64)
           just bin=target/${{ matrix.target }}/release/polarize \
             identity="$CODESIGN_IDENTITY" helper_arch="$HELPER_ARCH" bundle-app
-          codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp \
-            dist/Polarize.app/Contents/Resources/PolarizeSetupHelper.app
+          codesign --force --sign "$CODESIGN_IDENTITY" \
+            --identifier com.officialunofficial.polarize --options runtime --timestamp \
+            dist/Polarize.app/Contents/MacOS/PolarizeSetupHelper
           codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp \
             --entitlements apps/polarize/polarize.entitlements dist/Polarize.app
 

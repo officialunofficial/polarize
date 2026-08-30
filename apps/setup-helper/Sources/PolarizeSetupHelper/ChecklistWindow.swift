@@ -44,8 +44,12 @@ final class ChecklistWindow: NSWindow {
         titlebarAppearsTransparent = true
         isReleasedWhenClosed = false
         level = .normal
+        // Barely transparent, not the fully see-through look a `.clear`
+        // background plus `.behindWindow` vibrancy gave — rejected on
+        // live review. This is a near-opaque solid color with a small
+        // amount of alpha, not blur-compositing with the desktop.
         isOpaque = false
-        backgroundColor = .clear
+        backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.99)
         // With no title bar strip left to drag by, the window needs
         // this explicitly or it becomes undraggable entirely.
         isMovableByWindowBackground = true
@@ -53,15 +57,7 @@ final class ChecklistWindow: NSWindow {
         let content = Self.makeContent(items: items, appIcon: appIcon, width: width) { [weak self] permission in
             self?.onAllowTapped?(permission)
         }
-        // `cornerRadius: 0`. Unlike the floating guide panel, this is a
-        // real window. It already has native rounded corners from the
-        // window server. Rounding the material too would double up.
-        contentView = MaterialBackground.wrap(
-            content: content,
-            cornerRadius: 0,
-            material: .contentBackground,
-            blendingMode: .behindWindow
-        )
+        contentView = content
         let fittingHeight = content.fittingSize.height
         setContentSize(NSSize(width: width, height: max(240, fittingHeight)))
         center()
@@ -134,8 +130,24 @@ final class ChecklistWindow: NSWindow {
     ) -> NSView {
         let card = NSView()
         card.wantsLayer = true
-        card.layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.15).cgColor
+        // A flat, dynamic system color — not Liquid Glass. Rejected on
+        // live review: glass rows read as too busy against a solid
+        // window. `.quaternaryLabelColor` already adapts between light
+        // and dark appearance on its own; no separate dark/light branch
+        // is needed.
+        card.layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.08).cgColor
         card.layer?.cornerRadius = 12
+        // A soft shadow under each row, not a hard drop shadow — low
+        // opacity, wide radius, offset only slightly downward. This
+        // sits on the row's own layer only. `AllowButton` never sets
+        // any shadow of its own — its very faint bevel is just the
+        // system's native `.rounded` bezel rendering, not a shadow we
+        // added, and it isn't controllable from here.
+        card.layer?.masksToBounds = false
+        card.layer?.shadowColor = NSColor.black.cgColor
+        card.layer?.shadowOpacity = 0.22
+        card.layer?.shadowRadius = 8
+        card.layer?.shadowOffset = CGSize(width: 0, height: -2)
 
         let resolvedIcon = PermissionIcon.resolve(for: item)
         let icon = NSImageView(image: resolvedIcon.image)
@@ -159,15 +171,10 @@ final class ChecklistWindow: NSWindow {
 
         let button = AllowButton(permission: item.permission, onAllow: onAllow)
         button.title = "Allow"
-        // Deliberately not `.glass` bezel style. `NSBezelStyleGlass`
-        // exists in the macOS 27 SDK, but confirmed live: it rendered
-        // as plain text, with no button chrome at all. Multiple Apple
-        // Developer Forums threads (FB20272917, FB20517174) confirm
-        // that specific flag is genuinely unreliable this OS cycle.
-        // Below, instead, is Apple's own documented composition
-        // pattern for a real Liquid Glass button: a separate
-        // `NSGlassEffectView`, sized to match, sitting behind a plain
-        // borderless button — not the bezel-style flag.
+        // Flat, not Liquid Glass. `.rounded` is also the one bezel
+        // style confirmed to render real chrome at all — `.glass`
+        // rendered as plain text with none, confirmed live (see
+        // PINV-67). The rows around it carry the glass look instead.
         button.bezelStyle = .rounded
         // Back to plain default sizing. `.large` controlSize, then an
         // explicit 16pt font plus a forced 38pt minimum height, were
@@ -195,82 +202,50 @@ final class ChecklistWindow: NSWindow {
         card.addSubview(detail)
         card.addSubview(button)
 
-        // On macOS 26+, the visible button is the glass pill below,
-        // not the borderless button's own (smaller) frame — it bleeds
-        // `glassBleed` past the button on every side. Confirmed live
-        // as a real bug: without this inset, the pill's own right edge
-        // landed only 6pt from the card's edge (16 - 10), far tighter
-        // than every other margin in this row. `rowMargin` is the one
-        // margin every edge in this card shares — the icon's leading
-        // inset, the button's trailing inset (before the glass bleed
-        // compensation), and the outer row width's own margin in
-        // `makeContent` all use the same value.
+        // `rowMargin` is the one margin every edge in this card
+        // shares — the icon's leading inset and the outer row width's
+        // own margin in `makeContent` both use the same value.
         let rowMargin: CGFloat = 16
-        let supportsGlass: Bool
-        if #available(macOS 26.0, *) {
-            supportsGlass = true
-        } else {
-            supportsGlass = false
-        }
-        let glassBleed: CGFloat = 6
-        let buttonTrailingInset = supportsGlass ? rowMargin + glassBleed : rowMargin
+        // The button gets its own, slightly wider trailing margin than
+        // the icon's leading one. Confirmed live: matching them exactly
+        // still read as tight on the button side — a rounded pill
+        // sitting against a rounded card corner reads closer than a
+        // square icon does at the same numeric gap.
+        let buttonMargin: CGFloat = 20
+        // Vertical clearance around the row's own content. The icon is
+        // 56pt tall; this must stay bigger than half that so the icon
+        // never touches the card's top or bottom edge, whatever the
+        // title/detail text's own height happens to be.
+        let cardVerticalMargin: CGFloat = 16
 
-        if #available(macOS 26.0, *) {
-            // `supportsGlass` above already covers this same check,
-            // computed separately because `NSGlassEffectView` itself
-            // still needs a literal `#available` at its own call
-            // site — Swift's availability checker isn't flow-sensitive
-            // through an arbitrary `Bool` variable, even one computed
-            // from `#available` a few lines up.
-            //
-            // Apple's own real Liquid Glass button pattern: the glass
-            // view sits behind the button, sized to exceed it by
-            // `glassBleed` on every side, and the button itself draws
-            // no bezel of its own — only the glass supplies the
-            // visible pill shape underneath. `positioned: .below,
-            // relativeTo: button` needs `button` already added as a
-            // subview above, or it silently fails to place the glass
-            // behind it.
-            button.isBordered = false
-            // With no bezel of its own, the button's default title
-            // color is too dark to read against a tinted glass
-            // background — set explicitly, to match the white title
-            // the bezel path already gets for free from AppKit.
-            button.attributedTitle = NSAttributedString(
-                string: "Allow",
-                attributes: [.foregroundColor: NSColor.white]
-            )
-            let glass = NSGlassEffectView()
-            glass.cornerRadius = 8
-            glass.tintColor = .controlAccentColor
-            glass.translatesAutoresizingMaskIntoConstraints = false
-            card.addSubview(glass, positioned: .below, relativeTo: button)
-            NSLayoutConstraint.activate([
-                glass.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: -glassBleed),
-                glass.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: glassBleed),
-                glass.topAnchor.constraint(equalTo: button.topAnchor, constant: -glassBleed / 2),
-                glass.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: glassBleed / 2),
-            ])
-        }
-
+        // The icon (56pt) is the row's tallest content now, so IT pins
+        // the card's top and bottom — an equality on both edges, which
+        // together with its fixed height fully determines the card's
+        // height as `56 + cardVerticalMargin * 2`. The title/detail
+        // block stays top-anchored as before; its own bottom anchor
+        // below is a `<=` safety net, not a second equality, so the
+        // two blocks never fight over which one decides the card's
+        // height — exactly one required chain (the icon's) does.
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: rowMargin),
-            icon.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+            icon.topAnchor.constraint(equalTo: card.topAnchor, constant: cardVerticalMargin),
+            icon.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -cardVerticalMargin),
             icon.widthAnchor.constraint(equalToConstant: 56),
             icon.heightAnchor.constraint(equalToConstant: 56),
 
             title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 14),
-            title.topAnchor.constraint(equalTo: card.topAnchor, constant: 12),
+            title.topAnchor.constraint(equalTo: card.topAnchor, constant: cardVerticalMargin),
             title.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -12),
 
             detail.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             detail.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
             detail.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -12),
-            detail.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -12),
+            detail.bottomAnchor.constraint(lessThanOrEqualTo: card.bottomAnchor, constant: -cardVerticalMargin),
 
-            button.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -buttonTrailingInset),
+            button.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -buttonMargin),
             button.centerYAnchor.constraint(equalTo: card.centerYAnchor),
         ])
+
         return card
     }
 }

@@ -44,9 +44,12 @@ pub const HELPER_PATH_ENV_VAR: &str = "POLARIZE_SETUP_HELPER";
 
 /// Where the helper's executable sits, relative to `Polarize.app`'s
 /// `Contents/` directory. Matches the `justfile`'s `bundle-app` recipe
-/// (`helper_bundle`).
-const HELPER_RELATIVE_TO_CONTENTS: &str =
-    "Resources/PolarizeSetupHelper.app/Contents/MacOS/PolarizeSetupHelper";
+/// (`helper_bin`) — a loose executable sitting directly beside
+/// `polarize` in `Contents/MacOS/`, not a nested `.app` bundle. Both
+/// binaries are signed with the same `CFBundleIdentifier`, so both
+/// read as one app, `Polarize.app`, to LaunchServices, TCC, and
+/// System Settings.
+const HELPER_RELATIVE_TO_CONTENTS: &str = "MacOS/PolarizeSetupHelper";
 
 /// Why [`locate_helper`] could not find a helper binary to spawn.
 ///
@@ -243,9 +246,7 @@ mod tests {
         let resolved = resolve_from_exe_path(exe).expect("bundled layout must resolve");
         assert_eq!(
             resolved,
-            Path::new(
-                "/Applications/Polarize.app/Contents/Resources/PolarizeSetupHelper.app/Contents/MacOS/PolarizeSetupHelper"
-            )
+            Path::new("/Applications/Polarize.app/Contents/MacOS/PolarizeSetupHelper")
         );
     }
 

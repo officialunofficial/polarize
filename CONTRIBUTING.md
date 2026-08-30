@@ -30,9 +30,10 @@ re-signs the binary with a stable local identity afterward. It also
 assembles `dist/Polarize.app` — a real bundle around that same binary.
 This is needed for Automation's own identity (PINV-52 in
 `docs/INVARIANTS.md`). `just build` also needs a Swift toolchain on
-`PATH` now — it builds `PolarizeSetupHelper`, a nested AppKit helper,
-via SwiftPM (`apps/setup-helper`), and signs it into the bundle
-alongside `polarize` (PINV-66). Xcode or the Command Line Tools
+`PATH` now — it builds `PolarizeSetupHelper`, a second AppKit
+executable, via SwiftPM (`apps/setup-helper`). It signs the result
+straight into the bundle's `Contents/MacOS/`, alongside `polarize`,
+carrying the same bundle identity (PINV-66). Xcode or the Command Line Tools
 provide `swift`; `just build` fails with a clear error if neither is
 installed. `just verify-bundle` checks the bundle's structure and
 signature. Grant Accessibility and Screen Recording

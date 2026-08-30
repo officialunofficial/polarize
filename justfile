@@ -56,15 +56,16 @@ plist_template := "apps/polarize/bundle/Info.plist.in"
 # `CARGO_PKG_VERSION`.
 version := `awk -F'"' '/^version = /{print $2; exit}' Cargo.toml`
 
-# `PolarizeSetupHelper` is a nested AppKit helper, built with SwiftPM
-# and signed into `Polarize.app` alongside the Rust binary (PLZ-4). It
-# ships as a skeleton today; PLZ-3 fills in its guided-permission flow
-# later. See PINV-66 in docs/INVARIANTS.md.
+# `PolarizeSetupHelper` is a second AppKit executable, built with
+# SwiftPM and signed straight into `Polarize.app`'s own
+# `Contents/MacOS/` — a loose sibling binary next to `polarize`, not a
+# nested `.app` of its own. It carries the exact same
+# `CFBundleIdentifier` as `polarize`, so LaunchServices, TCC, and
+# System Settings all see one app, not two. See PINV-66 in
+# docs/INVARIANTS.md.
 helper_pkg := "apps/setup-helper"
 helper_name := "PolarizeSetupHelper"
-helper_identifier := "com.officialunofficial.polarize.setup-helper"
-helper_plist_template := helper_pkg + "/bundle/Info.plist.in"
-helper_bundle := bundle + "/Contents/Resources/" + helper_name + ".app"
+helper_bin := bundle + "/Contents/MacOS/" + helper_name
 # SwiftPM's `--arch` takes Apple's short arch name (`arm64`/`x86_64`),
 # not `just`'s own `arch()` output (`aarch64`/`x86_64`), and not a Rust
 # target triple either — hence the translation instead of reusing
@@ -104,21 +105,27 @@ build-helper:
 # square here would show hard corners in the Dock, next to every
 # rounded system icon.
 #
-# `PolarizeSetupHelper.app` nests under `Contents/Resources/` (PLZ-3's
-# own placement decision). It is signed first, with no entitlements of
-# its own — it touches no TCC API (PINV-58) — then the outer bundle
-# signs last. That order is deliberate: a nested bundle must already
-# carry a valid signature before the bundle around it is sealed, or
-# `codesign --verify --deep` on the outer bundle fails. See PINV-66.
+# `PolarizeSetupHelper` sits directly in `Contents/MacOS/`, beside
+# `polarize`. PLZ-3's original nested placement was rejected on live
+# review — see PINV-66. It signs first, carrying `--identifier
+# {{identifier}}` explicitly, the same identifier `polarize` itself
+# carries. A loose Mach-O binary gets no `CFBundleIdentifier` of its
+# own from the bundle's `Info.plist`, unlike the declared
+# `CFBundleExecutable`. So this must be passed by hand. Otherwise the
+# helper falls back to an unstable, content-hash-derived identifier
+# instead (confirmed live: see PINV-66). It still touches no TCC API
+# of its own (PINV-58). `--identifier` only decides how its code
+# signature reads, not what it does. The outer bundle signs last.
+# Confirmed live: that order does not clobber the helper's own
+# signature. `codesign --verify --deep` on the outer bundle still
+# walks into and validates it, exactly as it would a nested bundle.
 bundle-app: build-helper
     mkdir -p {{bundle}}/Contents/MacOS {{bundle}}/Contents/Resources
     sed 's/__VERSION__/{{version}}/' {{plist_template}} > {{bundle}}/Contents/Info.plist
     cp {{bin}} {{bundle}}/Contents/MacOS/polarize
     cp apps/polarize/bundle/Polarize.icns {{bundle}}/Contents/Resources/Polarize.icns
-    mkdir -p {{helper_bundle}}/Contents/MacOS
-    sed 's/__VERSION__/{{version}}/' {{helper_plist_template}} > {{helper_bundle}}/Contents/Info.plist
-    cp "$(swift build -c release --package-path {{helper_pkg}} --arch {{helper_arch}} --show-bin-path)/{{helper_name}}" {{helper_bundle}}/Contents/MacOS/{{helper_name}}
-    codesign --force --sign "{{identity}}" --options runtime {{helper_bundle}}
+    cp "$(swift build -c release --package-path {{helper_pkg}} --arch {{helper_arch}} --show-bin-path)/{{helper_name}}" {{helper_bin}}
+    codesign --force --sign "{{identity}}" --identifier {{identifier}} --options runtime {{helper_bin}}
     codesign --force --sign "{{identity}}" --options runtime --entitlements {{entitlements}} {{bundle}}
 
 # Verifies `Polarize.app` is a well-formed, LaunchServices-acceptable
@@ -126,10 +133,9 @@ bundle-app: build-helper
 # "not automatable" note for what this cannot check.
 verify-bundle: bundle-app
     plutil -lint {{bundle}}/Contents/Info.plist
-    plutil -lint {{helper_bundle}}/Contents/Info.plist
     codesign --verify --strict --deep {{bundle}}
     codesign -dv {{bundle}} 2>&1 | grep -q "Identifier={{identifier}}"
-    codesign -dv {{helper_bundle}} 2>&1 | grep -q "Identifier={{helper_identifier}}"
+    codesign -dv {{helper_bin}} 2>&1 | grep -q "Identifier={{identifier}}"
     # Asks LaunchServices to resolve the bundle by identity, with no
     # launch — checkable with zero TCC grants. PINV-44 documented a
     # bare binary failing this with `-600` (`kLSApplicationNotFoundErr`)

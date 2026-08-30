@@ -1,7 +1,9 @@
 // swift-tools-version: 6.0
 //
-// `PolarizeSetupHelper` is a nested AppKit app inside `Polarize.app`
-// (see `justfile`'s `bundle-app` recipe). `SetupHelperCore` holds the
+// `PolarizeSetupHelper` is a second AppKit executable, signed straight
+// into `Polarize.app`'s own bundle, alongside `polarize`. See
+// `justfile`'s `bundle-app` recipe and PINV-66 in
+// `docs/INVARIANTS.md`. `SetupHelperCore` holds the
 // helper's pure permission-pane logic — argv parsing, deep-link pane
 // mapping, and fallback selection — with no AppKit import, so
 // `SetupHelperCoreTests` can run in plain `swift test`. See PINV-56
