@@ -174,6 +174,7 @@ final class ChecklistWindow: NSWindow {
         // nice-to-have, not adopted now, since the simpler flag is
         // what turned out unreliable.
         button.bezelStyle = .rounded
+        button.controlSize = .large
         button.translatesAutoresizingMaskIntoConstraints = false
         button.setAccessibilityLabel("Allow \(item.title)")
         if isPrimary {
