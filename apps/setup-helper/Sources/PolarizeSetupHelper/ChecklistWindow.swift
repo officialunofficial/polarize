@@ -194,14 +194,43 @@ final class ChecklistWindow: NSWindow {
         card.addSubview(title)
         card.addSubview(detail)
         card.addSubview(button)
+
+        // On macOS 26+, the visible button is the glass pill below,
+        // not the borderless button's own (smaller) frame — it bleeds
+        // `glassBleed` past the button on every side. Confirmed live
+        // as a real bug: without this inset, the pill's own right edge
+        // landed only 6pt from the card's edge (16 - 10), far tighter
+        // than every other margin in this row. `rowMargin` is the one
+        // margin every edge in this card shares — the icon's leading
+        // inset, the button's trailing inset (before the glass bleed
+        // compensation), and the outer row width's own margin in
+        // `makeContent` all use the same value.
+        let rowMargin: CGFloat = 16
+        let supportsGlass: Bool
         if #available(macOS 26.0, *) {
+            supportsGlass = true
+        } else {
+            supportsGlass = false
+        }
+        let glassBleed: CGFloat = 6
+        let buttonTrailingInset = supportsGlass ? rowMargin + glassBleed : rowMargin
+
+        if #available(macOS 26.0, *) {
+            // `supportsGlass` above already covers this same check,
+            // computed separately because `NSGlassEffectView` itself
+            // still needs a literal `#available` at its own call
+            // site — Swift's availability checker isn't flow-sensitive
+            // through an arbitrary `Bool` variable, even one computed
+            // from `#available` a few lines up.
+            //
             // Apple's own real Liquid Glass button pattern: the glass
-            // view sits behind the button, sized to exactly match it,
-            // and the button itself draws no bezel of its own — only
-            // the glass supplies the visible pill shape underneath.
-            // `positioned: .below, relativeTo: button` needs `button`
-            // already added as a subview above, or it silently fails
-            // to place the glass behind it.
+            // view sits behind the button, sized to exceed it by
+            // `glassBleed` on every side, and the button itself draws
+            // no bezel of its own — only the glass supplies the
+            // visible pill shape underneath. `positioned: .below,
+            // relativeTo: button` needs `button` already added as a
+            // subview above, or it silently fails to place the glass
+            // behind it.
             button.isBordered = false
             // With no bezel of its own, the button's default title
             // color is too dark to read against a tinted glass
@@ -217,15 +246,15 @@ final class ChecklistWindow: NSWindow {
             glass.translatesAutoresizingMaskIntoConstraints = false
             card.addSubview(glass, positioned: .below, relativeTo: button)
             NSLayoutConstraint.activate([
-                glass.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: -10),
-                glass.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: 10),
-                glass.topAnchor.constraint(equalTo: button.topAnchor, constant: -4),
-                glass.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: 4),
+                glass.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: -glassBleed),
+                glass.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: glassBleed),
+                glass.topAnchor.constraint(equalTo: button.topAnchor, constant: -glassBleed / 2),
+                glass.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: glassBleed / 2),
             ])
         }
 
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+            icon.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: rowMargin),
             icon.centerYAnchor.constraint(equalTo: card.centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 44),
             icon.heightAnchor.constraint(equalToConstant: 44),
@@ -239,7 +268,7 @@ final class ChecklistWindow: NSWindow {
             detail.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -12),
             detail.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -12),
 
-            button.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+            button.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -buttonTrailingInset),
             button.centerYAnchor.constraint(equalTo: card.centerYAnchor),
         ])
         return card
