@@ -16,6 +16,9 @@ plain AppKit windows.
   traits. macOS-only. Its native-API behavior has no automated test
   coverage; see `docs/INVARIANTS.md`.
 - `apps/polarize` — the thin `rmcp` stdio MCP server binary.
+- `apps/setup-helper` — `PolarizeSetupHelper`, a nested AppKit app
+  built with SwiftPM, not Cargo. `justfile`'s `bundle-app` recipe
+  signs it into `Polarize.app`. See PINV-66 in `docs/INVARIANTS.md`.
 
 ## Commands
 
@@ -27,6 +30,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 A `rust-toolchain.toml` pins the `stable` channel.
+
+`just build` also needs a Swift toolchain on `PATH` — it builds and
+signs `apps/setup-helper` into `Polarize.app` alongside `polarize`.
+See `CONTRIBUTING.md`.
 
 ## Engineering conventions
 

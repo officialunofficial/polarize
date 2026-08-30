@@ -44,6 +44,23 @@ jobs:
       - name: cargo build
         run: cargo build --workspace
 
+      # `apps/setup-helper` is a SwiftPM package, not a Cargo member —
+      # `cargo build --workspace` above never touches it. `macos-latest`
+      # ships Xcode, so `swift` is already on PATH; no extra setup step
+      # is needed. `just bundle-app` (which also builds and signs it
+      # into `Polarize.app`) only runs where a signing identity exists —
+      # see `build-notarized-app.yml`.
+      - name: swift build (setup-helper)
+        run: swift build -c release --package-path apps/setup-helper
+
+      # Runs `SetupHelperCoreTests` against the helper's pure
+      # permission-pane logic — argv parsing, deep-link pane mapping,
+      # and fallback selection. See PINV-58 through PINV-63 in
+      # `docs/INVARIANTS.md` for what this covers and what still needs
+      # a live macOS session.
+      - name: swift test (setup-helper)
+        run: swift test --package-path apps/setup-helper
+
       # `just check-quoting` dry-runs the signing recipes with a real
       # Developer ID identity string and parses each line with `sh -n`.
       # It executes nothing. See the recipe's own comment in `justfile`.

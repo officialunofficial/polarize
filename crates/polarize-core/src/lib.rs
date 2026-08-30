@@ -11,6 +11,9 @@ pub mod action;
 pub mod ax;
 /// The pure half of a batched AX attribute read. See PINV-41.
 pub mod ax_batch;
+/// Decision and lifecycle logic for the guided permission helper behind
+/// `--request-permissions`. See PINV-56 through PINV-65.
+pub mod bootstrap;
 pub mod clipboard;
 pub mod coords;
 pub mod error;

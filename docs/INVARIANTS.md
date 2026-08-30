@@ -2036,6 +2036,378 @@ at a time, exactly as before; only a caller retrying in a tight loop
 now hits the cap and fails fast, instead of accumulating threads
 without limit.
 
+The invariants below (PINV-56 through PINV-65) describe the guided
+permission helper proposed in PLZ-3: a Swift AppKit helper, launched
+from `--request-permissions`, that guides a user through a denied
+Accessibility, Screen Recording, or Automation grant. Each invariant
+states a design-level property the implementation must hold.
+
+PLZ-4 built the helper's own skeleton
+(`apps/setup-helper/Sources/PolarizeSetupHelper/main.swift`): a plain
+window, no TCC-touching API of any kind. PLZ-5 built the Rust side that
+triggers, launches, and owns its lifecycle: `polarize-core`'s
+`bootstrap` module (the launch decision, the argv builder, and the
+poll-and-terminate wait loop), `polarize-macos`'s `setup_helper` module
+(locating and spawning the real process) and its `permission_bootstrap`
+non-prompting re-reads, and `apps/polarize/src/main.rs`'s rewired
+`request_permissions`. PLZ-6 built the helper's deep-link pane
+navigation and fallback selection. PLZ-7 built the helper's window
+tracking: `SetupHelperCore`'s `WindowTracking.swift` holds the pure
+logic — locating System Settings' own window in a raw window list,
+planning the panel's on-screen frame, and choosing a tracking strategy
+— and `PolarizeSetupHelper`'s `WindowTracker.swift` wires that logic to
+the real `CGWindowListCopyWindowInfo` and `AXObserver` calls.
+`main.swift`'s window is now a non-activating `NSPanel` that floats
+over System Settings and follows it, never taking key/main status or
+stealing focus. `SetupHelperCore` is a pure Swift module with no
+AppKit import. It parses the `--needs` argv. It maps Accessibility and
+Screen Recording to their System Settings anchors. It picks the
+fallback pane when the mapped anchor fails to open. PLZ-8 built the
+helper's drag gesture: `polarize_macos::setup_helper::own_bundle_path`
+resolves Polarize's own running bundle path (never the helper's), and
+`polarize_core::bootstrap::helper_args` carries it to the helper as a
+trailing `--for-bundle <path>` flag. `SetupHelperCore`'s
+`DragPayload.swift` stays a pure module: `ArgvParser.bundlePath` reads
+that flag, `DragPayload.init?` builds the four Finder-drag pasteboard
+representations (`public.file-url`, `public.url`,
+`NSFilenamesPboardType`, `public.utf8-plain-text`) and structurally
+refuses to build a payload naming the helper's own
+`PolarizeSetupHelper.app` bundle, and `DragSourcePlanner` shows the
+drag view only for an Accessibility or Screen Recording launch that
+actually opened a pane. `PolarizeSetupHelper`'s
+`DragSourceView.swift` wires that pure payload to a real
+`NSDraggingSource`/`NSPasteboardWriting` drag session, showing
+Polarize's own icon beneath the instruction text. PLZ-9 closed the one
+remaining gap in PINV-65's literal reading: on the grant path, the
+helper's last visible frame used to still say "still needs" right up
+until `wait_for_grants_or_close` `SIGKILL`ed it, even though the
+terminal went on to report success. Now the parent sends `SIGUSR1`
+first — a courtesy notification, never a substitute for the following
+`SIGKILL` — and `wait_for_grants_or_close` sleeps for
+`GRANT_SUCCESS_GRACE_MS` before terminating, so the helper has time to
+swap in a success view (`SetupHelperCore`'s `SuccessPlan.swift`, wired
+to the real `DispatchSource`/`exit` calls in `main.swift`) before the
+window closes. The helper still reads no permission API anywhere in
+this path; it only reacts to a signal the parent's own read decided to
+send. PLZ-10 closed the one remaining gap in the Automation path: the
+helper now maps Automation to its own pane
+(`SettingsPane.automationURLString`, `Privacy_Automation`), so an
+automation-only launch opens System Settings, tracks its window, and
+waits, exactly like Accessibility and Screen Recording already did.
+The drag view still never shows for Automation — `DragSourcePlanner`
+now switches on the outcome's own permission
+(`NeededPermission.supportsDragGrant`) instead of relying on
+`SettingsPane.urlString` returning `nil`, because that `nil` no longer
+holds now that Automation maps to a real anchor. `main.swift`'s
+instruction text also names the Automation target ("Allow Polarize to
+control `<target>` in the Automation list") rather than the generic
+"enable Polarize" copy, since Automation's checkbox lives under a
+per-target row the user must find. No Rust-side change was needed for
+PLZ-10 — PINV-57's real Apple Event send and the poll loop that reads
+`check_automation` already worked before this pane existed; the pane
+only gives the user somewhere to act once the row appears. See the
+enforcement checklist entries below for exactly what each invariant
+has and has not yet had verified.
+
+### PINV-56: the helper never answers for Polarize's own permission grant
+
+- Always: the guided permission helper process never calls
+  `AXIsProcessTrusted`, `CGPreflightScreenCaptureAccess`, or any other
+  per-calling-process permission API and presents the result as
+  Polarize's own grant state. Only `apps/polarize`'s own running
+  process reads and reports Polarize's grant state.
+- Because: `AXIsProcessTrusted` and `CGPreflightScreenCaptureAccess`
+  report the calling process's own trust. Each is a live check of
+  whichever process makes the call, not a lookup by name. The helper
+  and `polarize` are two separate running processes, whatever their
+  bundle identity. Since PINV-66, both do share one
+  `CFBundleIdentifier`. Whether that alone makes TCC treat a status
+  call inside the helper as equivalent to one inside `polarize` is
+  unverified. This rule does not depend on that answer. It holds
+  regardless, as defense-in-depth against either outcome.
+- If violated: the helper could show "Granted" while Polarize itself
+  remains untrusted, or the reverse, because it is reading and
+  reporting the wrong process's TCC state.
+
+### PINV-57: `--request-permissions` always attempts the real system prompt before it ever launches the helper
+
+- Always: for every permission, `request_permissions()` calls the
+  existing real-prompt path first — `permission_bootstrap::request_accessibility`,
+  `request_screen_recording`, or `request_automation` — before it may
+  launch the guided helper for that permission. The helper only
+  launches for a permission whose post-attempt state is still not
+  granted.
+- Because: a fresh, never-asked install still gets a working native
+  dialog. Skipping straight to the helper would add a UI step to the
+  fast path that most installs never need, for a grant the OS dialog
+  could have handled in one click.
+- If violated: a user on a brand-new install sees the helper window
+  before ever getting the one-click native dialog, on every run.
+
+### PINV-58: the helper never requests a TCC grant of its own
+
+- Always: the helper process never calls `AXIsProcessTrustedWithOptions`
+  with a prompting option, `CGRequestScreenCaptureAccess`, or
+  `request_automation`, for itself. It only reads deep-link anchors and
+  drives the drag/wait UI.
+- Because: giving the helper its own prompting path would create a
+  fourth permission a user has to reason about, on top of Polarize's own
+  Accessibility, Screen Recording, and Automation. Since PINV-66, the
+  helper also shares Polarize's own `CFBundleIdentifier`. Whether that
+  makes a helper-triggered prompt land on Polarize's real grant is
+  unverified either way (see PINV-56). That makes this rule matter
+  more, not less. An unplanned prompt from the helper is now a real
+  risk to Polarize's own grant state, not a contained mistake confined
+  to an unrelated identity.
+- If violated: macOS shows a consent dialog triggered from inside the
+  helper, for a grant no user action asked for, at a moment the guided
+  flow never intended to interrupt with one.
+
+### PINV-59: a drag payload always names Polarize's own bundle, resolved from Polarize's own running process
+
+- Always: the drag source's pasteboard writer resolves the dragged app
+  URL from `polarize_macos::setup_helper::own_bundle_path` — resolved
+  from `apps/polarize`'s own running process, carried to the helper as
+  an explicit `--for-bundle` argv flag. It never assumes, derives, or
+  falls back to wherever the helper's own executable happens to be
+  running from.
+- Because: since PINV-66, the helper is no longer a separate `.app`
+  with a different bundle identity. It is a loose sibling executable
+  inside `Polarize.app` itself, sharing Polarize's own
+  `CFBundleIdentifier`. Resolving "its own location" would likely now
+  give the same answer as resolving Polarize's. This invariant
+  predates that merge. It stays in place anyway. It is a stricter,
+  more explicit contract than "happens to resolve the same." It costs
+  nothing to keep. It would still hold even if a future change
+  separated the two identities again.
+- If violated: the user drags an icon that looks right, System Settings
+  shows a new list entry, and the drop feels successful — but it grants
+  whatever the helper's own executable location happened to resolve
+  to, not the value `polarize` itself computed and handed over.
+
+### PINV-60: only Accessibility and Screen Recording ever get a drag gesture
+
+- Always: the helper's drag-source view is shown only for the
+  Accessibility and Screen Recording panes. For Automation, the helper
+  opens the pane, tracks its window, and waits — it never offers a
+  drag target.
+- Because: the Automation pane holds a per-target-app authorization
+  matrix, not a list an app bundle can be dropped into. Automation's
+  real grant mechanism is `applescript.rs`'s real script send (PINV-44,
+  PINV-51), not a pasteboard drop.
+- If violated: a user drags Polarize's icon onto the Automation pane,
+  nothing meaningful happens on the OS side, and the user has no way to
+  tell whether the drop worked.
+
+### PINV-61: the Rust process, never the helper, decides when `--request-permissions` completes
+
+- Always: `apps/polarize`'s bootstrap command decides its own exit — a
+  closed, killed, or ignored helper window never blocks it from
+  finishing and printing its final report.
+- Because: the helper is a launched child UI; a user is free to close
+  it, or it could fail to launch at all. The command's job — report the
+  real permission state — does not depend on that window's lifecycle.
+- If violated: `polarize --request-permissions` hangs, waiting on a
+  window the user already dismissed, with no way to finish from the
+  terminal alone.
+
+### PINV-62: the helper can locate and track System Settings before Polarize holds its own Accessibility grant
+
+- Always: the helper's window-tracking always has a path that needs no
+  Accessibility grant — reading System Settings' bounds via
+  `CGWindowListCopyWindowInfo` — before it may fall back to that path's
+  own upgrade, an `AXObserver`, which does need Accessibility already
+  granted.
+- Because: Accessibility is one of the permissions this helper exists
+  to help grant. A tracking mechanism that itself required Accessibility
+  first would make the very first permission ungrantable through this
+  flow.
+- If violated: the helper fails to open, or opens with no window to
+  float over, on the one run where Accessibility is the permission
+  actually being requested.
+
+### PINV-63: an unrecognized deep-link pane never crashes or hangs the helper
+
+- Always: if an `x-apple.systempreferences:` anchor fails to resolve to
+  a known pane, the helper falls back to the top-level Privacy &
+  Security pane plus on-screen text instructions. It never crashes,
+  hangs, or shows a blank window with no path forward.
+- Because: System Settings' internal pane anchors are undocumented and
+  drift across macOS versions. A hardcoded anchor list will eventually
+  miss a future OS.
+- If violated: on some future macOS version, `--request-permissions`
+  opens a broken or blank helper window, and the user has no fallback
+  path at all.
+
+### PINV-64: no helper process outlives the `--request-permissions` invocation that spawned it
+
+- Always: the helper is always a child process of the `polarize
+  --request-permissions` invocation, and that invocation always
+  terminates its helper child before the command itself exits —
+  success, timeout, or user-cancel alike. On the grant path (PLZ-9),
+  the parent may first send `SIGUSR1` as a courtesy notification and
+  sleep for a bounded grace period, but the following `SIGKILL` still
+  always runs, unconditionally, on every path.
+- Because: an orphaned helper would keep floating a window over System
+  Settings, or keep holding a drag target open, after the command that
+  explains its purpose has already ended. A courtesy notification that
+  could ever substitute for the kill would reopen exactly that risk for
+  a helper binary that never reacts to it.
+- If violated: a stray helper process or window survives after
+  `--request-permissions` exits, confusing a later, unrelated System
+  Settings session.
+
+### PINV-65: the terminal's reported state and whatever the helper displayed always come from the same single read
+
+- Always: exactly one permission-state read — the one `apps/polarize`'s
+  own process performs — backs both the terminal's final report and the
+  moment the helper closes. The helper never performs an independent
+  status read that could disagree with it. On the grant path (PLZ-9),
+  the helper's own success frame is driven by that same read too: the
+  parent only ever sends `SIGUSR1` from inside the `AllGranted` branch,
+  after the same poll that already decided the terminal's own "All
+  requested permissions are now granted" report — never from a second,
+  independent check.
+- Because: PINV-56 already establishes the helper cannot correctly read
+  Polarize's own grant state on its own. A second, independent read
+  anywhere in this flow reintroduces the same disagreement risk
+  PINV-56 rules out for the helper specifically.
+- If violated: a user sees the helper close on "Granted", then reads a
+  "still not determined" result in the terminal from the same run, or
+  the reverse. Before PLZ-9, a narrower version of this also held: the
+  helper's last visible frame still said "still needs" right up to the
+  moment it was killed, even on a run whose terminal went on to report
+  success — a mismatch between the last frame shown and the report
+  printed, from the very same read.
+
+### PINV-66: `PolarizeSetupHelper` shares Polarize's own bundle identity, and signs one arch at a time before the outer bundle seals
+
+`PolarizeSetupHelper` originally nested as its own `.app`, under
+`Contents/Resources/`, with its own separate `CFBundleIdentifier`.
+Rejected on live review: a user browsing Finder or a Privacy & Security
+pane saw two different apps, "Polarize" and "PolarizeSetupHelper",
+where only one was ever meant to be visible. This invariant now
+describes the merged, single-bundle layout that replaced it.
+
+- Always: `justfile`'s `bundle-app` builds `PolarizeSetupHelper` for
+  exactly one architecture. `helper_arch` sets it, translated from
+  `arch()`'s own output or overridden by the caller. It is never a
+  universal binary. The build places it as a loose Mach-O binary
+  directly in `Polarize.app`'s own `Contents/MacOS/`, beside
+  `polarize`. It never sits inside a nested `.app` of its own. It
+  signs first, carrying `--identifier com.officialunofficial.polarize`
+  explicitly. That is the exact identifier `polarize`'s own bundled
+  `Info.plist` carries. The outer `Polarize.app` signs last.
+  `.github/workflows/build-notarized-app.yml`'s release re-sign step
+  follows the same order. It adds `--timestamp` to the helper binary
+  before the outer bundle. `build-helper` fails with a clear error,
+  rather than skipping silently, when no Swift toolchain is on `PATH`.
+- Because: a loose Mach-O binary gets no `CFBundleIdentifier` merely
+  from sitting inside a bundle. This differs from the one executable
+  an `Info.plist` actually names via `CFBundleExecutable`. That one
+  executable does inherit the Info.plist's identity automatically at
+  sign time. Confirmed live, in a throwaway test bundle: signing a
+  loose sibling executable with no `--identifier` gives it an
+  unstable, content-hash-derived identifier instead (`helper-<hash>`).
+  That identifier is not `polarize`'s own. Passing `--identifier`
+  explicitly is what makes the two binaries carry the same identity.
+  LaunchServices, TCC, and System Settings then all resolve them to
+  one app. Confirmed live, same test: signing the outer bundle
+  afterward does not clobber the helper's separately-set signature.
+  `codesign --verify --deep --strict` on the outer bundle does walk
+  into and validate a loose sibling executable, the same way it would
+  a nested bundle. An explicit second `codesign -dv` check on the
+  helper binary is still worth keeping in `verify-bundle`, though.
+  `--deep` alone confirms the signature is valid. It does not confirm
+  the signature carries the identifier this invariant requires. A
+  notarization submission needs a secure timestamp on every signed
+  piece of code it contains, the helper included, not only the outer
+  bundle. PINV-54 already commits `Polarize.app` itself to one bundle
+  per target triple, never a `lipo` universal binary. This invariant
+  extends that same commitment to the helper binary.
+- If violated: `just verify-bundle`'s `codesign -dv` identifier check
+  on the helper binary fails locally. Or the helper shows up as a
+  separately-named, separately-iconed app in Finder or a Privacy &
+  Security pane again. Or a release's notarization submission is
+  refused for a helper binary missing a secure timestamp. Or a
+  contributor's build fails opaquely with no Swift toolchain installed,
+  instead of a clear, actionable error.
+
+The four invariants below (PINV-67 through PINV-70) came out of a live
+HIG and Liquid Glass polish pass on the helper, after this document's
+own PLZ-3 chain. All four were confirmed live, on a real macOS 27
+session, not merely reasoned about.
+
+### PINV-67: `NSButton.bezelStyle` never uses `.glass`, anywhere in the helper
+
+- Always: no button in `apps/setup-helper` sets `bezelStyle = .glass`.
+  `ChecklistWindow`'s Allow button uses `.rounded` unconditionally, on
+  every macOS version.
+- Because: `.glass` exists in the macOS 27 SDK, but rendered as plain
+  text with no button chrome at all, confirmed live. Several Apple
+  Developer Forums threads (FB20272917, FB20517174) confirm the same
+  unreliability this OS cycle. Apple's own "Implementing Liquid Glass
+  Design" AppKit guidance never sets this property either. Its real
+  pattern composites a separate `NSGlassEffectView` behind a plain
+  button's content instead.
+- If violated: a button silently loses all its chrome — no visible
+  border, no fill, nothing to mark it as clickable — while still
+  functioning normally when clicked, which makes the regression easy
+  to miss in code review and hard for a user to notice as a bug rather
+  than a design choice.
+
+### PINV-68: a transparent title bar always pairs with `.fullSizeContentView`
+
+- Always: any window in the helper that sets
+  `titlebarAppearsTransparent = true` also carries
+  `.fullSizeContentView` in its `styleMask`. `ChecklistWindow` does
+  both together, never one without the other.
+- Because: without `.fullSizeContentView`, the content view stops
+  below the title bar's real height. That strip then goes unfilled by
+  whatever material backs the content below it.
+- If violated: a visible, disconnected gap sits above the traffic
+  lights — confirmed live, caught in a screenshot, matching this exact
+  cause before the fix landed.
+
+### PINV-69: the guide screen's Next button stays hidden until a drag has been attempted, whenever a drag is offered
+
+- Always: `AppIconDragView.onDragCompleted` fires once, when a drag
+  session ends, whether or not the drop actually granted anything.
+  `main.swift`'s guide screen wires this to reveal its Next button,
+  starting hidden, only once that fires. A guide screen with no drag
+  view at all (Automation's) never hides Next in the first place —
+  there is nothing to gate on there.
+- Because: a live report found the Next button let the user skip past
+  a permission's guide screen before even trying the one gesture that
+  screen exists to teach. Gating on a completed attempt, not a
+  successful one, keeps this rule inside PINV-56's boundary: the
+  helper still never reads or claims to know the real grant state,
+  only whether the user tried the drag.
+- If violated: a user can tab through every permission's guide screen
+  via Next without ever attempting the drag on any of them, defeating
+  the guide screen's own purpose.
+
+### PINV-70: a checklist row's icon always tries System Settings' own artwork before an SF Symbol
+
+- Always: `PermissionIcon.resolve(for:)` looks up
+  `PermissionChecklistItem.graphicIconUTI` via `UTType(_:)` and
+  `NSWorkspace.shared.icon(for:)` first. It falls back to
+  `symbolName`, an SF Symbol, only when that UTI is `nil` or not
+  declared on the running macOS version. The real System Settings
+  artwork is never tinted; the SF Symbol fallback always is, via
+  `PermissionIcon.Resolved.isSymbol`.
+- Because: the `com.apple.graphic-icon.*` UTIs are the same public API
+  System Settings' own Security & Privacy extension uses, confirmed
+  live to render pixel-identical icons for Accessibility, Screen
+  Recording, and Automation. No private framework and no path into
+  System Settings' own app bundle are involved. The UTIs themselves are
+  undocumented system identifiers, though, so a future macOS could stop
+  declaring one.
+- If violated: a checklist row either shows the wrong artwork (a
+  full-color system icon incorrectly tinted, muddying its real colors)
+  or silently loses the exact-match icon entirely on some future macOS
+  version, with no fallback path forward.
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -3107,3 +3479,361 @@ without limit.
   successful capture, and one repeat of the original window-scoped
   `screenshot` call that hung. That repeat should now either succeed
   or fail within ten seconds, never hang.
+
+PLZ-4 built the helper's own empty-window skeleton; PLZ-5 built the
+Rust side that triggers, launches, and owns the helper's lifecycle;
+PLZ-6 built the helper's deep-link pane mapping and fallback selection
+in `SetupHelperCore`; PLZ-7 built the helper's window tracking —
+`SetupHelperCore`'s `WindowTracking.swift` (pure) and
+`PolarizeSetupHelper`'s `WindowTracker.swift` (the real
+`CGWindowListCopyWindowInfo`/`AXObserver` wiring) — plus the
+non-activating floating `NSPanel` in `main.swift`; PLZ-8 built the
+helper's drag gesture — `SetupHelperCore`'s `DragPayload.swift` (pure)
+and `PolarizeSetupHelper`'s `DragSourceView.swift` (the real
+`NSDraggingSource`/`NSPasteboardWriting` wiring); PLZ-9 built the
+grant-path success state — `polarize_core::bootstrap`'s
+`notify_all_granted`/`GRANT_SUCCESS_GRACE_MS` (pure, the `AllGranted`
+branch only), `polarize_macos::setup_helper::HelperProcess`'s real
+`SIGUSR1` send (the `HelperChild` implementation), and
+`SetupHelperCore`'s `SuccessPlan.swift` (pure) wired to a real
+`DispatchSource`/`exit` pair in `main.swift`. PLZ-10 mapped Automation
+to its own pane in `SetupHelperCore`'s `PermissionPane.swift`
+(`SettingsPane.automationURLString`) and rewrote `DragPayload.swift`'s
+`DragSourcePlanner` to reject Automation by an explicit
+`NeededPermission.supportsDragGrant` rule rather than by
+`SettingsPane.urlString` returning `nil` for it — that `nil` no longer
+holds. PINV-56, 57, 61, and
+64 are enforced below by real `cargo test` runs today; 65 follows from
+56 and 61 by construction. PINV-63 is now enforced at the logic level by
+`SetupHelperCoreTests`, run in CI's `swift test` step; whether each
+anchor (Accessibility, Screen Recording, and, since PLZ-10, Automation)
+and the fallback pane actually open the right pane on a real,
+current macOS version still needs a live session (see PINV-63's own
+entry below). PINV-62 is now enforced at the logic level too, by
+`WindowTrackingTests` (see its own entry below); PINV-59 and PINV-60 are
+now enforced at the logic level too, by `DragPayloadTests` (see their
+own entries below).
+
+**Post-PLZ-3 redesign (2026-08-30, live-driven).** Running the actual
+built helper on a real Mac surfaced both real bugs (see PINV-59's and
+PINV-62's entries below for the six found and fixed that session) and
+a real UX gap the original PLZ-3 design did not anticipate: a single
+floating panel, opened directly at launch, gave no overview when more
+than one permission was missing and no way to move between them except
+by chance. The helper now shows two screens in sequence, modeled on
+OpenAI Codex's own onboarding: `ChecklistWindow` — a real titled,
+closable, keyable window (unlike everything else here, it has nothing
+to coexist with on screen yet, so it behaves like an ordinary window)
+listing every needed permission with an "Allow" button — opens first;
+tapping Allow for one permission opens its pane and shows the same
+non-activating `FloatingHelperPanel` PLZ-6 through PLZ-10 already
+built, now carrying a "N of M" progress line and Previous/Next buttons
+that step through the rest of the list directly, plus a "‹ Back"
+button back to the checklist. None of PINV-56 through PINV-65 changed
+in substance — the same pure `SetupHelperCore` mapping, drag, tracking,
+and lifecycle logic now just gets invoked once per permission instead
+of once for the whole set at launch. One new, real bug from this
+change: `applicationShouldTerminateAfterLastWindowClosed` returning
+`true` — correct for PLZ-4's single-panel design — quietly terminated
+the whole helper the moment `ChecklistWindow` was ordered out to show
+the guide panel, because `FloatingHelperPanel` does not count toward
+AppKit's own "last window closed" bookkeeping the way an ordinary
+window does. Fixed by returning `false` unconditionally: this process
+already terminates itself explicitly on every path (the success
+signal's `exit(0)`, or the parent's own `SIGKILL` per PINV-61/64), so
+it never needed that heuristic.
+
+- **PINV-56** — enforced by
+  `polarize_core::bootstrap::tests::helper_args_never_carries_a_status_or_result_field`
+  (`crates/polarize-core/src/bootstrap.rs`): `NeededPermission` and
+  `helper_args` carry only permission names, an Automation target, and
+  (since PLZ-8) Polarize's own bundle path behind a `--for-bundle` flag
+  — there is no field anywhere in the helper's launch argv for a
+  self-reported status to occupy. The underlying OS-documented claim
+  that `AXIsProcessTrusted`/`CGPreflightScreenCaptureAccess` answer for
+  the calling process alone is still not something this repo can
+  exercise in CI; `polarize_macos::permission_bootstrap::check_accessibility`/
+  `check_screen_recording` read it only from `apps/polarize`'s own
+  process, never the helper's, by construction — the helper process
+  calls no such API at all (PINV-58).
+- **PINV-57** — enforced by `polarize_core::bootstrap::tests::needed_permissions_*`
+  (`crates/polarize-core/src/bootstrap.rs`): `apps/polarize/src/main.rs`'s
+  `request_permissions` calls the three real-prompt functions first,
+  unconditionally, then feeds their results into `needed_permissions`;
+  a "granted after the real prompt" result yields an empty needed set,
+  which `request_permissions` returns on without ever calling
+  `launch_helper_and_wait`. No live session needed for this part.
+- **PINV-58** — re-inspected for PLZ-6 and PLZ-7:
+  `apps/setup-helper/Sources/PolarizeSetupHelper/main.swift` now calls
+  `NSWorkspace.shared.open` on a System Settings URL, and the rule
+  still holds — opening an app is not a TCC-prompting API, so this
+  adds no `AXIsProcessTrustedWithOptions`, `CGRequestScreenCaptureAccess`,
+  or Apple Event send. PLZ-7's `WindowTracker.swift` adds exactly one
+  more permission-adjacent call: a single, non-prompting
+  `AXIsProcessTrusted()` read (never
+  `AXIsProcessTrustedWithOptions` with a prompting option), used only
+  to pick `TrackingStrategyPicker`'s branch. It reads the *helper's
+  own* trust — never Polarize's, so PINV-56 stays satisfied — and its
+  result is never shown to the user as any kind of grant state, only
+  used internally to choose a tracking mechanism, so it prompts nothing
+  and requests nothing (PINV-58 itself stays satisfied). `SetupHelperCore`
+  itself still imports only `Foundation`, not AppKit, and calls no
+  permission API at all. PLZ-8's `DragSourceView.swift`
+  (`apps/setup-helper/Sources/PolarizeSetupHelper/DragSourceView.swift`)
+  adds `NSPasteboard` writing and `NSWorkspace.shared.icon(forFile:)` —
+  neither is TCC-adjacent, so PINV-58 stays satisfied there too.
+  Re-inspected again for PLZ-9: `main.swift`'s new
+  `installSuccessSignalHandler` calls `signal(SIGUSR1, SIG_IGN)` and
+  `DispatchSource.makeSignalSource(signal:queue:)` — a POSIX signal
+  registration and a GCD dispatch source, neither one a permission API
+  of any kind — and its handler calls only `NSPanel.contentView`,
+  `DispatchQueue.main.asyncAfter`, and `exit(0)`. `SetupHelperCore`'s
+  `SuccessPlan.swift` stays a plain `Foundation`-only module with two
+  constants and no API call at all. PINV-58 stays satisfied. A
+  link-time/XCTest check that the helper binary calls no *prompting*
+  permission API, and a live-session confirmation that no consent
+  dialog appears for its own bundle identity, remain open.
+- **PINV-59** — enforced at the logic level by `DragPayloadTests`
+  (`apps/setup-helper/Tests/SetupHelperCoreTests/DragPayloadTests.swift`):
+  `DragPayload.init?(bundlePath:)` structurally rejects any path
+  naming, or nested inside, `PolarizeSetupHelper.app` — the one bundle
+  identity the drag must never carry — and every one of the four
+  pasteboard representations (`public.file-url`, `public.url`,
+  `NSFilenamesPboardType`, `public.utf8-plain-text`) is asserted to
+  resolve back to the exact bundle path the payload was built with.
+  `polarize_macos::setup_helper::own_bundle_from_exe_path` (Rust) is
+  covered by its own tests resolving `Polarize.app`'s path from the
+  running process, never the helper's.
+
+  **Live-verified 2026-08-29, against a real signed `dist/Polarize.app`
+  on a real macOS session**, after fixing four real bugs the unit tests
+  above could not catch, because they are all AppKit wiring, not pure
+  logic: (1) `AppIconDragView`'s `mouseDragged` override never fired,
+  because hit-testing resolved to the child `NSImageView`/caption
+  label, not the container — fixed with a `hitTest` override that
+  claims the whole view. (2) the panel's non-key window swallowed the
+  very first click as a mere activation click — fixed with
+  `acceptsFirstMouse(for:) -> true`. (3) even with both of those fixed,
+  the drag still failed to initiate: `dragView`'s own layout constraints
+  never pinned its leading/trailing edges, so its real hit-testable
+  frame was ambiguous and resolved far smaller than where its subviews
+  visually drew (`NSView` does not clip to bounds by default) — fixed
+  by adding explicit leading/trailing constraints. (4) the panel stayed
+  frontmost and mouse-opaque through the whole drag, risking
+  intercepting the drop meant for System Settings underneath it —
+  fixed by adding `NSDraggingSource.draggingSession(_:willBeginAt:)`/
+  `endedAt:operation:)` that make the panel mouse-transparent and order
+  it behind other windows for the duration, plus suspending
+  `WindowTracker` so its polling timer (scheduled in `.common` run-loop
+  mode, which includes the drag's own event-tracking mode) cannot
+  reposition the panel mid-drag. This last pattern is modeled directly
+  on the open-source reference `jaywcjlove/PermissionFlow`'s
+  `AppDragSourceView.onDragStateChange` /
+  `FloatingDropPanel.setDraggingPassthrough`. A fifth, separate live
+  finding in the same session: `NSWorkspace.shared.icon(forFile:)`
+  returned a generic, low-resolution icon for this freshly built,
+  LaunchServices-unindexed bundle — fixed by loading the bundle's own
+  `CFBundleIconFile` directly from `Contents/Resources/` instead
+  (`SetupHelperCore.BundleIconResolver`, covered by
+  `IconResolutionTests`; the direct-vs-`NSWorkspace` size/representation
+  difference was confirmed with a standalone script against the real
+  bundle before writing the fix). With all five fixed, a human
+  confirmed live: the icon renders correctly and the drag now visually
+  initiates and completes. **Not yet independently confirmed**: that the drop actually adds Polarize's row to System
+  Settings' Accessibility/Screen Recording list and flips the real TCC
+  grant (`AXIsProcessTrusted`/`CGPreflightScreenCaptureAccess` reading
+  `true` afterward) — the live check so far confirms the drag mechanism
+  works, not the end TCC outcome.
+- **PINV-60** — since PLZ-10 mapped Automation to its own pane,
+  `SettingsPane.urlString` no longer returns `nil` for it, so the
+  composed-by-construction argument this entry used to make no longer
+  holds. `DragSourcePlanner.payload` now switches explicitly on the
+  outcome's own permission, via `NeededPermission.supportsDragGrant`
+  (`true` only for Accessibility and Screen Recording), and this is
+  enforced at the logic level by two groups of tests in
+  `DragPayloadTests`
+  (`apps/setup-helper/Tests/SetupHelperCoreTests/DragPayloadTests.swift`):
+  `testPayloadIsNilForAnOpenedAutomationPaneEvenWithARealURL` and
+  `testPayloadIsNilForAFallenBackAutomationPaneEvenWithARealURL`
+  construct an `.openedPane`/`.fellBackToInstructions` outcome carrying
+  Automation's real, non-nil anchor and assert `nil` payload directly —
+  the regression test for the exact case the old composed argument
+  could no longer cover. `testDragPayloadNonNilOnlyForAccessibilityOrScreenRecordingOutcomes`
+  stays a table-driven test over every `NeededPermission` case
+  `LaunchPlanner` can be asked to route, updated for PLZ-10: Automation
+  paired ahead of a draggable permission (`[.automation, .accessibility]`)
+  now expects no payload, because strict argv order (`LaunchPlanner`'s
+  own rule, see its doc comment and PLZ-10's open question 1) opens the
+  Automation pane first, and Automation never supports a drag
+  regardless of pane order. Whether the real TCC grant actually flips
+  after a live drop — confirmed with
+  `AXIsProcessTrusted`/`CGPreflightScreenCaptureAccess` read from
+  Polarize's own process — needs a live session.
+- **PINV-61** — enforced by
+  `polarize_core::bootstrap::tests::a_helper_that_never_exits_still_returns_bounded_by_the_deadline_and_is_terminated`
+  and the other `wait_for_grants_or_close` tests
+  (`crates/polarize-core/src/bootstrap.rs`), against a fake
+  `HelperChild`: the wait loop always returns within its deadline and
+  always calls `terminate` before returning, regardless of whether the
+  child ever exits on its own.
+- **PINV-62** — enforced at the logic level by `WindowTrackingTests`
+  (`apps/setup-helper/Tests/SetupHelperCoreTests/WindowTrackingTests.swift`):
+  `SettingsWindowLocator.pick` matches by owner PID, layer, and
+  on-screen state alone — never by title, so it needs no Screen
+  Recording grant either — and is covered against decoy windows on
+  other PIDs, higher layers, and off-screen; `PanelFramePlanner.frame`'s
+  CG-to-Cocoa y-flip and its tracking of a moved/resized window are
+  covered with concrete numbers; `TrackingStrategyPicker.pick` is
+  covered on both branches. `WindowTracker.swift`
+  (`apps/setup-helper/Sources/PolarizeSetupHelper/WindowTracker.swift`)
+  wires that logic to the real `CGWindowListCopyWindowInfo` polling
+  path (needs no permission) and an `AXObserver` upgrade path (needs
+  the *helper's own* Accessibility trust, which this feature has no way
+  to grant — see the PLZ-7 plan's risk note 2 — so it stays reachable
+  only if a user separately grants the helper's own bundle
+  Accessibility by hand).
+
+  **Live-verified 2026-08-29**: `CGWindowListCopyWindowInfo` polling
+  does genuinely return System Settings' real window bounds with no
+  grant at all, and the panel does float above System Settings without
+  stealing focus. One real bug found live and fixed: `PanelFramePlanner.frame`
+  never clamped its result to the screen's own bounds (it did not even
+  take a `screenWidth` parameter, so it structurally could not clamp
+  horizontally) — a Settings window positioned close enough to a
+  screen's trailing or top edge placed the panel partly or fully
+  off-screen. Fixed by clamping both `frame` and `fallbackFrame` to
+  `[edgeMargin, screenWidth/Height - edgeMargin]` on each axis, covered
+  by two new `WindowTrackingTests` cases. Still needs a real macOS
+  session: whether the panel actually follows a *live* moved/resized
+  System Settings window smoothly, frame by frame, rather than the
+  static-bounds check already confirmed above.
+- **PINV-63** — the fallback-selection logic (an `open` call reporting
+  failure → the top-level pane plus on-screen instructions) is enforced
+  by `SetupHelperCoreTests.testOpenReturningFalseTriggersExactlyOneFallbackAttempt`
+  and, since PLZ-10, its Automation-anchor counterpart
+  `testAutomationAnchorFailingToOpenTriggersExactlyOneFallbackAttempt`
+  (`apps/setup-helper/Tests/SetupHelperCoreTests/PermissionPaneTests.swift`):
+  a fake `open` closure returning `false` for the mapped pane always
+  triggers exactly one further call, with the fallback URL string, and
+  `main.swift` always renders plain instruction text alongside it, so
+  the window is never blank. This enforcement covers only "the mapped
+  `open` call reported failure" — System Settings often opens
+  *somewhere* even for a bad anchor, returning `true`, so true
+  wrong-pane detection still needs PINV-62's window tracking. Whether
+  each anchor — Accessibility, Screen Recording, and, since PLZ-10,
+  Automation (`Privacy_Automation`, unverified on any live macOS session
+  as of this writing) — and the fallback pane actually open the right
+  pane on a real, current macOS version still needs a live session,
+  re-checked on each new macOS release.
+- **PINV-64** — enforced at logic level by the same `wait_for_grants_or_close`
+  tests as PINV-61, plus
+  `polarize_macos::setup_helper::tests::terminate_kills_and_reaps_a_real_child_process_that_never_exits_on_its_own`
+  (`crates/polarize-macos/src/setup_helper.rs`), a real-process
+  integration test: it spawns `/bin/sleep 1000` through the same
+  `HelperChild` implementation `apps/polarize` uses, calls `terminate`,
+  and asserts the process is no longer running afterward. `polarize`
+  spawns the helper directly with `std::process::Command`, never
+  through `open`/`NSWorkspace`, specifically so it stays this
+  process's real child (see `setup_helper.rs`'s module doc comment).
+  `Child::kill` is still `SIGKILL`, unconditionally, on every path.
+  PLZ-9 replaces the old bare-SIGKILL teardown (previously this entry's
+  own noted "residual gap for a later helper with real UI") with a
+  grace-bounded `SIGUSR1`-then-`SIGKILL` reality on the grant path
+  only: `all_granted_notifies_before_terminating_and_sleeps_for_exactly_one_grace_period`
+  and `notify_all_granted_signals_a_real_child_that_has_no_handler_installed`
+  (`crates/polarize-macos/src/setup_helper.rs`) confirm `SIGUSR1`'s
+  default disposition terminates a real child with no handler
+  installed — so a stale helper binary still dies — and that
+  `terminate`'s `SIGKILL` still runs, unconditionally, right after. A
+  real AppKit helper actually tearing down on `SIGUSR1` (as opposed to
+  a bare `/bin/sleep` stand-in with no handler), and the Ctrl-C/
+  user-cancel path (a directly spawned child shares the parent's
+  foreground process group, so `SIGINT` reaches it too, but this is
+  unverified against a real terminal session), still need a live macOS
+  session.
+- **PINV-65** — holds by construction, now that both 56 and 61 are
+  enforced: `wait_for_grants_or_close`'s own `WaitResult` is built from
+  the same `poll` call that decided the loop's outcome (checked before
+  `still_running` on every iteration — see
+  `a_grant_observed_after_the_helper_already_exited_still_reports_all_granted`),
+  and `apps/polarize/src/main.rs` prints its final report straight from
+  that `WaitResult`, never from a second read. PLZ-9 additionally
+  enforces the grant-path frame the helper shows before it closes:
+  `all_granted_notifies_before_terminating_and_sleeps_for_exactly_one_grace_period`
+  confirms `notify_all_granted` runs only from inside the `AllGranted`
+  branch, ordered strictly before `terminate`, from that exact same
+  `poll` read; `helper_exited_never_calls_notify_all_granted` and
+  `timed_out_never_calls_notify_all_granted` confirm the other two
+  outcomes never send it, so a helper that never actually saw every
+  permission land can never flash a false success frame
+  (`crates/polarize-core/src/bootstrap.rs`). No independent test is
+  needed beyond PINV-56's and PINV-61's own coverage. Outstanding for a
+  live macOS session (AC 4 in the PLZ-9 plan): confirming, on a real
+  run, that toggling Accessibility and Screen Recording by hand in
+  System Settings actually drives the helper's window through this
+  exact success frame before it closes, and does not, for example,
+  leave the panel blank or frozen for the grace window. PLZ-10 adds the
+  same open question for Automation specifically: whether toggling a
+  target app's row in the Automation pane by hand actually flips
+  `check_automation`'s non-prompting `AEDeterminePermissionToAutomateTarget`
+  read to `Permitted`, driving this same success frame and close. Two
+  more items are outstanding for a live macOS session, per the PLZ-10
+  plan's own risk notes: whether `Privacy_Automation` actually resolves
+  to the Automation pane at all (a wrong anchor degrades gracefully via
+  PINV-63's fallback, but the acceptance criterion "opens the Automation
+  pane" then fails silently, since `open` often still returns `true` for
+  a bad anchor); and whether Polarize's row for the launch's own target
+  app is actually visible in that pane by the time the helper opens it —
+  `request_permissions` runs the real Apple Event send
+  (`request_automation`) before ever launching the helper, so TCC should
+  already hold a recorded decision, but this is unverified in this
+  sandboxed run.
+- **PINV-66** — **Live-verified 2026-08-30**, on a real signed
+  `dist/Polarize.app`, rebuilt fresh with `rm -rf dist/Polarize.app &&
+  just verify-bundle`. `codesign -dv` on both
+  `Contents/MacOS/polarize` and `Contents/MacOS/PolarizeSetupHelper`
+  showed the exact same `Identifier=com.officialunofficial.polarize`.
+  `codesign --verify --strict --deep` passed against the assembled
+  bundle. `open -Ra` resolved it as one LaunchServices entry. The
+  identifier-sharing mechanism itself was also confirmed live
+  beforehand, in a disposable throwaway test bundle built and signed
+  by hand outside `dist/`. A loose sibling binary needs an explicit
+  `--identifier` at sign time. A later outer-bundle sign does not
+  clobber it. `just check-quoting` and `cargo fmt`/`clippy`/`cargo test
+  --workspace` all passed clean on the same pass. **Not re-verified
+  this pass**: `helper_arch` was not overridden to `x86_64` this
+  session — only the local `arm64` build ran. The underlying
+  mechanism (`--identifier` at sign time) is architecture-independent.
+  That makes this a lower-risk gap than before. It is still an open
+  gap, though, not a confirmed one. **Not automated**: the real Developer ID
+  `--timestamp` re-sign in `build-notarized-app.yml`, and the
+  notarization submission that depends on it, still need a real tagged
+  release to verify end to end — the same gap PINV-54 already names
+  for the outer bundle.
+
+- **PINV-67** — not automatable: no test can assert what a real
+  `NSButton`'s rendered chrome looks like on screen. Enforced instead
+  by a live check on a real macOS 27 session: `grep -rn
+  "bezelStyle = .glass"` across `apps/setup-helper/Sources` returns no
+  matches, and the Allow button's `.rounded` bezel was confirmed to
+  render its normal chrome.
+- **PINV-68** — not automatable, same reason: window-chrome rendering
+  needs a real macOS session to observe. Confirmed live on macOS 27: a
+  screenshot before the fix showed the gap this invariant names; a
+  screenshot after showed the traffic lights sitting directly on the
+  vibrant content, with no gap.
+- **PINV-69** — the gating logic is enforced at the logic level: a
+  fresh XCTest-free check is impractical here since it lives entirely
+  in `apps/setup-helper/Sources/PolarizeSetupHelper` (the AppKit-glue
+  target, which carries no test target — see the module's own
+  Testing-harness note). Confirmed live instead: a fresh guide screen
+  with a drag view shows no Next button until a drag is attempted, and
+  Automation's guide screen (no drag view) shows Next immediately.
+- **PINV-70** — the fallback-selection logic (`graphicIconUTI` present
+  and declared → real icon; otherwise → SF Symbol) is a pure
+  conditional inside `PermissionIcon.resolve(for:)`, but that function
+  itself calls real `UTType`/`NSWorkspace` APIs and lives in the
+  AppKit-glue target, so it has no automated test today — a real GAP,
+  not merely a live-session limitation. Confirmed live instead: all
+  three resolved icons matched System Settings' own artwork exactly,
+  on a real macOS 27 session.

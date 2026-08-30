@@ -89,13 +89,26 @@ jobs:
       # `just bundle-app` signs without `--timestamp` — correct for a
       # local, self-signed `polarize-dev` build (see justfile), where
       # a secure timestamp buys nothing. A notarizable release build
-      # needs one, so this step re-signs afterward with it added.
+      # needs one on every signed piece of code, the helper included,
+      # so this step re-signs both afterward with it added. The helper
+      # binary re-signs first, carrying `--identifier` explicitly —
+      # Polarize's own identifier. It is a loose sibling executable in
+      # `Contents/MacOS/`, not a nested bundle with an `Info.plist` of
+      # its own to read one from. The outer bundle signs last. See
+      # PINV-66 in docs/INVARIANTS.md.
       - name: Assemble and sign Polarize.app
         run: |
+          HELPER_ARCH=$([ "${{ matrix.target }}" = "aarch64-apple-darwin" ] && echo arm64 || echo x86_64)
           just bin=target/${{ matrix.target }}/release/polarize \
-            identity="$CODESIGN_IDENTITY" bundle-app
+            identity="$CODESIGN_IDENTITY" helper_arch="$HELPER_ARCH" bundle-app
+          codesign --force --sign "$CODESIGN_IDENTITY" \
+            --identifier com.officialunofficial.polarize --options runtime --timestamp \
+            dist/Polarize.app/Contents/MacOS/PolarizeSetupHelper
           codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp \
             --entitlements apps/polarize/polarize.entitlements dist/Polarize.app
+
+      - name: Verify signed bundle
+        run: codesign --verify --deep --strict dist/Polarize.app
 
       # Apple's notary service accepts a zip archive, not a bundle
       # directory directly. `--keepParent` preserves the ".app" as a

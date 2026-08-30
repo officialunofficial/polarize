@@ -2,6 +2,9 @@
 /dist
 .DS_Store
 
+# SwiftPM's build output for `apps/setup-helper`.
+.build/
+
 # `.mcp.json` is tracked, not ignored. It is the Claude Code plugin's
 # own MCP server declaration (see `.claude-plugin/plugin.json`), and
 # points at the installed `polarize` binary through PATH, not an

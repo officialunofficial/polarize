@@ -56,10 +56,36 @@ plist_template := "apps/polarize/bundle/Info.plist.in"
 # `CARGO_PKG_VERSION`.
 version := `awk -F'"' '/^version = /{print $2; exit}' Cargo.toml`
 
+# `PolarizeSetupHelper` is a second AppKit executable, built with
+# SwiftPM and signed straight into `Polarize.app`'s own
+# `Contents/MacOS/` — a loose sibling binary next to `polarize`, not a
+# nested `.app` of its own. It carries the exact same
+# `CFBundleIdentifier` as `polarize`, so LaunchServices, TCC, and
+# System Settings all see one app, not two. See PINV-66 in
+# docs/INVARIANTS.md.
+helper_pkg := "apps/setup-helper"
+helper_name := "PolarizeSetupHelper"
+helper_bin := bundle + "/Contents/MacOS/" + helper_name
+# SwiftPM's `--arch` takes Apple's short arch name (`arm64`/`x86_64`),
+# not `just`'s own `arch()` output (`aarch64`/`x86_64`), and not a Rust
+# target triple either — hence the translation instead of reusing
+# either directly. Overridable, so CI can pass the matrix arch it is
+# actually building for.
+helper_arch := if arch() == "aarch64" { "arm64" } else { "x86_64" }
+
 build:
     cargo build --workspace
     codesign --force --sign "{{identity}}" --identifier {{identifier}} --options runtime --entitlements {{entitlements}} {{bin}}
     just bundle-app
+
+# Builds `PolarizeSetupHelper` via SwiftPM, in release mode, for one
+# architecture — never a universal binary (PINV-54's rule extends to
+# this helper too, see PINV-66). Fails with a clear error, rather than
+# skipping silently, when no Swift toolchain is on PATH: `just build`
+# needs one from now on.
+build-helper:
+    command -v swift >/dev/null || { echo "error: building the setup helper needs a Swift toolchain (install Xcode or the Command Line Tools)" >&2; exit 1; }
+    swift build -c release --package-path {{helper_pkg}} --arch {{helper_arch}}
 
 # Assembles `Polarize.app`, under `dist/`. It builds a real bundle
 # directory — `Contents/{Info.plist,MacOS/polarize,Resources/Polarize.icns}`
@@ -78,11 +104,28 @@ build:
 # via `sips`. It was packed with `iconutil` last. A flat, unmasked
 # square here would show hard corners in the Dock, next to every
 # rounded system icon.
-bundle-app:
+#
+# `PolarizeSetupHelper` sits directly in `Contents/MacOS/`, beside
+# `polarize`. PLZ-3's original nested placement was rejected on live
+# review — see PINV-66. It signs first, carrying `--identifier
+# {{identifier}}` explicitly, the same identifier `polarize` itself
+# carries. A loose Mach-O binary gets no `CFBundleIdentifier` of its
+# own from the bundle's `Info.plist`, unlike the declared
+# `CFBundleExecutable`. So this must be passed by hand. Otherwise the
+# helper falls back to an unstable, content-hash-derived identifier
+# instead (confirmed live: see PINV-66). It still touches no TCC API
+# of its own (PINV-58). `--identifier` only decides how its code
+# signature reads, not what it does. The outer bundle signs last.
+# Confirmed live: that order does not clobber the helper's own
+# signature. `codesign --verify --deep` on the outer bundle still
+# walks into and validates it, exactly as it would a nested bundle.
+bundle-app: build-helper
     mkdir -p {{bundle}}/Contents/MacOS {{bundle}}/Contents/Resources
     sed 's/__VERSION__/{{version}}/' {{plist_template}} > {{bundle}}/Contents/Info.plist
     cp {{bin}} {{bundle}}/Contents/MacOS/polarize
     cp apps/polarize/bundle/Polarize.icns {{bundle}}/Contents/Resources/Polarize.icns
+    cp "$(swift build -c release --package-path {{helper_pkg}} --arch {{helper_arch}} --show-bin-path)/{{helper_name}}" {{helper_bin}}
+    codesign --force --sign "{{identity}}" --identifier {{identifier}} --options runtime {{helper_bin}}
     codesign --force --sign "{{identity}}" --options runtime --entitlements {{entitlements}} {{bundle}}
 
 # Verifies `Polarize.app` is a well-formed, LaunchServices-acceptable
@@ -92,6 +135,7 @@ verify-bundle: bundle-app
     plutil -lint {{bundle}}/Contents/Info.plist
     codesign --verify --strict --deep {{bundle}}
     codesign -dv {{bundle}} 2>&1 | grep -q "Identifier={{identifier}}"
+    codesign -dv {{helper_bin}} 2>&1 | grep -q "Identifier={{identifier}}"
     # Asks LaunchServices to resolve the bundle by identity, with no
     # launch — checkable with zero TCC grants. PINV-44 documented a
     # bare binary failing this with `-600` (`kLSApplicationNotFoundErr`)

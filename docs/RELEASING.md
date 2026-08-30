@@ -219,6 +219,52 @@ ticket with `xcrun stapler staple`. It uploads the stapled result as
 an extra release asset — alongside, not instead of, the existing
 npm/shell-installer/Homebrew channels.
 
+### The `PolarizeSetupHelper` executable
+
+`just bundle-app` also builds and signs a second executable:
+`Polarize.app/Contents/MacOS/PolarizeSetupHelper`. It is a small Swift
+AppKit app built with SwiftPM (`apps/setup-helper`). It sits beside
+`polarize` as a loose Mach-O binary, not as a nested bundle of its
+own. It guides a user through a denied Accessibility, Screen
+Recording, or Automation grant: a checklist screen lists every needed
+permission, and tapping one opens its System Settings pane with a drag
+target (Accessibility, Screen Recording) or a wait-only guide
+(Automation). See PINV-56 through PINV-66 in
+[`docs/INVARIANTS.md`](INVARIANTS.md) for the full design and what is,
+and is not, verified on a real macOS session.
+
+Three rules govern how it signs, all covered by PINV-66:
+
+- **A shared identity, set explicitly.** The helper signs first,
+  carrying `--identifier com.officialunofficial.polarize` by hand. A
+  loose Mach-O binary gets no `CFBundleIdentifier` from the bundle's
+  `Info.plist` just by sitting inside it — confirmed live. This
+  differs from the `CFBundleExecutable` that `Info.plist` actually
+  names. So the identifier must be passed on the `codesign` call
+  itself. Otherwise the helper falls back to an unstable,
+  content-hash-derived identifier instead. The outer `Polarize.app`
+  signs last. Confirmed live: that later sign does not clobber the
+  helper's own separately-set signature. LaunchServices, TCC, and
+  System Settings then all see one app, not two.
+- **A secure timestamp on both.** This job's post-build re-sign step
+  (see "Signing" above for why a timestamp matters at all) re-signs
+  the helper with `--timestamp` first, then the outer bundle, in that
+  same order. Apple's notary service checks every piece of signed code
+  inside a submission, not only the outer bundle — an un-timestamped
+  helper binary can fail notarization on its own.
+- **One helper arch per target triple, same as the outer bundle.**
+  `justfile`'s `helper_arch` variable drives SwiftPM's own `--arch`
+  flag. This job derives it from `matrix.target`
+  (`aarch64-apple-darwin` → `arm64`, `x86_64-apple-darwin` →
+  `x86_64`) and passes it through explicitly. No `lipo` merge step
+  exists for the helper, matching the outer bundle's own
+  one-bundle-per-triple rule ("Two bundles, not one universal binary"
+  below).
+
+`just build-helper` fails with a clear, actionable error — not a
+silent skip — when no Swift toolchain is on `PATH`. `just build` now
+needs one locally; see CONTRIBUTING.md.
+
 Four decisions, made by the repo owner, shape this job:
 
 - **Additional asset, not a replacement.** The bare-binary channels

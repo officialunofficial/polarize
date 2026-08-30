@@ -69,6 +69,10 @@ pub mod runloop;
 pub mod self_responsibility;
 pub mod session;
 pub mod set_value;
+/// Locating and spawning `PolarizeSetupHelper`, and the real
+/// `HelperChild` implementation the guided-permission wait loop drives.
+/// See PINV-61 through PINV-65.
+pub mod setup_helper;
 /// Runtime `dlopen`/`dlsym` resolution of `SkyLight.framework`'s private
 /// symbols. See PINV-46.
 pub mod skylight_ffi;
