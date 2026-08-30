@@ -97,7 +97,13 @@ final class ChecklistWindow: NSWindow {
         }
 
         let heading = NSTextField(labelWithString: "Enable Polarize")
-        heading.font = .preferredFont(forTextStyle: .title1, options: [:])
+        // Semibold, at the Dynamic Type size .title1 already picks —
+        // preferredFont(forTextStyle:) alone comes back regular
+        // weight, which read too light for the window's one heading.
+        heading.font = .systemFont(
+            ofSize: NSFont.preferredFont(forTextStyle: .title1, options: [:]).pointSize,
+            weight: .semibold
+        )
         heading.alignment = .center
         stack.addArrangedSubview(heading)
 
@@ -137,7 +143,7 @@ final class ChecklistWindow: NSWindow {
         icon.setAccessibilityLabel(item.title)
         if resolvedIcon.isSymbol {
             icon.contentTintColor = .controlAccentColor
-            icon.symbolConfiguration = .init(pointSize: 22, weight: .regular)
+            icon.symbolConfiguration = .init(pointSize: 32, weight: .regular)
         } else {
             icon.imageScaling = .scaleProportionallyUpOrDown
         }
@@ -180,12 +186,12 @@ final class ChecklistWindow: NSWindow {
         card.addSubview(button)
 
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
+            icon.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
             icon.centerYAnchor.constraint(equalTo: card.centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 28),
-            icon.heightAnchor.constraint(equalToConstant: 28),
+            icon.widthAnchor.constraint(equalToConstant: 44),
+            icon.heightAnchor.constraint(equalToConstant: 44),
 
-            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 14),
             title.topAnchor.constraint(equalTo: card.topAnchor, constant: 12),
             title.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -12),
 
@@ -194,7 +200,7 @@ final class ChecklistWindow: NSWindow {
             detail.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -12),
             detail.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -12),
 
-            button.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
+            button.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
             button.centerYAnchor.constraint(equalTo: card.centerYAnchor),
         ])
         return card
