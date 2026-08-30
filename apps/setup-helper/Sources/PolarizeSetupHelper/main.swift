@@ -262,37 +262,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Builds the success view: the same translucent rounded card the
-    /// guide view uses, holding only `SuccessPlan.message` — a fact
-    /// the parent process reported, never anything the helper checked
+    /// Builds the success view. It is the same rounded material card
+    /// the guide view uses. It holds only `SuccessPlan.message`, a
+    /// fact the parent process reported. The helper never checks this
     /// for itself.
     @MainActor
     private static func makeSuccessView() -> NSView {
-        let backing = NSVisualEffectView()
-        backing.translatesAutoresizingMaskIntoConstraints = false
-        backing.material = .hudWindow
-        backing.state = .active
-        backing.wantsLayer = true
-        backing.layer?.cornerRadius = 14
-        backing.layer?.masksToBounds = true
-
         let text = NSTextField(wrappingLabelWithString: SuccessPlan.message)
         text.translatesAutoresizingMaskIntoConstraints = false
-        text.font = .systemFont(ofSize: 13)
+        text.font = .preferredFont(forTextStyle: .body, options: [:])
 
-        let container = NSView()
-        container.addSubview(backing)
-        container.addSubview(text)
+        let content = NSView()
+        content.addSubview(text)
         NSLayoutConstraint.activate([
-            backing.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            backing.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            backing.topAnchor.constraint(equalTo: container.topAnchor),
-            backing.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            text.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            text.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
-            text.topAnchor.constraint(equalTo: container.topAnchor, constant: 20),
+            text.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            text.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+            text.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
+            text.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -20),
         ])
-        return container
+        return wrapInMaterial(content: content, cornerRadius: 14)
+    }
+
+    /// Backs `content` with the panel's rounded translucent card. It
+    /// calls the shared `MaterialBackground.wrap`, also used by
+    /// `ChecklistWindow`. See that file for the Liquid Glass
+    /// availability branch itself.
+    @MainActor
+    private static func wrapInMaterial(content: NSView, cornerRadius: CGFloat) -> NSView {
+        MaterialBackground.wrap(content: content, cornerRadius: cornerRadius, material: .hudWindow)
     }
 
     // MARK: - The floating guide panel
@@ -337,42 +334,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         onPreviousTapped: (() -> Void)?,
         onNextTapped: (() -> Void)?
     ) -> NSView {
-        let backing = NSVisualEffectView()
-        backing.translatesAutoresizingMaskIntoConstraints = false
-        backing.material = .hudWindow
-        backing.state = .active
-        backing.wantsLayer = true
-        backing.layer?.cornerRadius = 14
-        backing.layer?.masksToBounds = true
+        let content = NSView()
 
-        let container = NSView()
-        container.addSubview(backing)
-        NSLayoutConstraint.activate([
-            backing.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            backing.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            backing.topAnchor.constraint(equalTo: container.topAnchor),
-            backing.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-        ])
-
-        var topAnchor = container.topAnchor
+        var topAnchor = content.topAnchor
         var topConstant: CGFloat = 20
         if let onBackTapped {
             let back = BackButton(onTapped: onBackTapped)
             back.translatesAutoresizingMaskIntoConstraints = false
-            container.addSubview(back)
+            content.addSubview(back)
             NSLayoutConstraint.activate([
-                back.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-                back.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+                back.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+                back.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
             ])
 
             if let progress {
                 let progressLabel = NSTextField(labelWithString: progress.text)
                 progressLabel.translatesAutoresizingMaskIntoConstraints = false
-                progressLabel.font = .systemFont(ofSize: 11)
+                progressLabel.font = .preferredFont(forTextStyle: .caption1, options: [:])
                 progressLabel.textColor = .secondaryLabelColor
-                container.addSubview(progressLabel)
+                content.addSubview(progressLabel)
                 NSLayoutConstraint.activate([
-                    progressLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+                    progressLabel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
                     progressLabel.centerYAnchor.constraint(equalTo: back.centerYAnchor),
                 ])
             }
@@ -383,24 +365,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let text = NSTextField(wrappingLabelWithString: message(for: outcome, hasDragPayload: dragPayload != nil))
         text.translatesAutoresizingMaskIntoConstraints = false
-        text.font = .systemFont(ofSize: 13)
-        container.addSubview(text)
+        text.font = .preferredFont(forTextStyle: .body, options: [:])
+        content.addSubview(text)
         NSLayoutConstraint.activate([
-            text.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            text.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
+            text.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            text.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
             text.topAnchor.constraint(equalTo: topAnchor, constant: topConstant),
         ])
 
         var lastAnchor = text.bottomAnchor
         var lastConstant: CGFloat = 16
+        var dragView: AppIconDragView?
 
         if let dragPayload, let bundlePath {
-            let dragView = AppIconDragView(payload: dragPayload, bundlePath: bundlePath)
-            dragView.onDragStateChange = onDragStateChange
-            dragView.translatesAutoresizingMaskIntoConstraints = false
-            container.addSubview(dragView)
+            let view = AppIconDragView(payload: dragPayload, bundlePath: bundlePath)
+            view.onDragStateChange = onDragStateChange
+            view.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(view)
             NSLayoutConstraint.activate([
-                dragView.topAnchor.constraint(equalTo: lastAnchor, constant: lastConstant),
+                view.topAnchor.constraint(equalTo: lastAnchor, constant: lastConstant),
                 // Explicit leading/trailing (not just centerX) so
                 // Auto Layout can actually resolve dragView's width.
                 // Without these, its width is ambiguous and resolves
@@ -412,11 +395,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // live: this is why the icon rendered but was
                 // completely unclickable, even with the `hitTest`
                 // override on `AppIconDragView` itself.
-                dragView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-                dragView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
+                view.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+                view.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
             ])
-            lastAnchor = dragView.bottomAnchor
+            lastAnchor = view.bottomAnchor
             lastConstant = 12
+            dragView = view
         }
 
         if onPreviousTapped != nil || onNextTapped != nil {
@@ -426,24 +410,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             navRow.translatesAutoresizingMaskIntoConstraints = false
 
             if let onPreviousTapped {
-                navRow.addArrangedSubview(NavButton(title: "‹ Previous", onTapped: onPreviousTapped))
+                navRow.addArrangedSubview(
+                    NavButton(title: "Previous", symbolName: "chevron.left", leading: true, onTapped: onPreviousTapped)
+                )
             }
             if let onNextTapped {
-                navRow.addArrangedSubview(NavButton(title: "Next ›", onTapped: onNextTapped))
+                let nextButton = NavButton(
+                    title: "Next", symbolName: "chevron.right", leading: false, onTapped: onNextTapped
+                )
+                // Hidden until the user has actually attempted the
+                // current step's drag. This was added after a live
+                // report: Next let the user skip ahead before even
+                // trying the drag. Automation's guide has no drag view.
+                // There is nothing to gate on there, so Next stays
+                // visible from the start in that case.
+                if dragView != nil {
+                    nextButton.isHidden = true
+                    dragView?.onDragCompleted = { [weak nextButton] in
+                        nextButton?.isHidden = false
+                    }
+                }
+                navRow.addArrangedSubview(nextButton)
             }
 
-            container.addSubview(navRow)
+            content.addSubview(navRow)
             NSLayoutConstraint.activate([
                 navRow.topAnchor.constraint(equalTo: lastAnchor, constant: lastConstant),
-                navRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-                navRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
-                navRow.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -16),
+                navRow.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+                navRow.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+                navRow.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -16),
             ])
         } else {
-            lastAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -20).isActive = true
+            lastAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -20).isActive = true
         }
 
-        return container
+        return wrapInMaterial(content: content, cornerRadius: 14)
     }
 
     private static func message(for outcome: LaunchOutcome, hasDragPayload: Bool) -> String {
@@ -477,23 +478,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// A small "‹ Back" affordance in the guide panel's top-left corner,
-/// modeled on the reference design's own back chevron — returns to
-/// `ChecklistWindow` without waiting for this permission to be
-/// granted first.
+/// A small "Back" affordance in the guide panel's top-left corner.
+/// It is modeled on the reference design's own back chevron. It
+/// returns to `ChecklistWindow`, without waiting for this permission
+/// to be granted first. It uses a real SF Symbol (`chevron.left`),
+/// not a Unicode `‹` glyph, matching HIG's own back-button convention.
 private final class BackButton: NSButton {
     private let onTapped: () -> Void
 
     init(onTapped: @escaping () -> Void) {
         self.onTapped = onTapped
         super.init(frame: .zero)
-        title = "‹ Back"
+        title = "Back"
+        image = NSImage(systemSymbolName: "chevron.left", accessibilityDescription: nil)
+        imagePosition = .imageLeading
+        symbolConfiguration = .init(pointSize: 10, weight: .medium)
         bezelStyle = .recessed
         isBordered = false
-        font = .systemFont(ofSize: 11)
+        font = .preferredFont(forTextStyle: .caption1, options: [:])
         contentTintColor = .secondaryLabelColor
         target = self
         action = #selector(tapped)
+        setAccessibilityLabel("Back")
     }
 
     @available(*, unavailable)
@@ -519,20 +525,26 @@ struct GuideProgress {
     }
 }
 
-/// A small "‹ Previous" / "Next ›" button in the guide panel's nav
-/// row, added after a live report that the only way to move between
+/// A small "Previous" / "Next" button in the guide panel's nav row.
+/// It was added after a live report: the only way to move between
 /// permissions was detouring back through the checklist each time.
+/// Each carries a real SF Symbol chevron (`chevron.left` or
+/// `chevron.right`), not a Unicode `‹`/`›` glyph, matching HIG.
 private final class NavButton: NSButton {
     private let onTapped: () -> Void
 
-    init(title: String, onTapped: @escaping () -> Void) {
+    init(title: String, symbolName: String, leading: Bool, onTapped: @escaping () -> Void) {
         self.onTapped = onTapped
         super.init(frame: .zero)
         self.title = title
+        image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
+        imagePosition = leading ? .imageLeading : .imageTrailing
+        symbolConfiguration = .init(pointSize: 11, weight: .regular)
         bezelStyle = .rounded
-        font = .systemFont(ofSize: 11)
+        font = .preferredFont(forTextStyle: .caption1, options: [:])
         target = self
         action = #selector(tapped)
+        setAccessibilityLabel(title)
     }
 
     @available(*, unavailable)

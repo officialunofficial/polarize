@@ -7,6 +7,7 @@ final class ChecklistItemTests: XCTestCase {
         let item = PermissionChecklist.item(for: .accessibility)
         XCTAssertEqual(item.permission, .accessibility)
         XCTAssertEqual(item.title, "Accessibility")
+        XCTAssertEqual(item.graphicIconUTI, "com.apple.graphic-icon.accessibility")
         XCTAssertEqual(item.symbolName, "accessibility")
         XCTAssertFalse(item.detail.isEmpty)
     }
@@ -15,18 +16,22 @@ final class ChecklistItemTests: XCTestCase {
         let item = PermissionChecklist.item(for: .screenRecording)
         XCTAssertEqual(item.permission, .screenRecording)
         XCTAssertEqual(item.title, "Screen Recording")
-        XCTAssertEqual(item.symbolName, "camera.viewfinder")
+        XCTAssertEqual(item.graphicIconUTI, "com.apple.graphic-icon.screen-recording")
+        XCTAssertEqual(item.symbolName, "record.circle.fill")
     }
 
     func testAutomationItemNamesItsTarget() {
         let item = PermissionChecklist.item(for: .automation(target: "Finder"))
         XCTAssertEqual(item.title, "Automation (Finder)")
+        XCTAssertEqual(item.graphicIconUTI, "com.apple.graphic-icon.automation")
+        XCTAssertEqual(item.symbolName, "gearshape.2.fill")
         XCTAssertTrue(item.detail.contains("Finder"))
     }
 
     func testUnknownItemUsesTheRawValueAsATitle() {
         let item = PermissionChecklist.item(for: .unknown("mystery"))
         XCTAssertEqual(item.title, "mystery")
+        XCTAssertNil(item.graphicIconUTI)
     }
 
     func testItemsPreservesOrderAndCount() {

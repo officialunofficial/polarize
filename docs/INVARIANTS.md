@@ -2286,6 +2286,81 @@ has and has not yet had verified.
   contributor's build fails opaquely with no Swift toolchain installed
   instead of a clear, actionable error.
 
+The four invariants below (PINV-67 through PINV-70) came out of a live
+HIG and Liquid Glass polish pass on the helper, after this document's
+own PLZ-3 chain. All four were confirmed live, on a real macOS 27
+session, not merely reasoned about.
+
+### PINV-67: `NSButton.bezelStyle` never uses `.glass`, anywhere in the helper
+
+- Always: no button in `apps/setup-helper` sets `bezelStyle = .glass`.
+  `ChecklistWindow`'s Allow button uses `.rounded` unconditionally, on
+  every macOS version.
+- Because: `.glass` exists in the macOS 27 SDK, but rendered as plain
+  text with no button chrome at all, confirmed live. Several Apple
+  Developer Forums threads (FB20272917, FB20517174) confirm the same
+  unreliability this OS cycle. Apple's own "Implementing Liquid Glass
+  Design" AppKit guidance never sets this property either. Its real
+  pattern composites a separate `NSGlassEffectView` behind a plain
+  button's content instead.
+- If violated: a button silently loses all its chrome — no visible
+  border, no fill, nothing to mark it as clickable — while still
+  functioning normally when clicked, which makes the regression easy
+  to miss in code review and hard for a user to notice as a bug rather
+  than a design choice.
+
+### PINV-68: a transparent title bar always pairs with `.fullSizeContentView`
+
+- Always: any window in the helper that sets
+  `titlebarAppearsTransparent = true` also carries
+  `.fullSizeContentView` in its `styleMask`. `ChecklistWindow` does
+  both together, never one without the other.
+- Because: without `.fullSizeContentView`, the content view stops
+  below the title bar's real height. That strip then goes unfilled by
+  whatever material backs the content below it.
+- If violated: a visible, disconnected gap sits above the traffic
+  lights — confirmed live, caught in a screenshot, matching this exact
+  cause before the fix landed.
+
+### PINV-69: the guide screen's Next button stays hidden until a drag has been attempted, whenever a drag is offered
+
+- Always: `AppIconDragView.onDragCompleted` fires once, when a drag
+  session ends, whether or not the drop actually granted anything.
+  `main.swift`'s guide screen wires this to reveal its Next button,
+  starting hidden, only once that fires. A guide screen with no drag
+  view at all (Automation's) never hides Next in the first place —
+  there is nothing to gate on there.
+- Because: a live report found the Next button let the user skip past
+  a permission's guide screen before even trying the one gesture that
+  screen exists to teach. Gating on a completed attempt, not a
+  successful one, keeps this rule inside PINV-56's boundary: the
+  helper still never reads or claims to know the real grant state,
+  only whether the user tried the drag.
+- If violated: a user can tab through every permission's guide screen
+  via Next without ever attempting the drag on any of them, defeating
+  the guide screen's own purpose.
+
+### PINV-70: a checklist row's icon always tries System Settings' own artwork before an SF Symbol
+
+- Always: `PermissionIcon.resolve(for:)` looks up
+  `PermissionChecklistItem.graphicIconUTI` via `UTType(_:)` and
+  `NSWorkspace.shared.icon(for:)` first. It falls back to
+  `symbolName`, an SF Symbol, only when that UTI is `nil` or not
+  declared on the running macOS version. The real System Settings
+  artwork is never tinted; the SF Symbol fallback always is, via
+  `PermissionIcon.Resolved.isSymbol`.
+- Because: the `com.apple.graphic-icon.*` UTIs are the same public API
+  System Settings' own Security & Privacy extension uses, confirmed
+  live to render pixel-identical icons for Accessibility, Screen
+  Recording, and Automation. No private framework and no path into
+  System Settings' own app bundle are involved. The UTIs themselves are
+  undocumented system identifiers, though, so a future macOS could stop
+  declaring one.
+- If violated: a checklist row either shows the wrong artwork (a
+  full-color system icon incorrectly tinted, muddying its real colors)
+  or silently loses the exact-match icon entirely on some future macOS
+  version, with no fallback path forward.
+
 ## Enforcement checklist
 
 - **PINV-1** — fully covered by automated `cargo test -p polarize-core`
@@ -3681,3 +3756,30 @@ it never needed that heuristic.
   `build-notarized-app.yml`, and the notarization submission that
   depends on it, still need a real tagged release to verify end to
   end — the same gap PINV-54 already names for the outer bundle.
+
+- **PINV-67** — not automatable: no test can assert what a real
+  `NSButton`'s rendered chrome looks like on screen. Enforced instead
+  by a live check on a real macOS 27 session: `grep -rn
+  "bezelStyle = .glass"` across `apps/setup-helper/Sources` returns no
+  matches, and the Allow button's `.rounded` bezel was confirmed to
+  render its normal chrome.
+- **PINV-68** — not automatable, same reason: window-chrome rendering
+  needs a real macOS session to observe. Confirmed live on macOS 27: a
+  screenshot before the fix showed the gap this invariant names; a
+  screenshot after showed the traffic lights sitting directly on the
+  vibrant content, with no gap.
+- **PINV-69** — the gating logic is enforced at the logic level: a
+  fresh XCTest-free check is impractical here since it lives entirely
+  in `apps/setup-helper/Sources/PolarizeSetupHelper` (the AppKit-glue
+  target, which carries no test target — see the module's own
+  Testing-harness note). Confirmed live instead: a fresh guide screen
+  with a drag view shows no Next button until a drag is attempted, and
+  Automation's guide screen (no drag view) shows Next immediately.
+- **PINV-70** — the fallback-selection logic (`graphicIconUTI` present
+  and declared → real icon; otherwise → SF Symbol) is a pure
+  conditional inside `PermissionIcon.resolve(for:)`, but that function
+  itself calls real `UTType`/`NSWorkspace` APIs and lives in the
+  AppKit-glue target, so it has no automated test today — a real GAP,
+  not merely a live-session limitation. Confirmed live instead: all
+  three resolved icons matched System Settings' own artwork exactly,
+  on a real macOS 27 session.

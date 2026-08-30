@@ -56,10 +56,11 @@ final class AppIconDragView: NSView, NSDraggingSource {
 
         imageView.translatesAutoresizingMaskIntoConstraints = false
         imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.setAccessibilityLabel("Polarize app icon, drag to grant access")
 
         let caption = NSTextField(labelWithString: "Drag to the list below")
         caption.translatesAutoresizingMaskIntoConstraints = false
-        caption.font = .systemFont(ofSize: 11)
+        caption.font = .preferredFont(forTextStyle: .caption1, options: [:])
         caption.textColor = .secondaryLabelColor
         caption.alignment = .center
 
@@ -118,6 +119,15 @@ final class AppIconDragView: NSView, NSDraggingSource {
     /// `hitTest`/`acceptsFirstMouse` fixes above landed.
     var onDragStateChange: ((Bool) -> Void)?
 
+    /// Fired once, when a drag session ends. This means attempted, not
+    /// necessarily successful: this view has no way to know whether
+    /// the drop actually granted anything. Only the parent process's
+    /// own TCC re-read can know that (PINV-56). `main.swift` uses this
+    /// to reveal the guide screen's Next button, only once the user
+    /// has actually tried the drag. That stops them skipping ahead
+    /// before attempting the current step.
+    var onDragCompleted: (() -> Void)?
+
     private var mouseDownPoint: NSPoint?
     private var hasBegunDragging = false
 
@@ -169,6 +179,7 @@ final class AppIconDragView: NSView, NSDraggingSource {
 
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
         onDragStateChange?(false)
+        onDragCompleted?()
         mouseDownPoint = nil
         hasBegunDragging = false
     }

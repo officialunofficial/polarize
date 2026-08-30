@@ -22,18 +22,46 @@ final class ChecklistWindow: NSWindow {
         let width: CGFloat = 460
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: width, height: 200),
-            styleMask: [.titled, .closable],
+            // `.fullSizeContentView` is required alongside
+            // `titlebarAppearsTransparent`. This is confirmed live, and
+            // matches Apple's own documented pattern. Without it, the
+            // content view stops below the title bar's real height.
+            // That strip then goes unfilled by the vibrancy backing
+            // below. A screenshot caught exactly this: a disconnected
+            // white gap, sitting above the traffic lights, before this
+            // fix landed.
+            styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
+        // A real `title` still exists, for VoiceOver, Mission Control,
+        // and the Window menu. `titleVisibility` only hides its
+        // on-screen text. The big "Enable Polarize" heading inside the
+        // content is the window's one visible header now. It no longer
+        // repeats the same words in the title bar too.
         title = "Enable Polarize"
+        titleVisibility = .hidden
+        titlebarAppearsTransparent = true
         isReleasedWhenClosed = false
         level = .normal
+        isOpaque = false
+        backgroundColor = .clear
+        // With no title bar strip left to drag by, the window needs
+        // this explicitly or it becomes undraggable entirely.
+        isMovableByWindowBackground = true
 
         let content = Self.makeContent(items: items, appIcon: appIcon, width: width) { [weak self] permission in
             self?.onAllowTapped?(permission)
         }
-        contentView = content
+        // `cornerRadius: 0`. Unlike the floating guide panel, this is a
+        // real window. It already has native rounded corners from the
+        // window server. Rounding the material too would double up.
+        contentView = MaterialBackground.wrap(
+            content: content,
+            cornerRadius: 0,
+            material: .contentBackground,
+            blendingMode: .behindWindow
+        )
         let fittingHeight = content.fittingSize.height
         setContentSize(NSSize(width: width, height: max(240, fittingHeight)))
         center()
@@ -60,6 +88,7 @@ final class ChecklistWindow: NSWindow {
         if let appIcon {
             let iconView = NSImageView(image: appIcon)
             iconView.translatesAutoresizingMaskIntoConstraints = false
+            iconView.setAccessibilityLabel("Polarize")
             NSLayoutConstraint.activate([
                 iconView.widthAnchor.constraint(equalToConstant: 64),
                 iconView.heightAnchor.constraint(equalToConstant: 64),
@@ -68,14 +97,14 @@ final class ChecklistWindow: NSWindow {
         }
 
         let heading = NSTextField(labelWithString: "Enable Polarize")
-        heading.font = .boldSystemFont(ofSize: 20)
+        heading.font = .preferredFont(forTextStyle: .title1, options: [:])
         heading.alignment = .center
         stack.addArrangedSubview(heading)
 
         let subheading = NSTextField(
             wrappingLabelWithString: "Polarize needs these permissions to automate apps on your Mac."
         )
-        subheading.font = .systemFont(ofSize: 12)
+        subheading.font = .preferredFont(forTextStyle: .subheadline, options: [:])
         subheading.textColor = .secondaryLabelColor
         subheading.alignment = .center
         subheading.preferredMaxLayoutWidth = width - 56
@@ -102,27 +131,45 @@ final class ChecklistWindow: NSWindow {
         card.layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.15).cgColor
         card.layer?.cornerRadius = 12
 
-        let icon = NSImageView(
-            image: NSImage(systemSymbolName: item.symbolName, accessibilityDescription: item.title)
-                ?? NSImage()
-        )
+        let resolvedIcon = PermissionIcon.resolve(for: item)
+        let icon = NSImageView(image: resolvedIcon.image)
         icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.contentTintColor = .controlAccentColor
-        icon.symbolConfiguration = .init(pointSize: 22, weight: .regular)
+        icon.setAccessibilityLabel(item.title)
+        if resolvedIcon.isSymbol {
+            icon.contentTintColor = .controlAccentColor
+            icon.symbolConfiguration = .init(pointSize: 22, weight: .regular)
+        } else {
+            icon.imageScaling = .scaleProportionallyUpOrDown
+        }
 
         let title = NSTextField(labelWithString: item.title)
-        title.font = .boldSystemFont(ofSize: 13)
+        title.font = .preferredFont(forTextStyle: .headline, options: [:])
         title.translatesAutoresizingMaskIntoConstraints = false
 
         let detail = NSTextField(wrappingLabelWithString: item.detail)
-        detail.font = .systemFont(ofSize: 11)
+        detail.font = .preferredFont(forTextStyle: .caption1, options: [:])
         detail.textColor = .secondaryLabelColor
         detail.translatesAutoresizingMaskIntoConstraints = false
 
         let button = AllowButton(permission: item.permission, onAllow: onAllow)
         button.title = "Allow"
+        // Deliberately `.rounded`, not `.glass`. `NSBezelStyleGlass`
+        // exists in the macOS 27 SDK. Confirmed live, though: it
+        // rendered as plain text, with no button chrome at all.
+        // Multiple Apple Developer Forums threads (FB20272917,
+        // FB20517174) confirm `.glass` bezel-style rendering is
+        // genuinely unreliable this OS cycle. More importantly,
+        // Apple's own "Implementing Liquid Glass Design" AppKit
+        // guidance never sets this property at all. Its documented
+        // pattern composites a separate `NSGlassEffectView` behind a
+        // plain `.rounded`, `isBordered = false` button's content
+        // instead — not a bezel-style flag. That composition is real
+        // added complexity, for one button. It stays a future
+        // nice-to-have, not adopted now, since the simpler flag is
+        // what turned out unreliable.
         button.bezelStyle = .rounded
         button.translatesAutoresizingMaskIntoConstraints = false
+        button.setAccessibilityLabel("Allow \(item.title)")
         if isPrimary {
             button.keyEquivalent = "\r"
         }
