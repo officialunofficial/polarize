@@ -51,7 +51,7 @@ final class AppIconDragView: NSView, NSDraggingSource {
 
     init(payload: DragPayload, bundlePath: String) {
         self.payload = payload
-        imageView = NSImageView(image: Self.icon(forBundleAt: bundlePath))
+        imageView = NSImageView(image: HelperIconLoader.icon(forBundleAt: bundlePath))
         super.init(frame: .zero)
 
         imageView.translatesAutoresizingMaskIntoConstraints = false
@@ -79,26 +79,6 @@ final class AppIconDragView: NSView, NSDraggingSource {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
-    }
-
-    /// Loads a bundle's own icon straight from `Contents/Resources/`
-    /// instead of `NSWorkspace.shared.icon(forFile:)`. Confirmed live:
-    /// `NSWorkspace` returns a generic, low-resolution icon for a
-    /// freshly built, non-installed bundle LaunchServices has not yet
-    /// indexed — exactly the case for a bundle the helper was just
-    /// handed via `--for-bundle`. Falls back to `NSWorkspace` only if
-    /// the direct load fails (see `IconResolutionTests` in
-    /// `SetupHelperCore` for the pure path-joining logic this wraps).
-    private static func icon(forBundleAt bundlePath: String) -> NSImage {
-        if let bundle = Bundle(path: bundlePath),
-            let iconFileName = bundle.infoDictionary?["CFBundleIconFile"] as? String
-        {
-            let iconPath = BundleIconResolver.iconPath(bundlePath: bundlePath, iconFileName: iconFileName)
-            if let direct = NSImage(contentsOfFile: iconPath) {
-                return direct
-            }
-        }
-        return NSWorkspace.shared.icon(forFile: bundlePath)
     }
 
     /// Claims every point inside this view's own bounds for itself,

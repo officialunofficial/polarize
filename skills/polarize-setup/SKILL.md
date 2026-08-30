@@ -43,20 +43,31 @@ polarize needs three macOS permissions, granted once per Mac: Accessibility, Scr
    not locate the guided permission helper" and falls straight to step
    4 below.
 
-3. If the guided setup helper opens, it floats a small window over
-   System Settings and does not steal focus:
+3. If the guided setup helper opens, it first shows a checklist
+   window: one row per still-needed permission, each with an "Allow"
+   button. This window behaves like an ordinary app window — it has
+   normal title-bar controls and can be closed directly.
+
+   Tapping Allow for a permission opens its guide screen. This screen
+   floats a small window over System Settings and does not steal
+   focus:
    - For Accessibility or Screen Recording, it opens the matching
      Privacy & Security pane. Enable Polarize in the list, or drag the
      Polarize icon the window shows into that list.
    - For Automation, it opens the Automation pane. No drag applies
      here. Find Polarize's row for the named app and allow it.
 
+   The guide screen shows its position in the list ("2 of 3") and
+   offers Previous and Next buttons, so multiple permissions can be
+   handled one after another without returning to the checklist each
+   time. A "‹ Back" button returns to the checklist directly.
+
    The terminal command polls for the grant on its own. Once every
-   requested permission is granted, the helper shows a short success
-   message, then closes by itself. Closing the helper window early is
-   safe — the command still finishes and prints what is still missing.
-   After 5 minutes with no grant, the command times out and prints the
-   same report.
+   requested permission is granted, the current screen shows a short
+   success message, then the whole helper closes by itself. Closing
+   any helper window early is safe — the command still finishes and
+   prints what is still missing. After 5 minutes with no grant, the
+   command times out and prints the same report.
 
 4. Fall back to the manual path when the helper does not open, opens
    an unrecognized System Settings pane, closes early, or times out.

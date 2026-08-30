@@ -223,10 +223,13 @@ npm/shell-installer/Homebrew channels.
 
 `just bundle-app` also builds and signs a second, nested bundle:
 `Polarize.app/Contents/Resources/PolarizeSetupHelper.app`, a small
-Swift AppKit app built with SwiftPM (`apps/setup-helper`). It ships as
-a skeleton today — one plain window, no permission logic yet. PLZ-3
-fills that in later; see PINV-56 through PINV-65 in
-[`docs/INVARIANTS.md`](INVARIANTS.md).
+Swift AppKit app built with SwiftPM (`apps/setup-helper`). It guides a
+user through a denied Accessibility, Screen Recording, or Automation
+grant: a checklist screen lists every needed permission, and tapping
+one opens its System Settings pane with a drag target (Accessibility,
+Screen Recording) or a wait-only guide (Automation). See PINV-56
+through PINV-66 in [`docs/INVARIANTS.md`](INVARIANTS.md) for the full
+design and what is, and is not, verified on a real macOS session.
 
 Three rules govern how it signs, all covered by PINV-66:
 

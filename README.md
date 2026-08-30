@@ -174,10 +174,12 @@ polarize --request-permissions
 ```
 
 If a permission stays not granted after its system dialog, the
-command is designed to open a guided setup helper window — but only
-when `polarize` runs from inside `Polarize.app` (the notarized release
-asset). A bare-binary install, such as the npm or shell-installer path
-above, falls back to a printed report of what is still missing.
+command is designed to open a guided setup helper. The helper walks
+through each still-needed permission and opens the exact System
+Settings pane for it. This only works when `polarize` runs from
+inside `Polarize.app`, the notarized release asset. A bare-binary
+install, such as the npm or shell-installer path above, falls back to
+a printed report of what is still missing.
 
 See [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md) for exactly which
 permission each tool needs, and when `polarize` does and doesn't

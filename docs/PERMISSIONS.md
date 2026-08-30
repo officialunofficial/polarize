@@ -54,14 +54,23 @@ above first, for every permission, before it may launch anything else
 real denial, or an inconclusive Automation preflight — is a permission
 the command hands to a guided setup helper window.
 
+The helper first shows a checklist: one row per still-needed
+permission, each with its own "Allow" button. This checklist window
+behaves like an ordinary window — it has nothing to coexist with on
+screen yet. Tapping Allow opens that permission's own guide screen, a
+small window that floats over System Settings without stealing focus.
+It shows its position in the list and offers Previous/Next buttons, so
+several permissions can be handled in a row without returning to the
+checklist each time.
+
 The helper never reads or reports Polarize's own grant state, and it
-never requests a TCC grant of its own (PINV-56, PINV-58). It only
-opens the matching System Settings pane, floats a small window over
-it, and waits. For Accessibility or Screen Recording, the window also
-offers a drag target: dragging Polarize's own icon into the System
-Settings list is an alternative to the list's own checkbox (PINV-59).
-Automation gets no drag, because its grant is per target app, not a
-list entry a bundle can be dropped into (PINV-60).
+never requests a TCC grant of its own (PINV-56, PINV-58). A guide
+screen only opens the matching System Settings pane and waits. For
+Accessibility or Screen Recording, it also offers a drag target:
+dragging Polarize's own icon into the System Settings list is an
+alternative to the list's own checkbox (PINV-59). Automation gets no
+drag, because its grant is per target app, not a list entry a bundle
+can be dropped into (PINV-60).
 
 The parent `polarize --request-permissions` process, never the helper,
 decides when the command finishes. It polls the same non-prompting

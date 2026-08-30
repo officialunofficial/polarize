@@ -81,7 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         neededPermissions = needed
         let items = PermissionChecklist.items(for: needed)
-        let appIcon = bundlePath.map(Self.icon(forBundleAt:))
+        let appIcon = bundlePath.map(HelperIconLoader.icon(forBundleAt:))
         let checklist = ChecklistWindow(items: items, appIcon: appIcon)
         checklist.onAllowTapped = { [weak self] permission in
             guard let index = self?.neededPermissions.firstIndex(of: permission) else { return }
@@ -143,6 +143,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showGuidePanel(outcome: LaunchOutcome, index: Int?) {
+        // Explicitly tear down any existing guide panel/tracker before
+        // creating new ones. Confirmed live as a real bug: stepping
+        // through Previous/Next called this repeatedly, each time
+        // just overwriting `self.panel`/`self.tracker` and trusting
+        // ARC to deallocate (and thereby close) the old ones — which
+        // did not reliably happen, leaving old panels stacked on
+        // screen and their still-running timers pointlessly polling.
+        // It also meant `handleAllGrantedSignal` only ever closed the
+        // *current* panel, leaving any leaked older one open forever
+        // even once every permission was granted.
+        tracker?.stop()
+        tracker = nil
+        panel?.orderOut(nil)
+        panel = nil
+
         let dragPayload = DragSourcePlanner.payload(outcome: outcome, bundlePath: bundlePath)
         let panel = Self.makePanel()
         var progress: GuideProgress?
@@ -302,29 +317,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isReleasedWhenClosed = false
         return panel
-    }
-
-    /// Loads a bundle's own icon straight from `Contents/Resources/`
-    /// instead of `NSWorkspace.shared.icon(forFile:)`. Confirmed live:
-    /// `NSWorkspace` returns a generic, low-resolution icon for a
-    /// freshly built, non-installed bundle LaunchServices has not yet
-    /// indexed — exactly the case for a bundle the helper was just
-    /// handed via `--for-bundle`. Falls back to `NSWorkspace` only if
-    /// the direct load fails. Shared with `DragSourceView.swift`'s own
-    /// copy of this same logic — kept duplicated rather than factored
-    /// out, since each call site needs it for a different-sized use
-    /// (the checklist's header icon vs. the drag view's icon) and the
-    /// duplication is three lines, not a growing concern.
-    private static func icon(forBundleAt bundlePath: String) -> NSImage {
-        if let bundle = Bundle(path: bundlePath),
-            let iconFileName = bundle.infoDictionary?["CFBundleIconFile"] as? String
-        {
-            let iconPath = BundleIconResolver.iconPath(bundlePath: bundlePath, iconFileName: iconFileName)
-            if let direct = NSImage(contentsOfFile: iconPath) {
-                return direct
-            }
-        }
-        return NSWorkspace.shared.icon(forFile: bundlePath)
     }
 
     /// Builds the guide panel's text and, when relevant, its drag row,

@@ -50,22 +50,32 @@ identity matters" for that side of it, and its "Release PR authentication"
 section for the separate secrets `.github/workflows/release-plz.yml`
 needs before it can run.
 
-## `polarize-macos` needs manual verification
+## `polarize-macos` and `apps/setup-helper` need manual verification
 
-`cargo test --workspace` exercises `polarize-core` in full, plus the
-pure sub-logic `polarize-macos` factors out of its native calls —
-app-identity matching, modifier/keycode/click-sequence mapping, and
-pixel-to-fraction frame clamping (see `docs/INVARIANTS.md`). It does
-**not** exercise any real native call. No CI runner can grant Screen
-Recording or Accessibility TCC permission, or verify pixel/AX content,
-headlessly. `polarize-macos`'s real native-API behavior has no
-automated coverage anywhere, in this repo or in CI.
+`cargo test --workspace` exercises `polarize-core` in full. It also
+exercises the pure sub-logic `polarize-macos` factors out of its
+native calls: app-identity matching, modifier/keycode/click-sequence
+mapping, and pixel-to-fraction frame clamping. See `docs/INVARIANTS.md`
+for the full list. `cargo test` does **not** exercise any real native
+call. `swift test --package-path apps/setup-helper` exercises the same
+kind of pure sub-logic in the Swift setup helper: argv parsing,
+permission-to-pane mapping, drag-payload construction, and window-frame
+math. It does **not** exercise any real AppKit call either.
 
-If your PR touches `polarize-macos`, verify it manually on a real macOS
-session with Screen Recording and Accessibility permissions granted:
-run the affected tool end to end (via the built `polarize` binary or an
-MCP client) and confirm the real behavior, not just that it compiles.
-Describe what you verified, and how, in the PR description.
+No CI runner can grant Screen Recording or Accessibility TCC
+permission headlessly. No CI runner can verify pixel or AX content, or
+open a real window, headlessly either. `polarize-macos`'s real
+native-API behavior has no automated coverage anywhere, in this repo
+or in CI. The same is true for `apps/setup-helper`'s real AppKit
+behavior: real drag-and-drop, real window tracking, real focus
+behavior, and the real TCC grant a drag or a native dialog produces.
+
+If your PR touches `polarize-macos` or `apps/setup-helper`, verify it
+manually on a real macOS session with Screen Recording and
+Accessibility permissions granted. Run the affected tool, or the
+affected helper screen, end to end. Confirm the real behavior, not
+just that it compiles. Describe what you verified, and how, in the PR
+description.
 
 See [`docs/INVARIANTS.md`](docs/INVARIANTS.md) for the invariants this
 project holds itself to, including which ones can and cannot be checked
