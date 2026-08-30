@@ -174,9 +174,17 @@ final class ChecklistWindow: NSWindow {
         // nice-to-have, not adopted now, since the simpler flag is
         // what turned out unreliable.
         button.bezelStyle = .rounded
+        // `.large` is AppKit's biggest built-in control size — it
+        // alone was not big enough per live feedback. An explicit
+        // font size and a minimum height push it further; NSButton's
+        // rounded bezel auto-sizes its width around the title's own
+        // font, so a bigger font is what actually makes the whole
+        // button bigger, not just its text.
         button.controlSize = .large
+        button.font = .systemFont(ofSize: 16, weight: .semibold)
         button.translatesAutoresizingMaskIntoConstraints = false
         button.setAccessibilityLabel("Allow \(item.title)")
+        button.heightAnchor.constraint(greaterThanOrEqualToConstant: 38).isActive = true
         if isPrimary {
             button.keyEquivalent = "\r"
         }
