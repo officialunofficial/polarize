@@ -3392,6 +3392,35 @@ entry below). PINV-62 is now enforced at the logic level too, by
 now enforced at the logic level too, by `DragPayloadTests` (see their
 own entries below).
 
+**Post-PLZ-3 redesign (2026-08-30, live-driven).** Running the actual
+built helper on a real Mac surfaced both real bugs (see PINV-59's and
+PINV-62's entries below for the six found and fixed that session) and
+a real UX gap the original PLZ-3 design did not anticipate: a single
+floating panel, opened directly at launch, gave no overview when more
+than one permission was missing and no way to move between them except
+by chance. The helper now shows two screens in sequence, modeled on
+OpenAI Codex's own onboarding: `ChecklistWindow` — a real titled,
+closable, keyable window (unlike everything else here, it has nothing
+to coexist with on screen yet, so it behaves like an ordinary window)
+listing every needed permission with an "Allow" button — opens first;
+tapping Allow for one permission opens its pane and shows the same
+non-activating `FloatingHelperPanel` PLZ-6 through PLZ-10 already
+built, now carrying a "N of M" progress line and Previous/Next buttons
+that step through the rest of the list directly, plus a "‹ Back"
+button back to the checklist. None of PINV-56 through PINV-65 changed
+in substance — the same pure `SetupHelperCore` mapping, drag, tracking,
+and lifecycle logic now just gets invoked once per permission instead
+of once for the whole set at launch. One new, real bug from this
+change: `applicationShouldTerminateAfterLastWindowClosed` returning
+`true` — correct for PLZ-4's single-panel design — quietly terminated
+the whole helper the moment `ChecklistWindow` was ordered out to show
+the guide panel, because `FloatingHelperPanel` does not count toward
+AppKit's own "last window closed" bookkeeping the way an ordinary
+window does. Fixed by returning `false` unconditionally: this process
+already terminates itself explicitly on every path (the success
+signal's `exit(0)`, or the parent's own `SIGKILL` per PINV-61/64), so
+it never needed that heuristic.
+
 - **PINV-56** — enforced by
   `polarize_core::bootstrap::tests::helper_args_never_carries_a_status_or_result_field`
   (`crates/polarize-core/src/bootstrap.rs`): `NeededPermission` and

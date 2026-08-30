@@ -1,9 +1,14 @@
 // `PolarizeSetupHelper` reads the `--needs` argv `polarize
 // --request-permissions` builds (`polarize_core::bootstrap::helper_args`)
-// and opens the matching System Settings pane. All parsing, pane
-// mapping, and fallback selection live in `SetupHelperCore`, a plain
-// module with no AppKit import — this file only wires that pure logic
-// to `NSWorkspace.shared.open` and renders the window text.
+// and shows two screens in turn, modeled on OpenAI Codex's own
+// "Enable Codex Computer Use" onboarding: first `ChecklistWindow`, a
+// real titled/closable window listing every still-needed permission
+// with an "Allow" button; then, per permission the user taps Allow
+// on, the non-activating `FloatingHelperPanel` that opens the matching
+// System Settings pane and floats over it. All parsing, pane mapping,
+// and fallback selection live in `SetupHelperCore`, a plain module
+// with no AppKit import — this file only wires that pure logic to
+// `NSWorkspace.shared.open` and renders the two windows.
 //
 // This file calls exactly one TCC-adjacent API, and it is
 // non-prompting: `WindowTracker` reads the helper's own
@@ -17,19 +22,22 @@
 //
 // PLZ-9 adds one more reaction, and it is not a permission read either:
 // a `SIGUSR1` from the parent process means "my own read says every
-// requested permission is now granted," and the helper swaps in a
-// success view, then quits — see `SuccessPlan` in `SetupHelperCore` for
-// the pure text/timing and `polarize_core::bootstrap::wait_for_grants_or_close`
-// for the parent side that sends the signal and still `SIGKILL`s the
-// helper afterward regardless (PINV-64 stays exactly as strict as it
-// was).
+// requested permission is now granted," and the helper shows a
+// success panel, then quits — see `SuccessPlan` in `SetupHelperCore`
+// for the pure text/timing and
+// `polarize_core::bootstrap::wait_for_grants_or_close` for the parent
+// side that sends the signal and still `SIGKILL`s the helper
+// afterward regardless (PINV-64 stays exactly as strict as it was).
 import AppKit
 import Dispatch
 import SetupHelperCore
 
 /// A borderless, non-activating panel that floats over System
 /// Settings without ever taking key/main status or focus away from
-/// whatever the user is doing.
+/// whatever the user is doing. Used only for the per-permission guide
+/// screen and the final success screen — never for `ChecklistWindow`,
+/// which has nothing to coexist with on screen and behaves like an
+/// ordinary window instead.
 final class FloatingHelperPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
@@ -37,33 +45,131 @@ final class FloatingHelperPanel: NSPanel {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var checklistWindow: ChecklistWindow?
     private var panel: FloatingHelperPanel?
     private var tracker: WindowTracker?
     private var successSignalSource: DispatchSourceSignal?
+    private var bundlePath: String?
+
+    /// The full, fixed set of permissions this launch was asked to
+    /// help with, in argv order — set once, at launch, never mutated.
+    /// Lets the guide screen show "N of M" and step through the list
+    /// with Next/Previous, without needing to know whether any of them
+    /// has actually been granted yet (only the parent process can know
+    /// that — see `handleAllGrantedSignal`'s own doc comment).
+    private var neededPermissions: [NeededPermission] = []
 
     /// Taller than PLZ-7's plain-text 200pt to fit the drag row
-    /// (PLZ-8) beneath the instruction text, when one shows.
-    private static let panelSize = NSSize(width: 420, height: 280)
+    /// (PLZ-8) and the back button (this follow-up) beneath the
+    /// instruction text, when they show.
+    private static let panelSize = NSSize(width: 420, height: 300)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let arguments = Array(CommandLine.arguments.dropFirst())
         let needed = ArgvParser.parse(arguments)
-        let bundlePath = ArgvParser.bundlePath(arguments)
-        let outcome = LaunchPlanner.run(needed: needed) { urlString in
+        bundlePath = ArgvParser.bundlePath(arguments)
+        installSuccessSignalHandler()
+
+        guard !needed.isEmpty else {
+            // Nothing named — an unknown-only or empty argv. Falls
+            // back to the same guide panel a real permission would
+            // get, worded for the empty case, so the window is never
+            // blank (PINV-63's spirit) even here.
+            showGuidePanel(outcome: .nothingToOpen, index: nil)
+            return
+        }
+
+        neededPermissions = needed
+        let items = PermissionChecklist.items(for: needed)
+        let appIcon = bundlePath.map(Self.icon(forBundleAt:))
+        let checklist = ChecklistWindow(items: items, appIcon: appIcon)
+        checklist.onAllowTapped = { [weak self] permission in
+            guard let index = self?.neededPermissions.firstIndex(of: permission) else { return }
+            self?.beginGuide(at: index)
+        }
+        checklist.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        checklistWindow = checklist
+    }
+
+    /// Always `false`. Confirmed live as a real bug: `FloatingHelperPanel`
+    /// (a borderless, non-activating `NSPanel`) does not count toward
+    /// AppKit's own "last window closed" bookkeeping the way an
+    /// ordinary `NSWindow` does. Ordering `ChecklistWindow` out to show
+    /// the guide panel — a deliberate, successful transition, not a
+    /// user-initiated close — was being read as "the last window just
+    /// closed," terminating the whole app moments after the guide
+    /// panel had already appeared. This process no longer needs that
+    /// heuristic at all: it always terminates itself explicitly, either
+    /// via the success signal's `exit(0)` (PLZ-9) or the parent's own
+    /// `SIGKILL` after its deadline (PINV-61, PINV-64) — never by
+    /// inferring intent from which windows happen to be visible.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    // MARK: - Screen transitions
+
+    /// Starts the guide screen for `neededPermissions[index]`: opens
+    /// its System Settings pane and shows the floating panel over it,
+    /// with a drag target for Accessibility/Screen Recording, a "N of
+    /// M" progress line, and Previous/Next buttons that step through
+    /// the rest of the list directly — added after a live report that
+    /// the only way back to the list (Back, to the checklist) left no
+    /// clue what to do next for a second or third permission.
+    private func beginGuide(at index: Int) {
+        checklistWindow?.orderOut(nil)
+        let permission = neededPermissions[index]
+        let outcome = LaunchPlanner.run(needed: [permission]) { urlString in
             guard let url = URL(string: urlString) else { return false }
             return NSWorkspace.shared.open(url)
         }
-        let dragPayload = DragSourcePlanner.payload(outcome: outcome, bundlePath: bundlePath)
+        showGuidePanel(outcome: outcome, index: index)
+    }
 
+    /// Returns from the guide screen to the checklist, e.g. after the
+    /// user taps the back button — lets them jump to any still-needed
+    /// permission directly, rather than only stepping through them in
+    /// order (the parent only signals once *all* are granted — see
+    /// `handleAllGrantedSignal` — so this is the only way to revisit
+    /// the list mid-flow).
+    private func returnToChecklist() {
+        tracker?.stop()
+        tracker = nil
+        panel?.orderOut(nil)
+        panel = nil
+        checklistWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func showGuidePanel(outcome: LaunchOutcome, index: Int?) {
+        let dragPayload = DragSourcePlanner.payload(outcome: outcome, bundlePath: bundlePath)
         let panel = Self.makePanel()
-        panel.contentView = Self.makeMessageView(
-            needed: needed,
+        var progress: GuideProgress?
+        var onBackTapped: (() -> Void)?
+        var onPreviousTapped: (() -> Void)?
+        var onNextTapped: (() -> Void)?
+        if let index {
+            progress = GuideProgress(index: index, count: neededPermissions.count)
+            onBackTapped = { [weak self] in self?.returnToChecklist() }
+            if index > 0 {
+                onPreviousTapped = { [weak self] in self?.beginGuide(at: index - 1) }
+            }
+            if index < neededPermissions.count - 1 {
+                onNextTapped = { [weak self] in self?.beginGuide(at: index + 1) }
+            }
+        }
+        panel.contentView = Self.makeGuideView(
             outcome: outcome,
             dragPayload: dragPayload,
             bundlePath: bundlePath,
+            progress: progress,
             onDragStateChange: { [weak self] isDragging in
                 self?.setDraggingPassthrough(isDragging)
-            }
+            },
+            onBackTapped: onBackTapped,
+            onPreviousTapped: onPreviousTapped,
+            onNextTapped: onNextTapped
         )
         panel.orderFront(nil)
         self.panel = panel
@@ -71,8 +177,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let tracker = WindowTracker(panel: panel, panelSize: Self.panelSize)
         tracker.start()
         self.tracker = tracker
-
-        installSuccessSignalHandler()
     }
 
     /// Switches the panel into a drag-friendly mode: mouse-transparent
@@ -94,15 +198,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
-    }
+    // MARK: - PLZ-9's success signal
 
-    /// Reacts to the parent's `SIGUSR1` (PLZ-9): swaps in the success
-    /// view, then quits after `SuccessPlan.quitDelaySeconds`. Calls no
-    /// permission API — it only reacts to a signal the parent process
-    /// sent, after the parent's own non-prompting re-read already
-    /// decided every requested permission is granted (PINV-56, PINV-58).
+    /// Reacts to the parent's `SIGUSR1` (PLZ-9): closes whichever
+    /// screen is showing and shows a small success panel, then quits
+    /// after `SuccessPlan.quitDelaySeconds`. Calls no permission API —
+    /// it only reacts to a signal the parent process sent, after the
+    /// parent's own non-prompting re-read already decided every
+    /// requested permission is granted (PINV-56, PINV-58).
     ///
     /// `signal(SIGUSR1, SIG_IGN)` first, so the raw POSIX signal never
     /// terminates the process before `DispatchSource` gets a chance to
@@ -129,16 +232,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func handleAllGrantedSignal() {
         tracker?.stop()
-        panel?.contentView = Self.makeSuccessView()
+        tracker = nil
+        checklistWindow?.orderOut(nil)
+        checklistWindow = nil
+
+        let successPanel = panel ?? Self.makePanel()
+        successPanel.contentView = Self.makeSuccessView()
+        successPanel.center()
+        successPanel.orderFront(nil)
+        panel = successPanel
+
         DispatchQueue.main.asyncAfter(deadline: .now() + SuccessPlan.quitDelaySeconds) {
             exit(0)
         }
     }
 
     /// Builds the success view: the same translucent rounded card the
-    /// instruction view uses, holding only `SuccessPlan.message` — a
-    /// fact the parent process reported, never anything the helper
-    /// checked for itself.
+    /// guide view uses, holding only `SuccessPlan.message` — a fact
+    /// the parent process reported, never anything the helper checked
+    /// for itself.
     @MainActor
     private static func makeSuccessView() -> NSView {
         let backing = NSVisualEffectView()
@@ -168,6 +280,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return container
     }
 
+    // MARK: - The floating guide panel
+
     /// Builds the floating panel itself: borderless, never key/main,
     /// floating above ordinary windows, visible on every Space
     /// (including a full-screen one), and never opaque — the content
@@ -190,20 +304,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return panel
     }
 
-    /// Builds the panel's text on a translucent rounded backing, so it
-    /// is never blank (PINV-63) and stays readable on a fully
-    /// transparent window, even on the fallback path. Adds the drag
-    /// row (PLZ-8) beneath the text only when `dragPayload` is
-    /// non-nil — `DragSourcePlanner` already restricts that to an
-    /// Accessibility or Screen Recording launch with a known bundle
-    /// path (PINV-59, PINV-60).
+    /// Loads a bundle's own icon straight from `Contents/Resources/`
+    /// instead of `NSWorkspace.shared.icon(forFile:)`. Confirmed live:
+    /// `NSWorkspace` returns a generic, low-resolution icon for a
+    /// freshly built, non-installed bundle LaunchServices has not yet
+    /// indexed — exactly the case for a bundle the helper was just
+    /// handed via `--for-bundle`. Falls back to `NSWorkspace` only if
+    /// the direct load fails. Shared with `DragSourceView.swift`'s own
+    /// copy of this same logic — kept duplicated rather than factored
+    /// out, since each call site needs it for a different-sized use
+    /// (the checklist's header icon vs. the drag view's icon) and the
+    /// duplication is three lines, not a growing concern.
+    private static func icon(forBundleAt bundlePath: String) -> NSImage {
+        if let bundle = Bundle(path: bundlePath),
+            let iconFileName = bundle.infoDictionary?["CFBundleIconFile"] as? String
+        {
+            let iconPath = BundleIconResolver.iconPath(bundlePath: bundlePath, iconFileName: iconFileName)
+            if let direct = NSImage(contentsOfFile: iconPath) {
+                return direct
+            }
+        }
+        return NSWorkspace.shared.icon(forFile: bundlePath)
+    }
+
+    /// Builds the guide panel's text and, when relevant, its drag row,
+    /// back button, progress line, and Previous/Next navigation, on a
+    /// translucent rounded backing — never blank (PINV-63), and
+    /// readable on the fully transparent panel even on the fallback
+    /// path. `progress` is `nil` only for the argv-empty/unknown-only
+    /// launch, which has no checklist screen or sibling permissions to
+    /// navigate between.
     @MainActor
-    private static func makeMessageView(
-        needed: [NeededPermission],
+    private static func makeGuideView(
         outcome: LaunchOutcome,
         dragPayload: DragPayload?,
         bundlePath: String?,
-        onDragStateChange: @escaping (Bool) -> Void
+        progress: GuideProgress?,
+        onDragStateChange: @escaping (Bool) -> Void,
+        onBackTapped: (() -> Void)?,
+        onPreviousTapped: (() -> Void)?,
+        onNextTapped: (() -> Void)?
     ) -> NSView {
         let backing = NSVisualEffectView()
         backing.translatesAutoresizingMaskIntoConstraints = false
@@ -213,24 +353,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         backing.layer?.cornerRadius = 14
         backing.layer?.masksToBounds = true
 
-        let text = NSTextField(
-            wrappingLabelWithString: message(for: needed, outcome: outcome, hasDragPayload: dragPayload != nil)
-        )
-        text.translatesAutoresizingMaskIntoConstraints = false
-        text.font = .systemFont(ofSize: 13)
-
         let container = NSView()
         container.addSubview(backing)
-        container.addSubview(text)
         NSLayoutConstraint.activate([
             backing.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             backing.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             backing.topAnchor.constraint(equalTo: container.topAnchor),
             backing.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+
+        var topAnchor = container.topAnchor
+        var topConstant: CGFloat = 20
+        if let onBackTapped {
+            let back = BackButton(onTapped: onBackTapped)
+            back.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(back)
+            NSLayoutConstraint.activate([
+                back.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+                back.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+            ])
+
+            if let progress {
+                let progressLabel = NSTextField(labelWithString: progress.text)
+                progressLabel.translatesAutoresizingMaskIntoConstraints = false
+                progressLabel.font = .systemFont(ofSize: 11)
+                progressLabel.textColor = .secondaryLabelColor
+                container.addSubview(progressLabel)
+                NSLayoutConstraint.activate([
+                    progressLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+                    progressLabel.centerYAnchor.constraint(equalTo: back.centerYAnchor),
+                ])
+            }
+
+            topAnchor = back.bottomAnchor
+            topConstant = 8
+        }
+
+        let text = NSTextField(wrappingLabelWithString: message(for: outcome, hasDragPayload: dragPayload != nil))
+        text.translatesAutoresizingMaskIntoConstraints = false
+        text.font = .systemFont(ofSize: 13)
+        container.addSubview(text)
+        NSLayoutConstraint.activate([
             text.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
             text.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
-            text.topAnchor.constraint(equalTo: container.topAnchor, constant: 20),
+            text.topAnchor.constraint(equalTo: topAnchor, constant: topConstant),
         ])
+
+        var lastAnchor = text.bottomAnchor
+        var lastConstant: CGFloat = 16
 
         if let dragPayload, let bundlePath {
             let dragView = AppIconDragView(payload: dragPayload, bundlePath: bundlePath)
@@ -238,7 +408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             dragView.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview(dragView)
             NSLayoutConstraint.activate([
-                dragView.topAnchor.constraint(equalTo: text.bottomAnchor, constant: 16),
+                dragView.topAnchor.constraint(equalTo: lastAnchor, constant: lastConstant),
                 // Explicit leading/trailing (not just centerX) so
                 // Auto Layout can actually resolve dragView's width.
                 // Without these, its width is ambiguous and resolves
@@ -252,34 +422,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // override on `AppIconDragView` itself.
                 dragView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
                 dragView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
-                dragView.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -20),
             ])
+            lastAnchor = dragView.bottomAnchor
+            lastConstant = 12
         }
+
+        if onPreviousTapped != nil || onNextTapped != nil {
+            let navRow = NSStackView()
+            navRow.orientation = .horizontal
+            navRow.distribution = .equalSpacing
+            navRow.translatesAutoresizingMaskIntoConstraints = false
+
+            if let onPreviousTapped {
+                navRow.addArrangedSubview(NavButton(title: "‹ Previous", onTapped: onPreviousTapped))
+            }
+            if let onNextTapped {
+                navRow.addArrangedSubview(NavButton(title: "Next ›", onTapped: onNextTapped))
+            }
+
+            container.addSubview(navRow)
+            NSLayoutConstraint.activate([
+                navRow.topAnchor.constraint(equalTo: lastAnchor, constant: lastConstant),
+                navRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+                navRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
+                navRow.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -16),
+            ])
+        } else {
+            lastAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -20).isActive = true
+        }
+
         return container
     }
 
-    private static func message(
-        for needed: [NeededPermission],
-        outcome: LaunchOutcome,
-        hasDragPayload: Bool
-    ) -> String {
-        let names = needed.map(name(for:)).joined(separator: ", ")
-        let needLine = names.isEmpty ? "Polarize needs no further permission." : "Polarize still needs: \(names)."
+    private static func message(for outcome: LaunchOutcome, hasDragPayload: Bool) -> String {
         let dragHint = hasDragPayload ? " Or drag this icon into the list." : ""
-
         switch outcome {
         case .openedPane(let permission, _):
-            return "\(needLine)\n\(enableInstruction(for: permission)).\(dragHint)"
+            return "\(enableInstruction(for: permission)).\(dragHint)"
         case .fellBackToInstructions(let permission, _):
             return
-                "\(needLine)\nSystem Settings could not open the exact pane. "
+                "System Settings could not open the exact pane. "
                 + "Open System Settings > Privacy & Security, find the matching entry, and \(enableInstruction(for: permission, capitalized: false))."
                 + dragHint
         case .nothingToOpen:
-            // PLZ-10: Automation always maps to a pane now, so this
-            // path only ever fires for an empty set or a set naming
-            // only `.unknown` permissions — never for Automation.
-            return "\(needLine)\nOpen System Settings > Privacy & Security and enable Polarize."
+            return "Open System Settings > Privacy & Security and enable Polarize."
         }
     }
 
@@ -297,27 +483,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "\(verb) System Settings > Privacy & Security and enable Polarize"
         }
     }
+}
 
-    private static func name(for permission: NeededPermission) -> String {
-        switch permission {
-        case .accessibility:
-            return "Accessibility"
-        case .screenRecording:
-            return "Screen Recording"
-        case .automation(let target):
-            return "Automation (\(target))"
-        case .unknown(let value):
-            return value
-        }
+/// A small "‹ Back" affordance in the guide panel's top-left corner,
+/// modeled on the reference design's own back chevron — returns to
+/// `ChecklistWindow` without waiting for this permission to be
+/// granted first.
+private final class BackButton: NSButton {
+    private let onTapped: () -> Void
+
+    init(onTapped: @escaping () -> Void) {
+        self.onTapped = onTapped
+        super.init(frame: .zero)
+        title = "‹ Back"
+        bezelStyle = .recessed
+        isBordered = false
+        font = .systemFont(ofSize: 11)
+        contentTintColor = .secondaryLabelColor
+        target = self
+        action = #selector(tapped)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    @objc private func tapped() {
+        onTapped()
+    }
+}
+
+/// Where the guide screen sits within the full list of needed
+/// permissions — purely for display ("N of M"); carries no notion of
+/// which ones are actually granted, since only the parent process
+/// knows that.
+struct GuideProgress {
+    let index: Int
+    let count: Int
+
+    var text: String {
+        "\(index + 1) of \(count)"
+    }
+}
+
+/// A small "‹ Previous" / "Next ›" button in the guide panel's nav
+/// row, added after a live report that the only way to move between
+/// permissions was detouring back through the checklist each time.
+private final class NavButton: NSButton {
+    private let onTapped: () -> Void
+
+    init(title: String, onTapped: @escaping () -> Void) {
+        self.onTapped = onTapped
+        super.init(frame: .zero)
+        self.title = title
+        bezelStyle = .rounded
+        font = .systemFont(ofSize: 11)
+        target = self
+        action = #selector(tapped)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    @objc private func tapped() {
+        onTapped()
     }
 }
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
-// `.accessory`, with no `activate(ignoringOtherApps:)` call: the
-// helper never gets a Dock icon, never becomes the frontmost app, and
-// never steals focus or key/main status from whatever the user is
-// doing — see the header comment and PINV-62.
+// `.accessory`: the helper never gets a Dock icon or appears in the
+// Cmd-Tab switcher. `ChecklistWindow` still activates the app
+// (`NSApp.activate(ignoringOtherApps:)`) when it's the window on
+// screen, since it has nothing to coexist with yet — only the guide
+// panel and success panel stay strictly non-activating, per PINV-62.
 app.setActivationPolicy(.accessory)
 app.run()
