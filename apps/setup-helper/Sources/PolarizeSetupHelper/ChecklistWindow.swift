@@ -179,6 +179,11 @@ final class ChecklistWindow: NSWindow {
         // original default. Reverting to no explicit controlSize,
         // font, or height fixes both: back to a plain, correctly
         // centered button.
+        // `.controlAccentColor`, not a hardcoded blue — it renders as
+        // blue for the vast majority of users (macOS's own default),
+        // but still respects anyone who picked a different System
+        // Settings accent color, per HIG.
+        button.bezelColor = .controlAccentColor
         button.translatesAutoresizingMaskIntoConstraints = false
         button.setAccessibilityLabel("Allow \(item.title)")
         if isPrimary {
@@ -198,8 +203,17 @@ final class ChecklistWindow: NSWindow {
             // already added as a subview above, or it silently fails
             // to place the glass behind it.
             button.isBordered = false
+            // With no bezel of its own, the button's default title
+            // color is too dark to read against a tinted glass
+            // background — set explicitly, to match the white title
+            // the bezel path already gets for free from AppKit.
+            button.attributedTitle = NSAttributedString(
+                string: "Allow",
+                attributes: [.foregroundColor: NSColor.white]
+            )
             let glass = NSGlassEffectView()
             glass.cornerRadius = 8
+            glass.tintColor = .controlAccentColor
             glass.translatesAutoresizingMaskIntoConstraints = false
             card.addSubview(glass, positioned: .below, relativeTo: button)
             NSLayoutConstraint.activate([
