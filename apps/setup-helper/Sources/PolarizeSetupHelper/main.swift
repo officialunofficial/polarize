@@ -80,7 +80,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         neededPermissions = needed
-        let items = PermissionChecklist.items(for: needed)
+        let osMajorVersion = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+        let items = PermissionChecklist.items(for: needed, osMajorVersion: osMajorVersion)
         let appIcon = bundlePath.map(HelperIconLoader.icon(forBundleAt:))
         let checklist = ChecklistWindow(items: items, appIcon: appIcon)
         checklist.onAllowTapped = { [weak self] permission in

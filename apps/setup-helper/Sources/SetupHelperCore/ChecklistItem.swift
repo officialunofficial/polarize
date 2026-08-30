@@ -39,30 +39,36 @@ public struct PermissionChecklistItem: Equatable {
 }
 
 public enum PermissionChecklist {
-    /// One row per `needed` permission, in the same order.
-    public static func items(for needed: [NeededPermission]) -> [PermissionChecklistItem] {
-        needed.map(item(for:))
+    /// One row per `needed` permission, in the same order. `osMajorVersion`
+    /// picks each row's title from the real pane name on that OS — never
+    /// hardcoded to one version, and never read from live system state
+    /// inside this pure module. The caller supplies it, normally from
+    /// `ProcessInfo.processInfo.operatingSystemVersion.majorVersion`, so
+    /// a test can supply any version instead.
+    public static func items(for needed: [NeededPermission], osMajorVersion: Int) -> [PermissionChecklistItem] {
+        needed.map { item(for: $0, osMajorVersion: osMajorVersion) }
     }
 
-    public static func item(for permission: NeededPermission) -> PermissionChecklistItem {
+    public static func item(for permission: NeededPermission, osMajorVersion: Int) -> PermissionChecklistItem {
         switch permission {
         case .accessibility:
+            // Confirmed live: renamed "Device Control and Data Access"
+            // starting macOS 27 beta 5. Still "Accessibility" on every
+            // version before that, including macOS 26 Tahoe.
             return PermissionChecklistItem(
                 permission: permission,
-                title: "Accessibility",
-                detail:
-                    "Allows Polarize to see and control other apps' interfaces. "
-                    + "Some macOS versions call this pane \"Device Control and Data Access\" instead.",
+                title: osMajorVersion >= 27 ? "Device Control and Data Access" : "Accessibility",
+                detail: "Allows Polarize to see and control other apps' interfaces.",
                 graphicIconUTI: "com.apple.graphic-icon.accessibility",
                 symbolName: "accessibility"
             )
         case .screenRecording:
+            // Renamed "Screen & System Audio Recording" starting macOS
+            // 15 Sequoia (support.apple.com/guide/mac-help/mchld6aa7d23).
             return PermissionChecklistItem(
                 permission: permission,
-                title: "Screen Recording",
-                detail:
-                    "Polarize captures screenshots to see what is on screen. "
-                    + "Some macOS versions call this pane \"Screen & System Audio Recording\" instead.",
+                title: osMajorVersion >= 15 ? "Screen & System Audio Recording" : "Screen Recording",
+                detail: "Polarize captures screenshots to see what is on screen.",
                 graphicIconUTI: "com.apple.graphic-icon.screen-recording",
                 symbolName: "record.circle.fill"
             )
