@@ -159,20 +159,15 @@ final class ChecklistWindow: NSWindow {
 
         let button = AllowButton(permission: item.permission, onAllow: onAllow)
         button.title = "Allow"
-        // Deliberately `.rounded`, not `.glass`. `NSBezelStyleGlass`
-        // exists in the macOS 27 SDK. Confirmed live, though: it
-        // rendered as plain text, with no button chrome at all.
-        // Multiple Apple Developer Forums threads (FB20272917,
-        // FB20517174) confirm `.glass` bezel-style rendering is
-        // genuinely unreliable this OS cycle. More importantly,
-        // Apple's own "Implementing Liquid Glass Design" AppKit
-        // guidance never sets this property at all. Its documented
-        // pattern composites a separate `NSGlassEffectView` behind a
-        // plain `.rounded`, `isBordered = false` button's content
-        // instead — not a bezel-style flag. That composition is real
-        // added complexity, for one button. It stays a future
-        // nice-to-have, not adopted now, since the simpler flag is
-        // what turned out unreliable.
+        // Deliberately not `.glass` bezel style. `NSBezelStyleGlass`
+        // exists in the macOS 27 SDK, but confirmed live: it rendered
+        // as plain text, with no button chrome at all. Multiple Apple
+        // Developer Forums threads (FB20272917, FB20517174) confirm
+        // that specific flag is genuinely unreliable this OS cycle.
+        // Below, instead, is Apple's own documented composition
+        // pattern for a real Liquid Glass button: a separate
+        // `NSGlassEffectView`, sized to match, sitting behind a plain
+        // borderless button — not the bezel-style flag.
         button.bezelStyle = .rounded
         // Back to plain default sizing. `.large` controlSize, then an
         // explicit 16pt font plus a forced 38pt minimum height, were
@@ -194,6 +189,26 @@ final class ChecklistWindow: NSWindow {
         card.addSubview(title)
         card.addSubview(detail)
         card.addSubview(button)
+        if #available(macOS 26.0, *) {
+            // Apple's own real Liquid Glass button pattern: the glass
+            // view sits behind the button, sized to exactly match it,
+            // and the button itself draws no bezel of its own — only
+            // the glass supplies the visible pill shape underneath.
+            // `positioned: .below, relativeTo: button` needs `button`
+            // already added as a subview above, or it silently fails
+            // to place the glass behind it.
+            button.isBordered = false
+            let glass = NSGlassEffectView()
+            glass.cornerRadius = 8
+            glass.translatesAutoresizingMaskIntoConstraints = false
+            card.addSubview(glass, positioned: .below, relativeTo: button)
+            NSLayoutConstraint.activate([
+                glass.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: -10),
+                glass.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: 10),
+                glass.topAnchor.constraint(equalTo: button.topAnchor, constant: -4),
+                glass.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: 4),
+            ])
+        }
 
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
